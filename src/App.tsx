@@ -14,11 +14,15 @@ import { ExportModal } from './components/ExportModal';
 import { EdgePanel } from './components/EdgePanel';
 import { NavigationDrawer } from './components/NavigationDrawer';
 import { MenuDrawer } from './components/MenuDrawer';
+import { PasscodeLockModal } from './components/PasscodeLockModal';
 import { ProjectState, GeminiKeyInfo, TranscriptSegment } from './types';
 import { loadGeminiKeys } from './utils/geminiPool';
 import { ArrowRight, ArrowLeft, Sparkles, CheckCircle2, Video, Download } from 'lucide-react';
 
 export default function App() {
+  const [isUnlocked, setIsUnlocked] = useState<boolean>(
+    () => sessionStorage.getItem('site_unlocked') === 'true'
+  );
   const [currentStep, setCurrentStep] = useState<number>(1);
   const [isKeysModalOpen, setIsKeysModalOpen] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
@@ -165,6 +169,10 @@ export default function App() {
   const handleSeekTo = (time: number) => {
     setProject((prev) => ({ ...prev, currentTime: time }));
   };
+
+  if (!isUnlocked) {
+    return <PasscodeLockModal onUnlock={() => setIsUnlocked(true)} />;
+  }
 
   return (
     <div className={`min-h-screen ${themeClasses[theme]} flex flex-col font-sans relative overflow-x-hidden transition-colors duration-500`}>

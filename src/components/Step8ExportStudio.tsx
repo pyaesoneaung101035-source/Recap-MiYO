@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { ProjectState, TranscriptSegment } from '../types';
 import { getInterpolatedKeyframe, getFilterCss, generateSrtContent, downloadFile } from '../utils/alightMotionRenderer';
+import { drawCanvasSubtitle } from '../utils/canvasSubtitleRenderer';
 import { VideoPlayerView } from './VideoPlayerView';
 
 interface ExportHistoryItem {
@@ -237,23 +238,14 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
     const isLandscape = canvasWidth > canvasHeight;
     const scaleFactor = Math.max(1.0, canvasHeight / (isLandscape ? 540 : 960));
 
-    // Apply Blur Boxes over the rendered video scene with exact coordinate fidelity
+    // Apply Blur Boxes over the rendered video scene with exact coordinate fidelity (1:1 with preview)
     if (project.blurBoxes && project.blurBoxes.length > 0) {
       for (const box of project.blurBoxes) {
-        // If the video is letterboxed (e.g. vertical video in 16:9 canvas), position blur box on the video frame
-        let bx = (box.x / 100) * canvasWidth;
-        let by = (box.y / 100) * canvasHeight;
-        let bw = (box.width / 100) * canvasWidth;
-        let bh = (box.height / 100) * canvasHeight;
-
-        if (drawW < canvasWidth - 10) {
-          bx = videoLeft + (box.x / 100) * drawW;
-          bw = (box.width / 100) * drawW;
-        }
-        if (drawH < canvasHeight - 10) {
-          by = videoTop + (box.y / 100) * drawH;
-          bh = (box.height / 100) * drawH;
-        }
+        // Direct 1:1 mapping from percentage coordinates to export canvas resolution
+        const bx = (box.x / 100) * canvasWidth;
+        const by = (box.y / 100) * canvasHeight;
+        const bw = (box.width / 100) * canvasWidth;
+        const bh = (box.height / 100) * canvasHeight;
 
         if (bw > 0 && bh > 0) {
           ctx.save();
@@ -288,71 +280,15 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
     if (activeSeg) {
       const text = activeSeg.myanmarTranslation || activeSeg.originalText;
       if (text) {
-        const settings = project.subtitleSettings;
-        ctx.save();
-
-        const baseFontSize = Math.max(26, settings.fontSize || 28);
-        const targetFontSize = Math.round(baseFontSize * scaleFactor);
-        const cleanFont = (settings.fontFamily || 'Pyidaungsu').replace(/['"]/g, '').trim();
-
-        // Robust canvas font string without quotes that could break CSS font syntax
-        ctx.font = `bold ${targetFontSize}px "${cleanFont}", "Noto Sans Myanmar", sans-serif`;
-        if (ctx.font.startsWith('10px') || ctx.font.includes('10px sans-serif')) {
-          ctx.font = `bold ${targetFontSize}px sans-serif`;
-        }
-
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-
-        // Proportional Y baseline: if letterboxed, anchor relative to video area
-        let posY = (drawH < canvasHeight - 10) ? (videoTop + drawH * 0.85) : (canvasHeight * 0.86);
-        if (settings.positionY === 'center') posY = (drawH < canvasHeight - 10) ? (videoTop + drawH * 0.50) : (canvasHeight * 0.50);
-        if (settings.positionY === 'top') posY = (drawH < canvasHeight - 10) ? (videoTop + drawH * 0.12) : (canvasHeight * 0.12);
-
-        const textX = canvasWidth / 2 + (settings.offsetX || 0) * scaleFactor;
-        const textY = posY + (settings.offsetY || 0) * scaleFactor;
-
-        const metrics = ctx.measureText(text);
-        const padX = 28 * scaleFactor;
-        const padY = 16 * scaleFactor;
-        const bgWidth = metrics.width + padX;
-        const bgHeight = targetFontSize * 1.35 + padY;
-        const radius = 12 * scaleFactor;
-
-        if (settings.backgroundColor && settings.backgroundColor !== 'transparent') {
-          ctx.fillStyle = settings.backgroundColor;
-          ctx.beginPath();
-          if (ctx.roundRect) {
-            ctx.roundRect(
-              textX - bgWidth / 2,
-              textY - bgHeight / 2,
-              bgWidth,
-              bgHeight,
-              radius
-            );
-          } else {
-            ctx.rect(
-              textX - bgWidth / 2,
-              textY - bgHeight / 2,
-              bgWidth,
-              bgHeight
-            );
-          }
-          ctx.fill();
-        }
-
-        const strokeWidth = Math.max(2.5, (settings.strokeWidth || 3) * scaleFactor);
-        if (strokeWidth > 0) {
-          ctx.strokeStyle = settings.strokeColor || '#000000';
-          ctx.lineWidth = strokeWidth * 2;
-          ctx.lineJoin = 'round';
-          ctx.miterLimit = 2;
-          ctx.strokeText(text, textX, textY);
-        }
-
-        ctx.fillStyle = settings.color || '#ffffff';
-        ctx.fillText(text, textX, textY);
-        ctx.restore();
+        // Draw wrapped multi-line subtitle on canvas (breaks long lines cleanly into 2-3 lines)
+        drawCanvasSubtitle({
+          ctx,
+          text,
+          settings: project.subtitleSettings,
+          canvasWidth,
+          canvasHeight,
+          scaleFactor,
+        });
       }
     }
 

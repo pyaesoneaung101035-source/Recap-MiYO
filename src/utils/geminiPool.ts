@@ -98,9 +98,6 @@ export async function callGeminiWithRotation(
 ): Promise<{ text: string; usedKeyName: string }> {
   let keys = loadGeminiKeys();
 
-  // Rate limiting delay: ensure minimum 1200ms delay between consecutive requests to stay under RPM limit
-  await new Promise((r) => setTimeout(r, 1200));
-
   // Construct parts payload
   const parts: any[] = [];
   if (mediaParts && mediaParts.length > 0) {
@@ -120,7 +117,7 @@ export async function callGeminiWithRotation(
     const serverRes = await fetch('/api/gemini/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, parts, systemInstruction, model: 'gemini-2.5-flash' }),
+      body: JSON.stringify({ prompt, parts, systemInstruction, model }),
     });
 
     if (!serverRes.ok) {
@@ -161,7 +158,7 @@ export async function callGeminiWithRotation(
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           apiKey: keyToSend,
-          model: 'gemini-2.5-flash',
+          model,
           prompt,
           parts,
           systemInstruction,
@@ -186,11 +183,9 @@ export async function callGeminiWithRotation(
       const isInvalid = res.status === 400 && (errText.includes('API_KEY_INVALID') || errText.includes('key not valid') || errText.includes('PROXY_GENERATION_DISABLED'));
 
       if (isQuota) {
-        console.warn(`Key ${keyInfo.name} reached quota limit (429). Pacing with backoff and rotating to next key.`);
+        console.warn(`Key ${keyInfo.name} reached quota limit (429). Rotating to next key.`);
         keyInfo.status = 'quota_exceeded';
         keyInfo.lastError = '429 Quota Exceeded';
-        // Exponential backoff delay on 429 before next attempt
-        await new Promise((r) => setTimeout(r, Math.min(6000, 1500 * attempts)));
       } else if (isInvalid && !isAqKey) {
         console.warn(`Key ${keyInfo.name} is invalid.`);
         keyInfo.status = 'invalid';
@@ -291,43 +286,29 @@ export async function generateTimestampedTranscript(
   customContext = '',
   videoFile?: File | null,
   videoUrl?: string | null,
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string) => void,
+  model = 'gemini-2.5-flash'
 ): Promise<TranscriptSegment[]> {
   const allSegments: TranscriptSegment[] = [];
 
-  // PHASE 1: AUDIO CHUNKING (3-MIN PARTS) & PER-CHUNK TRANSCRIPTION & TRANSLATION
   if (videoFile || videoUrl) {
     try {
-      if (onProgress) {
-        onProgress('🎙️ [အဆင့် ၁: Audio Chunks Extraction] - ၆ မိနစ်/ရှည်လျားသော ဗီဒီယိုဖိုင်ကို ၃ မိနစ်စာစီ (Part 1: 0-3m, Part 2: 3-6m, Part 3: 6-9m...) အလိုအလျောက် ဖြတ်ထုတ်နေပါသည်...');
-      }
+      const totalDuration = durationSeconds || 180;
 
-      const chunks = await extractAudioChunksFromVideo(videoFile || videoUrl!, 180);
-      const totalParts = chunks.length;
+      // Fast single-chunk path if video <= 3 minutes (180s)
+      if (totalDuration <= 180) {
+        if (onProgress) onProgress('🎙️ [အဆင့် ၁: Audio Extraction] - ဗီဒီယို အသံဖိုင်ကို ထုတ်ယူနေပါသည်...');
+        const audioRes = await extractAudioFromVideo(videoFile || videoUrl!, 180);
 
-      for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i];
-        const offsetSec = chunk.startTimeSeconds; // Part 1: 0, Part 2: 180s (+3m), Part 3: 360s (+6m)...
-        const partNum = chunk.partIndex;
+        if (onProgress) onProgress('🎙️ [အဆင့် ၂: Gemini Flash STT] - အသံဖိုင်ကို မြန်မာစကားပြော TTX သို့ ဘာသာပြန်ဆိုနေပါသည်...');
 
-        // Pacing delay between chunk API calls to protect API quota (Rate limit / RPM control)
-        if (i > 0) {
-          await new Promise((r) => setTimeout(r, 2000));
-        }
-
-        const partMsg = `🎙️ [အဆင့် ၁: Part ${partNum}/${totalParts}] (Offset: +${Math.floor(offsetSec / 60)}m / +${offsetSec}s) - Transcribing & Translating speech to Myanmar TTX...`;
-        if (onProgress) onProgress(partMsg);
-
-        const chunkPrompt = `
-YOU ARE PROCESSING CHUNK PART ${partNum} OF ${totalParts} FROM THE VIDEO "${videoTitle}".
-Chunk Offset: ${offsetSec} seconds (${Math.floor(offsetSec / 60)} minutes).
-Chunk Duration: ${chunk.durationSeconds} seconds.
+        const prompt = `
+YOU ARE PROCESSING THE VIDEO "${videoTitle}".
+Duration: ${audioRes.duration} seconds.
 Mode: ${aiMode}.
 Creator Note / Context: ${customContext || 'Natural recap storytelling for Myanmar audience'}.
 
-Listen to this 3-minute audio chunk (Part ${partNum}), accurately transcribe the speech, and translate into natural, direct spoken Burmese dialogue (သဘာဝကျသော လူပြောစကား မြန်မာစကားပြော တိုက်ရိုက်ပြန်ဆိုချက်) with accurate relative timestamps (00:00:00,000 to 00:03:00,000).
-
-IMPORTANT: DO NOT WRITE IN NARRATOR STYLE (narrator ပုံစံဖြင့် လုံးဝမရေးရ). WRITE AS DIRECT CONVERSATIONAL SPEECH / DUBBING DIALOGUE. DO NOT LIST FACTS OR DATA POINTS. USE NATURAL, SPOKEN BURMESE.
+Listen to this audio, accurately transcribe the speech, and translate into natural, direct spoken Burmese dialogue (သဘာဝကျသော လူပြောစကား မြန်မာစကားပြော တိုက်ရိုက်ပြန်ဆိုချက်) with accurate timestamps (00:00:00,000 to end).
 
 Return ONLY a valid JSON array matching this exact format:
 [
@@ -336,80 +317,139 @@ Return ONLY a valid JSON array matching this exact format:
     "start": "00:00:00,000",
     "end": "00:00:03,500",
     "originalText": "spoken English/original sentence",
-    "text": "ဒီနေရာမှာတော့ မင်းသားက..."
+    "text": "ဒီနေရာမှာတော့..."
   }
 ]
-(JSON ONLY, NO MARKDOWN EXPLANATION)
+(JSON ONLY, NO MARKDOWN)
 `;
 
-        // Retry loop per chunk to ensure no part is missed
-        let chunkSuccess = false;
-        let retries = 0;
+        const { text: resText, usedKeyName } = await callGeminiWithRotation(
+          prompt,
+          buildSystemPromptForMode(aiMode),
+          model,
+          [{ mimeType: audioRes.mimeType, data: audioRes.base64Wav }]
+        );
 
-        while (!chunkSuccess && retries < 3) {
-          try {
-            retries++;
-            const { text: chunkResText, usedKeyName } = await callGeminiWithRotation(
-              chunkPrompt,
-              buildSystemPromptForMode(aiMode),
-              'gemini-2.5-flash',
-              [{ mimeType: chunk.mimeType, data: chunk.base64Wav }]
-            );
+        const cleaned = resText.replace(/```json/gi, '').replace(/```/g, '').trim();
+        const parsed = JSON.parse(cleaned);
 
-            const cleanedChunk = chunkResText.replace(/```json/gi, '').replace(/```/g, '').trim();
-            const parsedChunk = JSON.parse(cleanedChunk);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          parsed.forEach((item: any, idx: number) => {
+            const rawStart = String(item.start || item.startTime || '00:00:00,000');
+            const rawEnd = String(item.end || item.endTime || '00:00:03,500');
+            const myanmarText = item.text || item.myanmarTranslation || item.originalText || '';
+            const origText = item.originalText || item.text || '';
 
-            if (Array.isArray(parsedChunk) && parsedChunk.length > 0) {
-              parsedChunk.forEach((item: any, idx: number) => {
-                const rawStartStr = String(item.start !== undefined ? item.start : (item.startTime || '00:00:00,000'));
-                const rawEndStr = String(item.end !== undefined ? item.end : (item.endTime || '00:00:03,500'));
-                const myanmarText = item.text || item.myanmarTranslation || item.originalText || '';
-                const origText = item.originalText || item.text || '';
+            const startSec = parseTimestampToSeconds(rawStart);
+            const endSec = parseTimestampToSeconds(rawEnd);
 
-                const unadjustedStartSec = parseTimestampToSeconds(rawStartStr);
-                const unadjustedEndSec = parseTimestampToSeconds(rawEndStr);
+            allSegments.push({
+              id: `seg_${item.id || idx + 1}_${Date.now()}`,
+              startTime: parseFloat(startSec.toFixed(2)),
+              endTime: parseFloat(endSec.toFixed(2)),
+              originalText: origText,
+              myanmarTranslation: myanmarText,
+              voice: idx % 2 === 0 ? 'Thiha' : 'Nilar',
+            });
+          });
 
-                // ACCURATE OFFSET ADJUSTMENT (Part 1: +0s, Part 2: +180s, Part 3: +360s, Part 4: +540s...)
-                const adjustedStartSec = unadjustedStartSec + offsetSec;
-                const adjustedEndSec = unadjustedEndSec + offsetSec;
+          if (onProgress) onProgress(`🎉 [အောင်မြင်ပါသည်] Segments ${allSegments.length} ခု အပြည့်အစုံ (100%) ထုတ်ယူပြီးပါပြီ (Key: ${usedKeyName})။`);
+          return allSegments;
+        }
+      } else {
+        // Multi-chunk path for longer videos (> 3 minutes)
+        if (onProgress) {
+          onProgress('🎙️ [အဆင့် ၁: Audio Chunks Extraction] - ရှည်လျားသော ဗီဒီယိုဖိုင်ကို ၃ မိနစ်စာစီ ခွဲထုတ်နေပါသည်...');
+        }
 
-                allSegments.push({
-                  id: `p${partNum}_${item.id || idx + 1}_${Date.now()}`,
-                  startTime: parseFloat(adjustedStartSec.toFixed(2)),
-                  endTime: parseFloat(adjustedEndSec.toFixed(2)),
-                  originalText: origText,
-                  myanmarTranslation: myanmarText,
-                  voice: (allSegments.length + idx) % 2 === 0 ? 'Thiha' : 'Nilar',
+        const chunks = await extractAudioChunksFromVideo(videoFile || videoUrl!, 180);
+        const totalParts = chunks.length;
+
+        for (let i = 0; i < chunks.length; i++) {
+          const chunk = chunks[i];
+          const offsetSec = chunk.startTimeSeconds;
+          const partNum = chunk.partIndex;
+
+          if (i > 0) {
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+
+          if (onProgress) {
+            onProgress(`🎙️ [အဆင့် ၂: Part ${partNum}/${totalParts}] (Offset: +${Math.floor(offsetSec / 60)}m) - Transcribing & Translating...`);
+          }
+
+          const chunkPrompt = `
+YOU ARE PROCESSING CHUNK PART ${partNum} OF ${totalParts} FROM THE VIDEO "${videoTitle}".
+Chunk Offset: ${offsetSec} seconds. Chunk Duration: ${chunk.durationSeconds} seconds.
+Mode: ${aiMode}. Context: ${customContext || 'Natural recap storytelling'}.
+
+Listen to this audio chunk, transcribe, and translate into natural, direct spoken Burmese dialogue with accurate relative timestamps.
+Return ONLY a valid JSON array:
+[
+  {
+    "id": 1,
+    "start": "00:00:00,000",
+    "end": "00:00:03,500",
+    "originalText": "...",
+    "text": "..."
+  }
+]
+(JSON ONLY)
+`;
+
+          let chunkSuccess = false;
+          let retries = 0;
+
+          while (!chunkSuccess && retries < 2) {
+            try {
+              retries++;
+              const { text: chunkResText } = await callGeminiWithRotation(
+                chunkPrompt,
+                buildSystemPromptForMode(aiMode),
+                model,
+                [{ mimeType: chunk.mimeType, data: chunk.base64Wav }]
+              );
+
+              const cleanedChunk = chunkResText.replace(/```json/gi, '').replace(/```/g, '').trim();
+              const parsedChunk = JSON.parse(cleanedChunk);
+
+              if (Array.isArray(parsedChunk) && parsedChunk.length > 0) {
+                parsedChunk.forEach((item: any, idx: number) => {
+                  const rawStartStr = String(item.start || item.startTime || '00:00:00,000');
+                  const rawEndStr = String(item.end || item.endTime || '00:00:03,500');
+                  const myanmarText = item.text || item.myanmarTranslation || item.originalText || '';
+                  const origText = item.originalText || item.text || '';
+
+                  const unadjustedStartSec = parseTimestampToSeconds(rawStartStr);
+                  const unadjustedEndSec = parseTimestampToSeconds(rawEndStr);
+
+                  const adjustedStartSec = unadjustedStartSec + offsetSec;
+                  const adjustedEndSec = unadjustedEndSec + offsetSec;
+
+                  allSegments.push({
+                    id: `p${partNum}_${item.id || idx + 1}_${Date.now()}`,
+                    startTime: parseFloat(adjustedStartSec.toFixed(2)),
+                    endTime: parseFloat(adjustedEndSec.toFixed(2)),
+                    originalText: origText,
+                    myanmarTranslation: myanmarText,
+                    voice: (allSegments.length + idx) % 2 === 0 ? 'Thiha' : 'Nilar',
+                  });
                 });
-              });
-
-              chunkSuccess = true;
-              if (onProgress) {
-                onProgress(`✓ [Part ${partNum}/${totalParts} Complete] ${parsedChunk.length} Segments added (Used Key: ${usedKeyName}). Total so far: ${allSegments.length} Segments.`);
+                chunkSuccess = true;
               }
-            }
-          } catch (chunkErr: any) {
-            console.warn(`Chunk ${partNum} attempt ${retries} failed:`, chunkErr);
-            if (chunkErr?.message?.includes('Gemini API Key') || chunkErr?.message?.includes('PROXY_GENERATION_DISABLED')) {
-              // Break early out of retries if API key is missing, to switch to smart script generator
-              break;
-            }
-            if (retries < 3) {
-              await new Promise((r) => setTimeout(r, 1500));
+            } catch {
+              if (retries < 2) await new Promise((r) => setTimeout(r, 1000));
             }
           }
         }
-      }
 
-      if (allSegments.length > 0) {
-        // Sort all segments chronologically across all parts
-        allSegments.sort((a, b) => a.startTime - b.startTime);
-
-        if (onProgress) {
-          onProgress(`🎉 [အောင်မြင်ပါသည်] Part 1 မှ Part ${totalParts} အထိ စုစုပေါင်း Segments ${allSegments.length} ခု အပြည့်အစုံ (100%) ထုတ်ယူပြီးပါပြီ။`);
+        if (allSegments.length > 0) {
+          allSegments.sort((a, b) => a.startTime - b.startTime);
+          if (onProgress) {
+            onProgress(`🎉 [အောင်မြင်ပါသည်] Part 1 မှ Part ${totalParts} အထိ စုစုပေါင်း Segments ${allSegments.length} ခု အပြည့်အစုံ (100%) ထုတ်ယူပြီးပါပြီ။`);
+          }
+          return allSegments;
         }
-
-        return allSegments;
       }
     } catch (audioErr) {
       console.warn('Could not extract audio chunks:', audioErr);

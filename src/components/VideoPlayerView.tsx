@@ -282,14 +282,48 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
   const getContainerAspectClass = () => {
     switch (ratio) {
       case '9:16':
-        return 'aspect-[9/16] max-h-[520px] mx-auto shadow-2xl rounded-2xl border border-zinc-800';
+        return 'rounded-2xl border border-zinc-800 shadow-2xl';
       case '1:1':
-        return 'aspect-square max-h-[460px] mx-auto shadow-2xl rounded-2xl border border-zinc-800';
+        return 'rounded-2xl border border-zinc-800 shadow-2xl';
       case '4:5':
-        return 'aspect-[4/5] max-h-[480px] mx-auto shadow-2xl rounded-2xl border border-zinc-800';
+        return 'rounded-2xl border border-zinc-800 shadow-2xl';
       case '16:9':
       default:
-        return 'aspect-video w-full max-w-4xl mx-auto rounded-xl border border-zinc-800';
+        return 'rounded-xl border border-zinc-800 shadow-2xl';
+    }
+  };
+
+  const getContainerViewportStyle = (): React.CSSProperties => {
+    switch (ratio) {
+      case '9:16':
+        return {
+          aspectRatio: '9 / 16',
+          height: '520px',
+          maxHeight: '520px',
+          maxWidth: '100%',
+        };
+      case '1:1':
+        return {
+          aspectRatio: '1 / 1',
+          height: '460px',
+          maxHeight: '460px',
+          maxWidth: '100%',
+        };
+      case '4:5':
+        return {
+          aspectRatio: '4 / 5',
+          height: '480px',
+          maxHeight: '480px',
+          maxWidth: '100%',
+        };
+      case '16:9':
+      default:
+        return {
+          aspectRatio: '16 / 9',
+          width: '100%',
+          maxWidth: '780px',
+          maxHeight: '440px',
+        };
     }
   };
 
@@ -350,17 +384,19 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
       </div>
 
       {/* Real Video Viewport with Live Platform Aspect Ratio & Frame Crop */}
-      <div
-        className={`relative bg-black w-full flex items-center justify-center overflow-hidden select-none ${getContainerAspectClass()} ${
-          isDragging ? 'ring-2 ring-cyan-500 ring-inset' : ''
-        }`}
-        onDragOver={(e) => {
-          e.preventDefault();
-          setIsDragging(true);
-        }}
-        onDragLeave={() => setIsDragging(false)}
-        onDrop={handleDrop}
-      >
+      <div className="w-full flex items-center justify-center p-3 bg-zinc-950/70 border-b border-zinc-800/60 overflow-hidden">
+        <div
+          className={`relative bg-black flex items-center justify-center overflow-hidden select-none transition-all ${getContainerAspectClass()} ${
+            isDragging ? 'ring-2 ring-cyan-500 ring-inset' : ''
+          }`}
+          style={getContainerViewportStyle()}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setIsDragging(true);
+          }}
+          onDragLeave={() => setIsDragging(false)}
+          onDrop={handleDrop}
+        >
         {project.videoUrl ? (
           <div className="relative w-full h-full flex items-center justify-center overflow-hidden">
             {/* Blurred Video Backdrop when Letterboxed Contain */}
@@ -545,6 +581,7 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
             </div>
           </div>
         )}
+        </div>
       </div>
 
       {/* Scrub Bar & Time Display */}
@@ -987,7 +1024,7 @@ const InteractiveSubtitleOverlay: React.FC<InteractiveSubtitleOverlayProps> = ({
 
   return (
     <div
-      className={`absolute left-0 right-0 px-6 text-center z-20 flex items-center justify-center pointer-events-auto ${basePositionYClass}`}
+      className={`absolute left-0 right-0 px-3 text-center z-20 flex items-center justify-center pointer-events-auto ${basePositionYClass}`}
     >
       <div
         onMouseEnter={() => setIsHovered(true)}
@@ -1007,8 +1044,11 @@ const InteractiveSubtitleOverlay: React.FC<InteractiveSubtitleOverlayProps> = ({
           `,
           backgroundColor: settings.backgroundColor,
           transform: `translate(${settings.offsetX || 0}px, ${settings.offsetY || 0}px)`,
+          maxWidth: '88%',
+          wordBreak: 'break-word',
+          overflowWrap: 'anywhere',
         }}
-        className={`relative px-4 py-1.5 rounded-lg font-semibold font-myanmar max-w-3xl leading-relaxed select-none inline-block shadow-lg cursor-grab active:cursor-grabbing transition-all ${
+        className={`relative px-4 py-1.5 rounded-lg font-semibold font-myanmar text-center whitespace-pre-wrap leading-relaxed select-none inline-block shadow-lg cursor-grab active:cursor-grabbing transition-all ${
           isHovered || isDragging
             ? 'ring-2 ring-cyan-400 ring-offset-2 ring-offset-black/60 shadow-cyan-500/30'
             : ''

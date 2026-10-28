@@ -245,9 +245,9 @@ export const SubtitleStyleEditor: React.FC<SubtitleStyleEditorProps> = ({
                     </div>
                     <input
                       type="range"
-                      min={4}
-                      max={40}
-                      step={2}
+                      min={1}
+                      max={50}
+                      step={1}
                       value={box.blurAmount}
                       onChange={(e) => handleUpdateBlurBox(box.id, { blurAmount: parseInt(e.target.value) })}
                       className="w-full h-1.5 bg-white/10 rounded accent-amber-400 cursor-pointer"

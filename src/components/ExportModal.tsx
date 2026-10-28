@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { X, Download, FileText, Video, CheckCircle2, RotateCw, Play } from 'lucide-react';
 import { ProjectState } from '../types';
 import { generateSrtContent, downloadFile, getInterpolatedKeyframe, getFilterCss } from '../utils/alightMotionRenderer';
+import { drawCanvasSubtitle } from '../utils/canvasSubtitleRenderer';
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -282,22 +283,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           const isLandscape = canvas.width > canvas.height;
           const scaleFactor = Math.max(1.0, canvas.height / (isLandscape ? 540 : 960));
 
-          // Draw Blur Boxes with proportional scaling and coordinates
+          // Draw Blur Boxes with exact 1:1 coordinates matching preview
           if (project.blurBoxes && project.blurBoxes.length > 0) {
             for (const box of project.blurBoxes) {
-              let bx = (box.x / 100) * canvas.width;
-              let by = (box.y / 100) * canvas.height;
-              let bw = (box.width / 100) * canvas.width;
-              let bh = (box.height / 100) * canvas.height;
-
-              if (drawW < canvas.width - 10) {
-                bx = videoLeft + (box.x / 100) * drawW;
-                bw = (box.width / 100) * drawW;
-              }
-              if (drawH < canvas.height - 10) {
-                by = videoTop + (box.y / 100) * drawH;
-                bh = (box.height / 100) * drawH;
-              }
+              const bx = (box.x / 100) * canvas.width;
+              const by = (box.y / 100) * canvas.height;
+              const bw = (box.width / 100) * canvas.width;
+              const bh = (box.height / 100) * canvas.height;
 
               if (bw > 0 && bh > 0) {
                 ctx.save();
@@ -322,7 +314,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             }
           }
 
-          // Draw Live Myanmar Subtitles Overlay with accurate scaling and positioning
+          // Draw Live Myanmar Subtitles Overlay with wrapped multi-line rendering
           const activeSeg = project.segments.find(
             (s) => currentTime >= s.startTime && currentTime <= s.endTime
           );
@@ -330,58 +322,14 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           if (activeSeg) {
             const text = activeSeg.myanmarTranslation || activeSeg.originalText;
             if (text) {
-              const settings = project.subtitleSettings;
-              ctx.save();
-
-              const baseFontSize = Math.max(26, settings.fontSize || 28);
-              const targetFontSize = Math.round(baseFontSize * scaleFactor);
-              const cleanFont = (settings.fontFamily || 'Pyidaungsu').replace(/['"]/g, '').trim();
-
-              ctx.font = `bold ${targetFontSize}px "${cleanFont}", "Noto Sans Myanmar", sans-serif`;
-              if (ctx.font.startsWith('10px') || ctx.font.includes('10px sans-serif')) {
-                ctx.font = `bold ${targetFontSize}px sans-serif`;
-              }
-
-              ctx.textAlign = 'center';
-              ctx.textBaseline = 'middle';
-
-              let posY = (drawH < canvas.height - 10) ? (videoTop + drawH * 0.85) : (canvas.height * 0.86);
-              if (settings.positionY === 'center') posY = (drawH < canvas.height - 10) ? (videoTop + drawH * 0.50) : (canvas.height * 0.50);
-              if (settings.positionY === 'top') posY = (drawH < canvas.height - 10) ? (videoTop + drawH * 0.12) : (canvas.height * 0.12);
-
-              const textX = canvas.width / 2 + (settings.offsetX || 0) * scaleFactor;
-              const textY = posY + (settings.offsetY || 0) * scaleFactor;
-
-              const metrics = ctx.measureText(text);
-              const padX = 28 * scaleFactor;
-              const padY = 16 * scaleFactor;
-              const bgWidth = metrics.width + padX;
-              const bgHeight = targetFontSize * 1.35 + padY;
-              const radius = 12 * scaleFactor;
-
-              if (settings.backgroundColor && settings.backgroundColor !== 'transparent') {
-                ctx.fillStyle = settings.backgroundColor;
-                ctx.beginPath();
-                if (ctx.roundRect) {
-                  ctx.roundRect(textX - bgWidth / 2, textY - bgHeight / 2, bgWidth, bgHeight, radius);
-                } else {
-                  ctx.rect(textX - bgWidth / 2, textY - bgHeight / 2, bgWidth, bgHeight);
-                }
-                ctx.fill();
-              }
-
-              const strokeWidth = Math.max(2.5, (settings.strokeWidth || 3) * scaleFactor);
-              if (strokeWidth > 0) {
-                ctx.strokeStyle = settings.strokeColor || '#000000';
-                ctx.lineWidth = strokeWidth * 2;
-                ctx.lineJoin = 'round';
-                ctx.miterLimit = 2;
-                ctx.strokeText(text, textX, textY);
-              }
-
-              ctx.fillStyle = settings.color || '#ffffff';
-              ctx.fillText(text, textX, textY);
-              ctx.restore();
+              drawCanvasSubtitle({
+                ctx,
+                text,
+                settings: project.subtitleSettings,
+                canvasWidth: canvas.width,
+                canvasHeight: canvas.height,
+                scaleFactor,
+              });
             }
           }
         }

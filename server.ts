@@ -96,12 +96,13 @@ async function startServer() {
 
       const contentsPayload = contents || (parts ? { parts } : prompt);
 
-      // Prioritize high-quota Flash models (gemini-2.5-flash) to prevent 429 quota errors
+      // Prioritize high-quota Flash models and valid models
       const candidateModels = [
-        model || 'gemini-2.5-flash',
-        'gemini-flash-latest',
-        'gemini-2.0-flash',
-        'gemini-3.8-flash',
+        model || 'gemini-3.5-flash-lite',
+        'gemini-3.5-flash-lite',
+        'gemini-2.5-flash',
+        'gemini-3.1-pro-preview',
+        'gemini-1.5-flash',
       ];
 
       let lastError: any = null;

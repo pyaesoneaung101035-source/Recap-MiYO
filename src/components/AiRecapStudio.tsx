@@ -46,6 +46,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
   onNextStep,
 }) => {
   const [isGenerating, setIsGenerating] = useState(false);
+  const [progressPercent, setProgressPercent] = useState(0);
   const [customPrompt, setCustomPrompt] = useState('');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -53,6 +54,26 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
   const [selectedPartFilter, setSelectedPartFilter] = useState<number | 'all'>('all');
   const [selectedEngine, setSelectedEngine] = useState<'assemblyai' | 'gemini'>('assemblyai');
   const [hasAssemblyAiKey, setHasAssemblyAiKey] = useState(false);
+  const [selectedGeminiModel, setSelectedGeminiModel] = useState<string>('gemini-3.5-flash-lite');
+
+  // Live progress simulation timer when generating
+  useEffect(() => {
+    let timer: NodeJS.Timeout;
+    if (isGenerating) {
+      setProgressPercent(10);
+      timer = setInterval(() => {
+        setProgressPercent((prev) => {
+          if (prev >= 98) return 98;
+          return prev + 2;
+        });
+      }, 300);
+    } else {
+      setProgressPercent(100);
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [isGenerating]);
 
   useEffect(() => {
     const keys = loadApiKeys();
@@ -97,6 +118,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
     }
 
     setIsGenerating(true);
+    setProgressPercent(15);
     setStatusMessage('အသံလှိုင်း စစ်ဆေးနေပါသည်...');
     setErrorMessage(null);
 
@@ -118,6 +140,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
         } catch (assemblyErr: any) {
           console.warn('AssemblyAI fallback to Gemini STT:', assemblyErr);
           setStatusMessage('⚠️ Gemini STT သို့ အလိုအလျောက် ပြောင်းလဲ၍ ထုတ်ယူနေပါသည်...');
+          setProgressPercent(40);
           rawSegments = await generateTimestampedTranscript(
             project.videoName || 'Uploaded Video',
             project.videoDuration || 30,
@@ -125,10 +148,12 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
             customPrompt,
             project.videoFile,
             project.videoUrl,
-            (msg) => setStatusMessage(`[Gemini STT] ${msg}`)
+            (msg) => setStatusMessage(`[Gemini STT] ${msg}`),
+            selectedGeminiModel
           );
         }
       } else {
+        setProgressPercent(35);
         rawSegments = await generateTimestampedTranscript(
           project.videoName || 'Uploaded Video',
           project.videoDuration || 30,
@@ -136,10 +161,12 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
           customPrompt,
           project.videoFile,
           project.videoUrl,
-          (msg) => setStatusMessage(msg)
+          (msg) => setStatusMessage(msg),
+          selectedGeminiModel
         );
       }
 
+      setProgressPercent(90);
       const sorted = [...rawSegments].sort((a, b) => a.startTime - b.startTime);
       let curTime = 0;
       const segments = sorted.map((s) => {
@@ -154,12 +181,14 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
         };
       });
 
+      setProgressPercent(100);
       setProject((prev) => ({ ...prev, segments }));
       setStatusMessage(`အောင်မြင်ပါသည်! Segment စုစုပေါင်း ${segments.length} ခု ထုတ်ယူပြီးပါပြီ။`);
     } catch (err: any) {
       console.error('Failed to generate recap:', err);
       setErrorMessage(err.message || 'AI စာသားထုတ်လုပ်မှု မအောင်မြင်ပါ။ API Key ကို စစ်ဆေးပါ။');
     } finally {
+      setProgressPercent(100);
       setIsGenerating(false);
     }
   };
@@ -375,6 +404,18 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
             placeholder="အထူး ညွှန်ကြားချက်များ (ဥပမာ- ဟာသဆန်ဆန် ပြန်ဆိုပေးပါ)..."
             className="glass-input flex-1 px-4 py-2.5 rounded-xl text-xs font-myanmar placeholder-zinc-500"
           />
+          <select
+            value={selectedGeminiModel}
+            onChange={(e) => setSelectedGeminiModel(e.target.value)}
+            className="px-3 py-2.5 bg-zinc-900 border border-cyan-500/30 rounded-xl text-xs text-cyan-300 font-mono font-semibold focus:outline-none cursor-pointer shrink-0"
+            title="Gemini Model Selection"
+          >
+            <option value="gemini-3.5-flash-lite">⚡ Gemini 3.5 Flash Lite</option>
+            <option value="gemini-2.5-flash">⚡ Gemini 2.5 Flash</option>
+            <option value="gemini-3.1-pro-preview">🧠 Gemini 3.1 Pro Preview</option>
+            <option value="gemini-1.5-flash">⚡ Gemini 1.5 Flash</option>
+          </select>
+
           <button
             onClick={handleGenerateScript}
             disabled={isGenerating}
@@ -389,7 +430,35 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
           </button>
         </div>
 
-        {statusMessage && (
+        {/* Live Percentage Progress Bar & Speed Status (User Requested Feature) */}
+        {isGenerating && (
+          <div className="space-y-2 p-3.5 rounded-xl bg-cyan-950/40 border border-cyan-500/30 backdrop-blur-md animate-pulse">
+            <div className="flex items-center justify-between text-xs font-mono font-bold">
+              <span className="text-cyan-300 flex items-center gap-1.5 font-myanmar">
+                <RotateCw className="w-3.5 h-3.5 animate-spin text-cyan-400" />
+                <span>{statusMessage || 'AI Processing Video Chunks...'}</span>
+              </span>
+              <span className="text-cyan-400">
+                {Math.round(progressPercent)}% TTX
+              </span>
+            </div>
+
+            {/* Progress Bar Track */}
+            <div className="w-full h-2 bg-zinc-900 rounded-full overflow-hidden border border-cyan-500/20">
+              <div
+                className="h-full bg-gradient-to-r from-cyan-400 via-teal-400 to-emerald-400 transition-all duration-300 rounded-full shadow-lg shadow-cyan-400/50"
+                style={{ width: `${Math.max(5, Math.min(100, progressPercent))}%` }}
+              />
+            </div>
+
+            <div className="flex items-center justify-between text-[10px] text-zinc-400 font-mono">
+              <span>⚡ Flash Model Optimized (Fast 3-min Chunk Pipeline)</span>
+              <span>100% ရောက်ရှိလျှင် ပြီးဆုံးပါမည်</span>
+            </div>
+          </div>
+        )}
+
+        {statusMessage && !isGenerating && (
           <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-300 flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
             <span className="font-myanmar">{statusMessage}</span>
