@@ -51,11 +51,11 @@ async function startServer() {
   // Server-side Gemini API route
   app.post('/api/gemini/generate', async (req, res) => {
     try {
-      const { apiKey, model = 'gemini-3.8-flash', prompt, contents, parts, systemInstruction } = req.body;
+      const { apiKey, model = 'gemini-2.0-flash', prompt, contents, parts, systemInstruction } = req.body;
       const rawKey = apiKey || process.env.GEMINI_API_KEY;
 
       if (!rawKey) {
-        return res.status(400).json({ error: 'No Gemini API key provided. Add one in Profile -> API Keys or Server Secrets.' });
+        return res.status(400).json({ error: 'Gemini API Key မရှိသေးပါ။ ကျေးဇူးပြု၍ အဆင့် 1 (Gemini API Keys) တွင် Google API Key (AIzaSy...) ထည့်သွင်းပေးပါ။' });
       }
 
       if (!isValidAsciiApiKey(rawKey)) {
@@ -73,9 +73,9 @@ async function startServer() {
         },
       });
 
-      let modelToUse = model || 'gemini-3.8-flash';
-      if (modelToUse.includes('2.5') || modelToUse.includes('1.5') || modelToUse.includes('2.0')) {
-        modelToUse = 'gemini-3.8-flash';
+      let modelToUse = model || 'gemini-2.0-flash';
+      if (modelToUse.includes('3.8') || modelToUse.includes('2.5') || modelToUse.includes('3.0') || modelToUse.includes('3.6')) {
+        modelToUse = 'gemini-2.0-flash';
       }
 
       const contentsPayload = contents || (parts ? { parts } : prompt);
@@ -88,8 +88,12 @@ async function startServer() {
       return res.json({ text: response.text });
     } catch (error: any) {
       console.error('Gemini error:', error);
+      let errMsg = formatNetworkError(error, 'Gemini');
+      if (error?.message?.includes('PROXY_GENERATION_DISABLED') || error?.message?.includes('not supported')) {
+        errMsg = 'Gemini API Key မရှိသေးပါ သို့မဟုတ် Key မမှန်ပါ။ ကျေးဇူးပြု၍ အဆင့် 1 တွင် Gemini API Key (AIzaSy...) သစ် ထည့်ပေးပါ။';
+      }
       return res.status(error.status || 500).json({
-        error: formatNetworkError(error, 'Gemini'),
+        error: errMsg,
         status: error.status,
       });
     }

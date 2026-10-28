@@ -149,7 +149,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
 
       // Test 1: Direct Google API endpoint
       try {
-        const directUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(
+        const directUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(
           k.key
         )}`;
 
@@ -184,7 +184,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
             body: JSON.stringify({
               apiKey: k.key,
               prompt: 'Ping',
-              model: 'gemini-3.8-flash',
+              model: 'gemini-2.0-flash',
             }),
           });
           if (proxyRes.ok) {
@@ -197,7 +197,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
       if (!isValidKey && !keyErrMessage.includes('Invalid Key')) {
         try {
           const corsUrl = `https://corsproxy.io/?${encodeURIComponent(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(k.key)}`
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(k.key)}`
           )}`;
           const corsRes = await fetch(corsUrl, {
             method: 'POST',

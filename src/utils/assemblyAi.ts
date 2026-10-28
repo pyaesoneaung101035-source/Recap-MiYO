@@ -27,55 +27,113 @@ export async function transcribeVideoWithAssemblyAi(
 
   // 1. Extract audio from video
   onProgress('🎙️ [AssemblyAI Whisper] - ဗီဒီယိုမှ အသံလှိုင်းကို 16kHz Speech Format ဖြင့် ထုတ်ယူနေပါသည်...');
-  const { base64Wav, duration } = await extractAudioFromVideo(videoSource, 600); // up to 10 mins
+  const { base64Wav } = await extractAudioFromVideo(videoSource, 600); // up to 10 mins
 
-  // 2. Upload audio to AssemblyAI (via server proxy to eliminate CORS)
+  // 2. Upload audio to AssemblyAI (server proxy first, then direct browser fetch)
   onProgress('☁️ [AssemblyAI Whisper] - အသံဖိုင်ကို AssemblyAI Cloud သို့ လုံခြုံစွာ ပေးပို့နေပါသည်...');
-  const uploadRes = await fetch('/api/assemblyai/upload', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      apiKey: cleanKey,
-      base64Audio: base64Wav,
-    }),
-  });
+  let uploadUrl = '';
 
-  if (!uploadRes.ok) {
-    const err = await uploadRes.json().catch(() => ({}));
-    throw new Error(err.error || 'AssemblyAI သို့ အသံဖိုင် ပေးပို့မှု မအောင်မြင်ပါ');
+  try {
+    const uploadRes = await fetch('/api/assemblyai/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: cleanKey,
+        base64Audio: base64Wav,
+      }),
+    });
+
+    if (uploadRes.ok) {
+      const uploadData = await uploadRes.json();
+      uploadUrl = uploadData.upload_url || '';
+    }
+  } catch (serverUploadErr) {
+    console.warn('Server AssemblyAI upload notice:', serverUploadErr);
   }
 
-  const uploadData = await uploadRes.json();
-  const uploadUrl = uploadData.upload_url;
+  // Direct upload fallback
   if (!uploadUrl) {
-    throw new Error('No upload_url returned from AssemblyAI');
+    try {
+      const binaryData = Uint8Array.from(atob(base64Wav), (c) => c.charCodeAt(0));
+      const directUploadRes = await fetch('https://api.assemblyai.com/v2/upload', {
+        method: 'POST',
+        headers: {
+          Authorization: cleanKey,
+          'Content-Type': 'application/octet-stream',
+        },
+        body: binaryData,
+      });
+
+      if (directUploadRes.ok) {
+        const directUploadData = await directUploadRes.json();
+        uploadUrl = directUploadData.upload_url || '';
+      }
+    } catch (directUploadErr) {
+      console.warn('Direct AssemblyAI upload notice:', directUploadErr);
+    }
+  }
+
+  if (!uploadUrl) {
+    throw new Error('AssemblyAI သို့ အသံဖိုင် ပေးပို့မှု မအောင်မြင်ပါ။ ကျေးဇူးပြု၍ API Key သို့မဟုတ် ကွန်ရက် ချိတ်ဆက်မှုကို စစ်ဆေးပေးပါ။');
   }
 
   // 3. Request transcription with accurate punctuation & timestamps
   onProgress('⚡ [AssemblyAI Whisper] - Speech-to-Text Model စတင် အလုပ်လုပ်နေပါသည်...');
-  const transcriptRes = await fetch('/api/assemblyai/proxy', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      apiKey: cleanKey,
-      endpoint: 'transcript',
-      method: 'POST',
-      body: {
-        audio_url: uploadUrl,
-        punctuate: true,
-        format_text: true,
-        speech_models: ['universal-3-5-pro', 'universal-2'],
-      },
-    }),
-  });
+  let transcriptId = '';
 
-  if (!transcriptRes.ok) {
-    const err = await transcriptRes.json().catch(() => ({}));
-    throw new Error(err.error || 'AssemblyAI transcription စတင်၍ မရပါ');
+  try {
+    const transcriptRes = await fetch('/api/assemblyai/proxy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: cleanKey,
+        endpoint: 'transcript',
+        method: 'POST',
+        body: {
+          audio_url: uploadUrl,
+          punctuate: true,
+          format_text: true,
+          speech_models: ['universal-3-5-pro', 'universal-2'],
+        },
+      }),
+    });
+
+    if (transcriptRes.ok) {
+      const transcriptData = await transcriptRes.json();
+      transcriptId = transcriptData.id || '';
+    }
+  } catch (serverTranscribErr) {
+    console.warn('Server AssemblyAI proxy transcript notice:', serverTranscribErr);
   }
 
-  const transcriptData = await transcriptRes.json();
-  const transcriptId = transcriptData.id;
+  // Direct transcript request fallback
+  if (!transcriptId) {
+    try {
+      const directTranscribRes = await fetch('https://api.assemblyai.com/v2/transcript', {
+        method: 'POST',
+        headers: {
+          Authorization: cleanKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          audio_url: uploadUrl,
+          punctuate: true,
+          format_text: true,
+        }),
+      });
+
+      if (directTranscribRes.ok) {
+        const directTranscribData = await directTranscribRes.json();
+        transcriptId = directTranscribData.id || '';
+      }
+    } catch (directTranscribErr) {
+      console.warn('Direct AssemblyAI transcript notice:', directTranscribErr);
+    }
+  }
+
+  if (!transcriptId) {
+    throw new Error('AssemblyAI transcription စတင်၍ မရပါ။ ကျေးဇူးပြု၍ API Key ကို စစ်ဆေးပေးပါ။');
+  }
 
   // 4. Poll until completed
   let pollAttempts = 0;
@@ -87,25 +145,46 @@ export async function transcribeVideoWithAssemblyAi(
 
     onProgress(`⏳ [AssemblyAI Whisper] - စကားသံများကို ခွဲခြမ်းစိပ်ဖြာနေပါသည်... (${pollAttempts * 2}s)`);
 
-    const pollRes = await fetch('/api/assemblyai/proxy', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        apiKey: cleanKey,
-        endpoint: `transcript/${transcriptId}`,
-        method: 'GET',
-      }),
-    });
+    let pollData: any = null;
 
-    if (!pollRes.ok) continue;
+    try {
+      const pollRes = await fetch('/api/assemblyai/proxy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apiKey: cleanKey,
+          endpoint: `transcript/${transcriptId}`,
+          method: 'GET',
+        }),
+      });
 
-    const pollData = await pollRes.json();
-    if (pollData.status === 'completed') {
-      finalResult = pollData;
-      break;
+      if (pollRes.ok) {
+        pollData = await pollRes.json();
+      }
+    } catch {}
+
+    if (!pollData) {
+      try {
+        const directPollRes = await fetch(`https://api.assemblyai.com/v2/transcript/${transcriptId}`, {
+          method: 'GET',
+          headers: {
+            Authorization: cleanKey,
+          },
+        });
+        if (directPollRes.ok) {
+          pollData = await directPollRes.json();
+        }
+      } catch {}
     }
-    if (pollData.status === 'error') {
-      throw new Error(pollData.error || 'AssemblyAI transcription error occurred');
+
+    if (pollData) {
+      if (pollData.status === 'completed') {
+        finalResult = pollData;
+        break;
+      }
+      if (pollData.status === 'error') {
+        throw new Error(pollData.error || 'AssemblyAI transcription error occurred');
+      }
     }
   }
 
@@ -168,7 +247,7 @@ export async function transcribeVideoWithAssemblyAi(
     // Fallback if no words/sentences detected
     items.push({
       start: 0,
-      end: Math.min(5, duration || 5),
+      end: 5,
       text: finalResult.text || 'Dialogue',
     });
   }
@@ -210,8 +289,11 @@ ${JSON.stringify(items.map((it, idx) => ({ id: idx + 1, original: it.text })), n
         }
       });
     }
-  } catch (geminiErr) {
-    console.error('Gemini translation error:', geminiErr);
+  } catch (geminiErr: any) {
+    console.warn('Gemini translation notice:', geminiErr);
+    if (onProgress) {
+      onProgress('💡 [AssemblyAI Whisper Completed] - Subtitle Segments များကို တိကျသော Timestamp များဖြင့် ထုတ်ယူပေးထားပါသည်။ (Gemini Key ထည့်သွင်းပါက မြန်မာစကားပြော ပိုမိုပြည့်စုံစွာ ပြန်ဆိုပေးပါမည်)');
+    }
   }
 
   // 7. Assemble segments

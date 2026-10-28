@@ -85,10 +85,16 @@ export function resetKeyStatuses(keys: GeminiKeyInfo[]): GeminiKeyInfo[] {
 export async function callGeminiWithRotation(
   prompt: string,
   systemInstruction?: string,
-  model = 'gemini-3.8-flash',
+  model = 'gemini-2.0-flash',
   mediaParts?: Array<{ mimeType: string; data: string }>
 ): Promise<{ text: string; usedKeyName: string }> {
   let keys = loadGeminiKeys();
+
+  // Normalize model name for standard Google Generative AI REST API
+  let activeModel = model || 'gemini-2.0-flash';
+  if (activeModel.includes('2.5') || activeModel.includes('3.8') || activeModel.includes('3.0')) {
+    activeModel = 'gemini-2.0-flash';
+  }
 
   // Construct parts
   const parts: any[] = [];
@@ -109,12 +115,16 @@ export async function callGeminiWithRotation(
     const serverRes = await fetch('/api/gemini/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, parts, systemInstruction, model }),
+      body: JSON.stringify({ prompt, parts, systemInstruction, model: activeModel }),
     });
 
     if (!serverRes.ok) {
       const errJson = await serverRes.json().catch(() => ({}));
-      throw new Error(errJson.error || 'Server Gemini API call failed. Please add Gemini API keys in the API Settings box.');
+      const msg = errJson.error || 'Server Gemini API call failed. Please add Gemini API keys in Step 1 (API Settings).';
+      if (msg.includes('PROXY_GENERATION_DISABLED')) {
+        throw new Error('Gemini API Key မရှိသေးပါ။ ကျေးဇူးပြု၍ အဆင့် 1 တွင် Gemini API Key (AIzaSy...) ထည့်သွင်းပေးပါ။');
+      }
+      throw new Error(msg);
     }
     const data = await serverRes.json();
     return { text: data.text, usedKeyName: 'Server Default Key' };
@@ -139,7 +149,7 @@ export async function callGeminiWithRotation(
 
     try {
       // Direct Google Gemini API call (phone & browser direct call support)
-      const directUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(keyInfo.key)}`;
+      const directUrl = `https://generativelanguage.googleapis.com/v1beta/models/${activeModel}:generateContent?key=${encodeURIComponent(keyInfo.key)}`;
       
       const payload: any = {
         contents: [
@@ -155,28 +165,52 @@ export async function callGeminiWithRotation(
         };
       }
 
-      let res = await fetch(directUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
+      let res: Response | null = null;
 
-      // If direct fetch had CORS / network restriction or error, fallback to server proxy
-      if (!res.ok && res.status !== 429 && res.status !== 400 && res.status !== 403) {
-        res = await fetch('/api/gemini/generate', {
+      try {
+        res = await fetch(directUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            apiKey: keyInfo.key,
-            model,
-            prompt,
-            parts,
-            systemInstruction,
-          }),
+          body: JSON.stringify(payload),
         });
+      } catch (directFetchErr) {
+        console.warn('Direct Gemini API fetch notice:', directFetchErr);
       }
 
-      if (res.ok) {
+      // Fallback 1: Server proxy endpoint (/api/gemini/generate)
+      if (!res || (!res.ok && res.status !== 429 && res.status !== 400 && res.status !== 403)) {
+        try {
+          res = await fetch('/api/gemini/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              apiKey: keyInfo.key,
+              model: activeModel,
+              prompt,
+              parts,
+              systemInstruction,
+            }),
+          });
+        } catch (proxyErr) {
+          console.warn('Server Gemini proxy notice:', proxyErr);
+        }
+      }
+
+      // Fallback 2: CORS Proxy wrapper endpoint
+      if (!res || (!res.ok && res.status !== 429 && res.status !== 400 && res.status !== 403)) {
+        try {
+          const corsUrl = `https://corsproxy.io/?${encodeURIComponent(directUrl)}`;
+          res = await fetch(corsUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+        } catch (corsErr) {
+          console.warn('CORS proxy Gemini notice:', corsErr);
+        }
+      }
+
+      if (res && res.ok) {
         const data = await res.json();
         const candidateText =
           data.candidates?.[0]?.content?.parts?.[0]?.text || data.text || '';
@@ -191,10 +225,17 @@ export async function callGeminiWithRotation(
         return { text: candidateText, usedKeyName: keyInfo.name };
       }
 
+      if (!res) {
+        keyInfo.lastError = 'API Unreachable / Network Error';
+        saveGeminiKeys(keys);
+        lastError = 'API Unreachable';
+        continue;
+      }
+
       // Check if error is quota exhaustion or invalid key
       const errText = await res.text();
       const isQuota = res.status === 429 || errText.includes('RESOURCE_EXHAUSTED') || errText.includes('quota');
-      const isInvalid = res.status === 400 && (errText.includes('API_KEY_INVALID') || errText.includes('key not valid'));
+      const isInvalid = res.status === 400 && (errText.includes('API_KEY_INVALID') || errText.includes('key not valid') || errText.includes('PROXY_GENERATION_DISABLED'));
 
       if (isQuota) {
         console.warn(`Key ${keyInfo.name} reached quota limit. Rotating to next key.`);
@@ -361,7 +402,7 @@ Return ONLY a valid JSON array matching this exact format:
             const { text: chunkResText, usedKeyName } = await callGeminiWithRotation(
               chunkPrompt,
               buildSystemPromptForMode(aiMode),
-              'gemini-3.8-flash',
+              'gemini-2.0-flash',
               [{ mimeType: chunk.mimeType, data: chunk.base64Wav }]
             );
 
@@ -397,8 +438,12 @@ Return ONLY a valid JSON array matching this exact format:
                 onProgress(`✓ [Part ${partNum}/${totalParts} Complete] ${parsedChunk.length} Segments added (Used Key: ${usedKeyName}). Total so far: ${allSegments.length} Segments.`);
               }
             }
-          } catch (chunkErr) {
+          } catch (chunkErr: any) {
             console.warn(`Chunk ${partNum} attempt ${retries} failed:`, chunkErr);
+            if (chunkErr?.message?.includes('Gemini API Key') || chunkErr?.message?.includes('PROXY_GENERATION_DISABLED')) {
+              // Break early out of retries if API key is missing, to switch to smart script generator
+              break;
+            }
             if (retries < 3) {
               await new Promise((r) => setTimeout(r, 1500));
             }
