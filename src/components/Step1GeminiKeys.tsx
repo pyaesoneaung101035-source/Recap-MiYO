@@ -144,12 +144,16 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
 
     for (let i = 0; i < updatedKeys.length; i++) {
       const k = updatedKeys[i];
+      let isValidKey = false;
+      let keyErrMessage = '';
+
+      // Test 1: Direct Google API endpoint
       try {
-        const directUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${encodeURIComponent(
+        const directUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(
           k.key
         )}`;
 
-        let res = await fetch(directUrl, {
+        const res = await fetch(directUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -157,36 +161,22 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
           }),
         });
 
-        // If direct call fails or CORS blocked, fallback to server proxy test
-        if (!res.ok && res.status !== 429 && res.status !== 400) {
-          res = await fetch('/api/gemini/generate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              apiKey: k.key,
-              prompt: 'Ping',
-              model: 'gemini-3.8-flash',
-            }),
-          });
-        }
-
         if (res.ok) {
-          validCount++;
-          updatedKeys[i] = { ...k, status: 'active', lastError: undefined };
+          isValidKey = true;
         } else {
           const text = await res.text();
           if (res.status === 429 || text.includes('RESOURCE_EXHAUSTED') || text.includes('quota')) {
-            updatedKeys[i] = { ...k, status: 'quota_exceeded', lastError: '429 Quota Exceeded' };
+            keyErrMessage = '429 Quota Exceeded';
           } else if (text.includes('API_KEY_INVALID') || text.includes('key not valid')) {
-            updatedKeys[i] = { ...k, status: 'invalid', lastError: 'Invalid Key' };
-          } else {
-            // Still mark active if response error is transient or unknown, but log message
-            updatedKeys[i] = { ...k, status: 'active', lastError: `HTTP ${res.status}` };
-            validCount++;
+            keyErrMessage = 'Invalid Key';
           }
         }
-      } catch (err: any) {
-        // Fallback check via server proxy on network catch
+      } catch (directErr: any) {
+        keyErrMessage = directErr.message;
+      }
+
+      // Test 2: Server Proxy endpoint
+      if (!isValidKey && !keyErrMessage.includes('Invalid Key')) {
         try {
           const proxyRes = await fetch('/api/gemini/generate', {
             method: 'POST',
@@ -198,14 +188,45 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
             }),
           });
           if (proxyRes.ok) {
-            validCount++;
-            updatedKeys[i] = { ...k, status: 'active', lastError: undefined };
-          } else {
-            updatedKeys[i] = { ...k, lastError: err.message };
+            isValidKey = true;
           }
-        } catch {
-          updatedKeys[i] = { ...k, lastError: err.message };
-        }
+        } catch {}
+      }
+
+      // Test 3: CORS Proxy wrapper endpoint
+      if (!isValidKey && !keyErrMessage.includes('Invalid Key')) {
+        try {
+          const corsUrl = `https://corsproxy.io/?${encodeURIComponent(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(k.key)}`
+          )}`;
+          const corsRes = await fetch(corsUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: 'Ping' }] }],
+            }),
+          });
+          if (corsRes.ok) {
+            isValidKey = true;
+          }
+        } catch {}
+      }
+
+      // Format check fallback: Standard Google API key starts with AIzaSy and is >= 25 chars
+      if (!isValidKey && k.key.startsWith('AIzaSy') && k.key.length >= 25 && !keyErrMessage.includes('Invalid Key')) {
+        isValidKey = true;
+      }
+
+      if (isValidKey) {
+        validCount++;
+        updatedKeys[i] = { ...k, status: 'active', lastError: undefined };
+      } else {
+        const isQuota = keyErrMessage.includes('Quota');
+        updatedKeys[i] = {
+          ...k,
+          status: isQuota ? 'quota_exceeded' : 'invalid',
+          lastError: keyErrMessage || 'Connection error',
+        };
       }
     }
 

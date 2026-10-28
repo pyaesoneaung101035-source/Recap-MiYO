@@ -5,6 +5,8 @@
  */
 
 import { loadApiKeys } from './apiKeys';
+import { synthesizeMyanmarVoice } from './edgeTtsClient';
+import { VoiceOption } from '../types';
 
 export interface HfSynthesisOptions {
   model?: string;
@@ -184,47 +186,103 @@ export async function synthesizeHuggingFaceVoice(
     options.onStatusUpdate(`🤗 Hugging Face [${speakerInfo.name} (${speakerInfo.myanmarName})] ဖြင့် စကားပြောထုတ်လုပ်နေပါသည်...`);
   }
 
-  const res = await fetch('/api/huggingface/tts', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      text: cleanText,
-      model: targetModel,
-      apiKey: hfKey,
-      speakerId,
-    }),
-  });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || `Hugging Face Voice synthesis error (HTTP ${res.status})`);
-  }
-
-  const arrayBuffer = await res.arrayBuffer();
-  if (!arrayBuffer || arrayBuffer.byteLength < 50) {
-    throw new Error('Hugging Face မှ အသံဖိုင် လက်ခံရရှိခြင်း မရှိပါ။');
-  }
-
-  // Decode audio data
-  const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-  const ctx = new AudioContextClass();
-  let audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
-
-  // Apply Hugging Face Multi-Speaker Spectral Profile
+  // 1. Attempt Server Proxy endpoint first
   try {
-    audioBuffer = await applyHfSpeakerProfile(audioBuffer, speakerInfo);
-  } catch (speakerAdaptErr) {
-    console.warn('Speaker profile notice:', speakerAdaptErr);
+    const res = await fetch('/api/huggingface/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: cleanText,
+        model: targetModel,
+        apiKey: hfKey,
+        speakerId,
+      }),
+    });
+
+    if (res.ok) {
+      const arrayBuffer = await res.arrayBuffer();
+      if (arrayBuffer && arrayBuffer.byteLength >= 50) {
+        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+        const ctx = new AudioContextClass();
+        let audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
+
+        try {
+          audioBuffer = await applyHfSpeakerProfile(audioBuffer, speakerInfo);
+        } catch (speakerAdaptErr) {
+          console.warn('Speaker profile notice:', speakerAdaptErr);
+        }
+
+        const wavBlob = audioBufferToWavBlob(audioBuffer);
+        return {
+          audioUrl: URL.createObjectURL(wavBlob),
+          duration: parseFloat(audioBuffer.duration.toFixed(2)),
+        };
+      }
+    }
+  } catch (serverErr) {
+    console.warn('Server proxy HF TTS notice:', serverErr);
   }
 
-  // Convert to playable WAV Blob URL
-  const wavBlob = audioBufferToWavBlob(audioBuffer);
-  const audioUrl = URL.createObjectURL(wavBlob);
+  // 2. Attempt direct / CORS proxy fetch to Hugging Face Inference API
+  const endpoints = [
+    `https://router.huggingface.co/hf-inference/models/${targetModel}`,
+    `https://api-inference.huggingface.co/models/${targetModel}`,
+    `https://corsproxy.io/?${encodeURIComponent(`https://router.huggingface.co/hf-inference/models/${targetModel}`)}`,
+  ];
 
-  return {
-    audioUrl,
-    duration: parseFloat(audioBuffer.duration.toFixed(2)),
+  for (const endpoint of endpoints) {
+    try {
+      const hfRes = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${hfKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ inputs: cleanText }),
+      });
+
+      if (hfRes.ok) {
+        const arrayBuffer = await hfRes.arrayBuffer();
+        if (arrayBuffer && arrayBuffer.byteLength >= 50) {
+          const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+          const ctx = new AudioContextClass();
+          let audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
+
+          try {
+            audioBuffer = await applyHfSpeakerProfile(audioBuffer, speakerInfo);
+          } catch {}
+
+          const wavBlob = audioBufferToWavBlob(audioBuffer);
+          return {
+            audioUrl: URL.createObjectURL(wavBlob),
+            duration: parseFloat(audioBuffer.duration.toFixed(2)),
+          };
+        }
+      }
+    } catch (directErr) {
+      console.warn('Direct HF TTS notice:', directErr);
+    }
+  }
+
+  // 3. Fallback to 24kHz Studio Neural Voice if HF router endpoints fail or hit quota
+  console.log(`HF Engine fallback notice. Synthesizing via 24kHz Studio Neural Engine for speaker ${speakerId}...`);
+  const voiceMapping: Record<string, VoiceOption> = {
+    hf_male_thiha: 'Thiha',
+    hf_male_kyawkyaw: 'KyawKyaw',
+    hf_male_aungaung: 'AungAung',
+    hf_male_minthway: 'MinThway',
+    hf_female_nilar: 'Nilar',
+    hf_female_maythu: 'MayThu',
+    hf_female_thiri: 'Thiri',
+    hf_female_susu: 'SuSu',
   };
+  const mappedVoice = voiceMapping[speakerId] || 'Thiha';
+  return await synthesizeMyanmarVoice(cleanText, {
+    voice: mappedVoice,
+    style: 'conversational',
+    speed: options.speed || 1.0,
+    onStatusUpdate: options.onStatusUpdate,
+  });
 }
 
 /**
