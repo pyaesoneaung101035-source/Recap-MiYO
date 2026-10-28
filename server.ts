@@ -20,12 +20,22 @@ function isValidAsciiApiKey(key: any): boolean {
 }
 
 function cleanAsciiHeader(value: string): string {
-  return (value || '').replace(/[^\x21-\x7E]/g, '').trim();
+  let cleaned = (value || '').replace(/[^\x21-\x7E]/g, '').trim();
+  cleaned = cleaned.replace(/^["'`]+|["'`]+$/g, '');
+  cleaned = cleaned.replace(/^(Bearer|Key|api_key=)\s*/i, '');
+  return cleaned.trim();
 }
 
 function formatNetworkError(error: any, serviceName: string): string {
-  if (error?.message?.includes('ByteString') || error?.message?.includes('ERR_INVALID_CHAR')) {
+  const msg = error?.message || '';
+  if (msg.includes('ByteString') || msg.includes('ERR_INVALID_CHAR')) {
     return `${serviceName} API Key မမှန်ကန်ပါ (မြန်မာစာလုံးများ ပါဝင်နေပါသည်)။ ကျေးဇူးပြု၍ Dashboard မှ အင်္ဂလိပ် API Key အစစ်ကိုသာ ထည့်သွင်းပေးပါ။`;
+  }
+  if (msg.includes('API_KEY_INVALID') || msg.includes('key not valid')) {
+    return `${serviceName} API Key မမှန်ကန်ပါ (API_KEY_INVALID)။ Google AI Studio (https://aistudio.google.com/app/apikey) မှ 'AIzaSy...' ဖြင့် စတင်သော Key အမှန်ကို ရယူထည့်သွင်းပေးပါ။`;
+  }
+  if (msg.includes('RESOURCE_EXHAUSTED') || msg.includes('429')) {
+    return `${serviceName} API Key Quota ပြည့်သွားပါပြီ (429 RESOURCE_EXHAUSTED)။ ခေတ္တစောင့်ပါ သို့မဟုတ် အဆင့် 1 တွင် နောက် Key တစ်ခု ထည့်ပေးပါ။`;
   }
   return error?.message || `${serviceName} ချိတ်ဆက်မှု မအောင်မြင်ပါ`;
 }
@@ -51,18 +61,29 @@ async function startServer() {
   // Server-side Gemini API route
   app.post('/api/gemini/generate', async (req, res) => {
     try {
-      const { apiKey, model = 'gemini-2.0-flash', prompt, contents, parts, systemInstruction } = req.body;
+      const { apiKey, model = 'gemini-2.5-flash', prompt, contents, parts, systemInstruction } = req.body;
       const rawKey = apiKey || process.env.GEMINI_API_KEY;
 
       if (!rawKey) {
-        return res.status(400).json({ error: 'Gemini API Key မရှိသေးပါ။ ကျေးဇူးပြု၍ အဆင့် 1 (Gemini API Keys) တွင် Google API Key (AIzaSy...) ထည့်သွင်းပေးပါ။' });
+        return res.status(400).json({
+          error: 'Gemini API Key မရှိသေးပါ။ ကျေးဇူးပြု၍ အဆင့် 1 (Gemini API Keys) တွင် Google AI Studio မှ ရရှိသော Key (AIzaSy...) သို့မဟုတ် AQ Key ထည့်သွင်းပေးပါ။',
+        });
       }
 
-      if (!isValidAsciiApiKey(rawKey)) {
-        return res.status(400).json({ error: 'Gemini API Key မမှန်ကန်ပါ (မြန်မာစာလုံးများ မပါဝင်ရပါ)။ Google AI Studio မှ API Key (AIzaSy...) အစစ်ကို ထည့်ပေးပါ။' });
+      let keyToUse = cleanAsciiHeader(rawKey);
+
+      // Support AQ API keys gracefully by linking to server engine
+      if (keyToUse.startsWith('AQ') || keyToUse.startsWith('aq')) {
+        if (process.env.GEMINI_API_KEY) {
+          keyToUse = cleanAsciiHeader(process.env.GEMINI_API_KEY);
+        }
       }
 
-      const keyToUse = cleanAsciiHeader(rawKey);
+      if (!isValidAsciiApiKey(keyToUse)) {
+        return res.status(400).json({
+          error: 'Gemini API Key မမှန်ကန်ပါ (မြန်မာစာလုံးများ မပါဝင်ရပါ)။ Google AI Studio မှ API Key (AIzaSy...) သို့မဟုတ် AQ Key အစစ်ကို ထည့်ပေးပါ။',
+        });
+      }
 
       const ai = new GoogleGenAI({
         apiKey: keyToUse,
@@ -73,29 +94,104 @@ async function startServer() {
         },
       });
 
-      let modelToUse = model || 'gemini-2.0-flash';
-      if (modelToUse.includes('3.8') || modelToUse.includes('2.5') || modelToUse.includes('3.0') || modelToUse.includes('3.6')) {
-        modelToUse = 'gemini-2.0-flash';
+      const contentsPayload = contents || (parts ? { parts } : prompt);
+
+      // Prioritize high-quota Flash models (gemini-2.5-flash) to prevent 429 quota errors
+      const candidateModels = [
+        model || 'gemini-2.5-flash',
+        'gemini-flash-latest',
+        'gemini-2.0-flash',
+        'gemini-3.8-flash',
+      ];
+
+      let lastError: any = null;
+      for (const m of candidateModels) {
+        let retries = 0;
+        while (retries < 2) {
+          try {
+            const response = await ai.models.generateContent({
+              model: m,
+              contents: contentsPayload,
+              config: systemInstruction ? { systemInstruction } : undefined,
+            });
+
+            if (response && response.text !== undefined) {
+              return res.json({ text: response.text });
+            }
+          } catch (modelErr: any) {
+            lastError = modelErr;
+            const errMsg = modelErr?.message || '';
+            const isQuota = modelErr.status === 429 || errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('quota');
+            
+            if (isQuota && retries === 0) {
+              retries++;
+              console.warn(`429 Quota encountered on ${m}. Applying 1500ms pacing delay and retrying...`);
+              await new Promise((r) => setTimeout(r, 1500));
+              continue;
+            }
+
+            if (errMsg.includes('API_KEY_INVALID') || errMsg.includes('key not valid')) {
+              throw modelErr;
+            }
+            break;
+          }
+        }
       }
 
-      const contentsPayload = contents || (parts ? { parts } : prompt);
-      const response = await ai.models.generateContent({
-        model: modelToUse,
-        contents: contentsPayload,
-        config: systemInstruction ? { systemInstruction } : undefined,
-      });
-
-      return res.json({ text: response.text });
+      throw lastError || new Error('All Gemini model candidates failed');
     } catch (error: any) {
       console.error('Gemini error:', error);
       let errMsg = formatNetworkError(error, 'Gemini');
       if (error?.message?.includes('PROXY_GENERATION_DISABLED') || error?.message?.includes('not supported')) {
-        errMsg = 'Gemini API Key မရှိသေးပါ သို့မဟုတ် Key မမှန်ပါ။ ကျေးဇူးပြု၍ အဆင့် 1 တွင် Gemini API Key (AIzaSy...) သစ် ထည့်ပေးပါ။';
+        errMsg = 'Gemini API Key မမှန်ပါ သို့မဟုတ် မရှိသေးပါ။ ကျေးဇူးပြု၍ Google AI Studio (https://aistudio.google.com/app/apikey) မှ "AIzaSy..." သို့မဟုတ် AQ Key ထည့်ပေးပါ။';
       }
       return res.status(error.status || 500).json({
         error: errMsg,
         status: error.status,
       });
+    }
+  });
+
+  // Server-side Gemini Streaming API route (Server-Sent Events)
+  app.post('/api/gemini/stream', async (req, res) => {
+    try {
+      const { apiKey, prompt, contents, parts, systemInstruction } = req.body;
+      const rawKey = apiKey || process.env.GEMINI_API_KEY;
+
+      if (!rawKey || !isValidAsciiApiKey(rawKey)) {
+        return res.status(400).json({ error: 'Valid Gemini API Key is required.' });
+      }
+
+      const keyToUse = cleanAsciiHeader(rawKey);
+      const ai = new GoogleGenAI({
+        apiKey: keyToUse,
+        httpOptions: {
+          headers: { 'User-Agent': 'aistudio-build' },
+        },
+      });
+
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+
+      const contentsPayload = contents || (parts ? { parts } : prompt);
+      const responseStream = await ai.models.generateContentStream({
+        model: 'gemini-2.5-flash',
+        contents: contentsPayload,
+        config: systemInstruction ? { systemInstruction } : undefined,
+      });
+
+      for await (const chunk of responseStream) {
+        if (chunk.text) {
+          res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
+        }
+      }
+      res.write('data: [DONE]\n\n');
+      return res.end();
+    } catch (error: any) {
+      console.error('Gemini streaming error:', error);
+      res.write(`data: ${JSON.stringify({ error: error.message })}\n\n`);
+      return res.end();
     }
   });
 
@@ -737,7 +833,7 @@ ${cleanText}`;
   // Vite integration
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr: false },
       appType: 'spa',
     });
     app.use(vite.middlewares);

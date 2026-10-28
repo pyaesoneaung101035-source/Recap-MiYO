@@ -23,11 +23,11 @@ export const SubtitleStyleEditor: React.FC<SubtitleStyleEditorProps> = ({
     if (!onBlurBoxesChange) return;
     const newBox: BlurBox = {
       id: 'blur_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
-      x: 35,
-      y: 35,
-      width: 30,
-      height: 20,
-      blurAmount: 16,
+      x: 5,
+      y: 72,
+      width: 90,
+      height: 12,
+      blurAmount: 24,
       name: `Blur #${blurBoxes.length + 1}`,
     };
     onBlurBoxesChange([...blurBoxes, newBox]);
@@ -262,20 +262,22 @@ export const SubtitleStyleEditor: React.FC<SubtitleStyleEditorProps> = ({
                     <div className="flex gap-2">
                       <input
                         type="range"
-                        min={10}
+                        min={5}
                         max={100}
-                        step={2}
+                        step={1}
                         value={box.width}
                         onChange={(e) => handleUpdateBlurBox(box.id, { width: parseInt(e.target.value) })}
+                        title="အကျယ် (Width %)"
                         className="w-1/2 h-1.5 bg-white/10 rounded accent-white cursor-pointer"
                       />
                       <input
                         type="range"
-                        min={10}
-                        max={100}
-                        step={2}
+                        min={3}
+                        max={60}
+                        step={1}
                         value={box.height}
                         onChange={(e) => handleUpdateBlurBox(box.id, { height: parseInt(e.target.value) })}
+                        title="အမြင့် (Height %)"
                         className="w-1/2 h-1.5 bg-white/10 rounded accent-white cursor-pointer"
                       />
                     </div>

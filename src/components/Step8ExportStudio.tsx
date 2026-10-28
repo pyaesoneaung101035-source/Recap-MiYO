@@ -42,7 +42,13 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
   setProject,
   onPrevStep,
 }) => {
-  const [frameSize, setFrameSize] = useState<'tiktok' | 'youtube' | 'square' | 'portrait'>('tiktok');
+  const getInitialFrameSize = () => {
+    if (project.aspectRatio === '16:9') return 'youtube';
+    if (project.aspectRatio === '1:1') return 'square';
+    if (project.aspectRatio === '4:5') return 'portrait';
+    return 'tiktok';
+  };
+  const [frameSize, setFrameSize] = useState<'tiktok' | 'youtube' | 'square' | 'portrait'>(getInitialFrameSize);
   const [exportQuality, setExportQuality] = useState<'4k' | '1080p' | '720p' | '480p'>('1080p');
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState<number>(0);
@@ -127,11 +133,29 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
 
     offCtx.clearRect(0, 0, canvasWidth, canvasHeight);
 
-    if (project.frameCrop?.backgroundStyle === 'blur') {
+    // Calculate aspect ratio preservation for video
+    const vw = (videoEl.videoWidth && videoEl.videoWidth > 0) ? videoEl.videoWidth : canvasWidth;
+    const vh = (videoEl.videoHeight && videoEl.videoHeight > 0) ? videoEl.videoHeight : canvasHeight;
+    const videoAspect = vw / vh;
+    const canvasAspect = canvasWidth / canvasHeight;
+
+    const crop = project.frameCrop || { scale: 1.0, posX: 0, posY: 0, fitMode: 'contain', backgroundStyle: 'blur' };
+
+    // Background treatment if letterboxed / contain
+    if (crop.backgroundStyle === 'blur') {
       offCtx.save();
-      offCtx.filter = 'blur(25px) brightness(0.6)';
+      offCtx.filter = 'blur(28px) brightness(0.55)';
       try {
-        offCtx.drawImage(videoEl, 0, 0, canvasWidth, canvasHeight);
+        let bgW = canvasWidth;
+        let bgH = canvasHeight;
+        if (videoAspect > canvasAspect) {
+          bgH = canvasHeight;
+          bgW = canvasHeight * videoAspect;
+        } else {
+          bgW = canvasWidth;
+          bgH = canvasWidth / videoAspect;
+        }
+        offCtx.drawImage(videoEl, (canvasWidth - bgW) / 2, (canvasHeight - bgH) / 2, bgW, bgH);
       } catch {}
       offCtx.restore();
     } else {
@@ -140,7 +164,6 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
     }
 
     const kf = getInterpolatedKeyframe(project.keyframes, currentTime);
-    const crop = project.frameCrop || { scale: 1.0, posX: 0, posY: 0, fitMode: 'cover', backgroundStyle: 'blur' };
 
     offCtx.save();
 
@@ -166,14 +189,36 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
       offCtx.filter = combinedFilter;
     }
 
+    // Determine intrinsic draw width & height according to fitMode to avoid stretching/squashing
+    let drawW = canvasWidth;
+    let drawH = canvasHeight;
+    if (crop.fitMode === 'cover') {
+      if (videoAspect > canvasAspect) {
+        drawH = canvasHeight;
+        drawW = canvasHeight * videoAspect;
+      } else {
+        drawW = canvasWidth;
+        drawH = canvasWidth / videoAspect;
+      }
+    } else {
+      // 'contain' (default standard fit, preserves exact original aspect ratio)
+      if (videoAspect > canvasAspect) {
+        drawW = canvasWidth;
+        drawH = canvasWidth / videoAspect;
+      } else {
+        drawH = canvasHeight;
+        drawW = canvasHeight * videoAspect;
+      }
+    }
+
     try {
       if (videoEl.readyState >= 2) {
         offCtx.drawImage(
           videoEl,
-          -canvasWidth / 2,
-          -canvasHeight / 2,
-          canvasWidth,
-          canvasHeight
+          -drawW / 2,
+          -drawH / 2,
+          drawW,
+          drawH
         );
       }
     } catch {}
@@ -184,27 +229,50 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
     ctx.clearRect(0, 0, canvasWidth, canvasHeight);
     ctx.drawImage(offCanvas, 0, 0);
 
-    // Apply Blur Boxes over the rendered video scene
+    // Determine the actual drawn video bounds on the canvas
+    const videoLeft = (canvasWidth - drawW) / 2;
+    const videoTop = (canvasHeight - drawH) / 2;
+
+    // Reference scaling for subtitles and UI overlays (guaranteed minimum readable scale)
+    const isLandscape = canvasWidth > canvasHeight;
+    const scaleFactor = Math.max(1.0, canvasHeight / (isLandscape ? 540 : 960));
+
+    // Apply Blur Boxes over the rendered video scene with exact coordinate fidelity
     if (project.blurBoxes && project.blurBoxes.length > 0) {
       for (const box of project.blurBoxes) {
-        const bx = (box.x / 100) * canvasWidth;
-        const by = (box.y / 100) * canvasHeight;
-        const bw = (box.width / 100) * canvasWidth;
-        const bh = (box.height / 100) * canvasHeight;
+        // If the video is letterboxed (e.g. vertical video in 16:9 canvas), position blur box on the video frame
+        let bx = (box.x / 100) * canvasWidth;
+        let by = (box.y / 100) * canvasHeight;
+        let bw = (box.width / 100) * canvasWidth;
+        let bh = (box.height / 100) * canvasHeight;
+
+        if (drawW < canvasWidth - 10) {
+          bx = videoLeft + (box.x / 100) * drawW;
+          bw = (box.width / 100) * drawW;
+        }
+        if (drawH < canvasHeight - 10) {
+          by = videoTop + (box.y / 100) * drawH;
+          bh = (box.height / 100) * drawH;
+        }
 
         if (bw > 0 && bh > 0) {
           ctx.save();
           ctx.beginPath();
-          ctx.rect(bx, by, bw, bh);
+          if (ctx.roundRect) {
+            ctx.roundRect(bx, by, bw, bh, 6 * scaleFactor);
+          } else {
+            ctx.rect(bx, by, bw, bh);
+          }
           ctx.clip();
 
-          const blurPx = Math.max(12, (box.blurAmount || 16) * (canvasWidth / 640));
-          ctx.filter = `blur(${blurPx}px) brightness(0.85)`;
+          const blurPx = Math.max(16, (box.blurAmount || 20) * scaleFactor * 1.25);
+          ctx.filter = `blur(${blurPx}px) brightness(0.8)`;
 
           // Draw offscreen rendered frame through blur filter
           ctx.drawImage(offCanvas, 0, 0);
 
-          ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+          // Dark tint so underlying foreign subtitles/watermarks are completely obscured
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
           ctx.fillRect(bx, by, bw, bh);
 
           ctx.restore();
@@ -223,43 +291,67 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
         const settings = project.subtitleSettings;
         ctx.save();
 
-        const fontSize = (canvasWidth / 640) * settings.fontSize;
-        ctx.font = `700 ${fontSize}px '${settings.fontFamily}', 'Pyidaungsu', 'Noto Sans Myanmar', sans-serif`;
+        const baseFontSize = Math.max(26, settings.fontSize || 28);
+        const targetFontSize = Math.round(baseFontSize * scaleFactor);
+        const cleanFont = (settings.fontFamily || 'Pyidaungsu').replace(/['"]/g, '').trim();
+
+        // Robust canvas font string without quotes that could break CSS font syntax
+        ctx.font = `bold ${targetFontSize}px "${cleanFont}", "Noto Sans Myanmar", sans-serif`;
+        if (ctx.font.startsWith('10px') || ctx.font.includes('10px sans-serif')) {
+          ctx.font = `bold ${targetFontSize}px sans-serif`;
+        }
+
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
 
-        let posY = canvasHeight - 120;
-        if (settings.positionY === 'center') posY = canvasHeight / 2;
-        if (settings.positionY === 'top') posY = 120;
+        // Proportional Y baseline: if letterboxed, anchor relative to video area
+        let posY = (drawH < canvasHeight - 10) ? (videoTop + drawH * 0.85) : (canvasHeight * 0.86);
+        if (settings.positionY === 'center') posY = (drawH < canvasHeight - 10) ? (videoTop + drawH * 0.50) : (canvasHeight * 0.50);
+        if (settings.positionY === 'top') posY = (drawH < canvasHeight - 10) ? (videoTop + drawH * 0.12) : (canvasHeight * 0.12);
 
-        const offsetX = ((settings.offsetX || 0) / 360) * canvasWidth;
-        const offsetY = ((settings.offsetY || 0) / 640) * canvasHeight;
+        const textX = canvasWidth / 2 + (settings.offsetX || 0) * scaleFactor;
+        const textY = posY + (settings.offsetY || 0) * scaleFactor;
 
         const metrics = ctx.measureText(text);
-        const bgWidth = metrics.width + 36;
-        const bgHeight = fontSize + 24;
+        const padX = 28 * scaleFactor;
+        const padY = 16 * scaleFactor;
+        const bgWidth = metrics.width + padX;
+        const bgHeight = targetFontSize * 1.35 + padY;
+        const radius = 12 * scaleFactor;
 
         if (settings.backgroundColor && settings.backgroundColor !== 'transparent') {
           ctx.fillStyle = settings.backgroundColor;
           ctx.beginPath();
-          ctx.roundRect(
-            canvasWidth / 2 + offsetX - bgWidth / 2,
-            posY + offsetY - bgHeight / 2,
-            bgWidth,
-            bgHeight,
-            12
-          );
+          if (ctx.roundRect) {
+            ctx.roundRect(
+              textX - bgWidth / 2,
+              textY - bgHeight / 2,
+              bgWidth,
+              bgHeight,
+              radius
+            );
+          } else {
+            ctx.rect(
+              textX - bgWidth / 2,
+              textY - bgHeight / 2,
+              bgWidth,
+              bgHeight
+            );
+          }
           ctx.fill();
         }
 
-        if (settings.strokeWidth > 0) {
+        const strokeWidth = Math.max(2.5, (settings.strokeWidth || 3) * scaleFactor);
+        if (strokeWidth > 0) {
           ctx.strokeStyle = settings.strokeColor || '#000000';
-          ctx.lineWidth = settings.strokeWidth * 2;
-          ctx.strokeText(text, canvasWidth / 2 + offsetX, posY + offsetY);
+          ctx.lineWidth = strokeWidth * 2;
+          ctx.lineJoin = 'round';
+          ctx.miterLimit = 2;
+          ctx.strokeText(text, textX, textY);
         }
 
         ctx.fillStyle = settings.color || '#ffffff';
-        ctx.fillText(text, canvasWidth / 2 + offsetX, posY + offsetY);
+        ctx.fillText(text, textX, textY);
         ctx.restore();
       }
     }
@@ -650,7 +742,19 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
                 <button
                   key={s.id}
                   type="button"
-                  onClick={() => setFrameSize(s.id as any)}
+                  onClick={() => {
+                    const id = s.id as 'tiktok' | 'youtube' | 'square' | 'portrait';
+                    setFrameSize(id);
+                    const ratioMap: Record<string, any> = {
+                      tiktok: '9:16',
+                      youtube: '16:9',
+                      portrait: '4:5',
+                      square: '1:1',
+                    };
+                    if (ratioMap[id]) {
+                      setProject((prev) => ({ ...prev, aspectRatio: ratioMap[id] }));
+                    }
+                  }}
                   className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
                     frameSize === s.id
                       ? 'bg-cyan-500/15 border-cyan-400/50 text-cyan-200 ring-1 ring-cyan-400/30'

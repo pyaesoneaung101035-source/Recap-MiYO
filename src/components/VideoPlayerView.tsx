@@ -19,7 +19,7 @@ import {
   Trash2,
   Zap,
 } from 'lucide-react';
-import { ProjectState, SubtitleSettings, TranscriptSegment, AlightKeyframe, BlurBox } from '../types';
+import { ProjectState, SubtitleSettings, TranscriptSegment, AlightKeyframe, BlurBox, AspectRatioType } from '../types';
 import { getInterpolatedKeyframe, getFilterCss } from '../utils/alightMotionRenderer';
 
 interface VideoPlayerViewProps {
@@ -411,9 +411,25 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
                 onTimeUpdate={handleTimeUpdate}
                 onLoadedMetadata={() => {
                   if (videoRef.current) {
+                    const v = videoRef.current;
+                    const vw = v.videoWidth || 1;
+                    const vh = v.videoHeight || 1;
+                    const ratioVal = vw / vh;
+                    let detectedRatio: AspectRatioType = '9:16';
+                    if (ratioVal > 1.25) {
+                      detectedRatio = '16:9';
+                    } else if (ratioVal >= 0.88 && ratioVal <= 1.15) {
+                      detectedRatio = '1:1';
+                    } else if (ratioVal > 0.68 && ratioVal < 0.88) {
+                      detectedRatio = '4:5';
+                    } else {
+                      detectedRatio = '9:16';
+                    }
+
                     setProject((prev) => ({
                       ...prev,
-                      videoDuration: videoRef.current?.duration || 0,
+                      videoDuration: v.duration || 0,
+                      aspectRatio: detectedRatio,
                     }));
                   }
                 }}

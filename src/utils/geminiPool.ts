@@ -46,13 +46,25 @@ export function parseKeysFromInput(input: string): GeminiKeyInfo[] {
     // Skip lines with non-ASCII characters (e.g. Burmese Unicode characters)
     if (/[^\x21-\x7E]/.test(trimmed)) continue;
 
+    // If an AQ API key is found, automatically register it for AssemblyAI Whisper STT
+    if (trimmed.startsWith('AQ') || trimmed.startsWith('aq')) {
+      try {
+        const rawOther = localStorage.getItem('motion_recap_other_api_keys');
+        const other = rawOther ? JSON.parse(rawOther) : {};
+        localStorage.setItem('motion_recap_other_api_keys', JSON.stringify({ ...other, assemblyAiKey: trimmed }));
+      } catch {}
+    }
+
     if (existingMap.has(trimmed)) {
       result.push(existingMap.get(trimmed)!);
     } else {
+      const isAqKey = trimmed.startsWith('AQ') || trimmed.startsWith('aq');
       result.push({
         id: 'key_' + Math.random().toString(36).substring(2, 9),
         key: trimmed,
-        name: `Key #${result.length + 1} (${trimmed.substring(0, 4)}...${trimmed.substring(trimmed.length - 4)})`,
+        name: isAqKey
+          ? `AQ Whisper Key #${result.length + 1} (${trimmed.substring(0, 4)}...${trimmed.substring(trimmed.length - 4)})`
+          : `Key #${result.length + 1} (${trimmed.substring(0, 4)}...${trimmed.substring(trimmed.length - 4)})`,
         callCount: 0,
         status: 'active',
         lastUsed: undefined,
@@ -75,28 +87,21 @@ export function resetKeyStatuses(keys: GeminiKeyInfo[]): GeminiKeyInfo[] {
 }
 
 /**
- * Execute a Gemini prompt with smart multi-key rotation and automatic quota fallback.
- * Supports sending multimodal inline data (Audio track / Video frames).
- */
-/**
- * Execute a Gemini prompt with smart multi-key rotation and automatic quota fallback.
- * Supports sending multimodal inline data (Audio track / Video frames).
+ * Execute a Gemini prompt with smart multi-key rotation, 1.2s pacing delay, and automatic 429 quota backoff.
+ * Uses high-quota Flash model (gemini-2.5-flash) by default.
  */
 export async function callGeminiWithRotation(
   prompt: string,
   systemInstruction?: string,
-  model = 'gemini-2.0-flash',
+  model = 'gemini-2.5-flash',
   mediaParts?: Array<{ mimeType: string; data: string }>
 ): Promise<{ text: string; usedKeyName: string }> {
   let keys = loadGeminiKeys();
 
-  // Normalize model name for standard Google Generative AI REST API
-  let activeModel = model || 'gemini-2.0-flash';
-  if (activeModel.includes('2.5') || activeModel.includes('3.8') || activeModel.includes('3.0')) {
-    activeModel = 'gemini-2.0-flash';
-  }
+  // Rate limiting delay: ensure minimum 1200ms delay between consecutive requests to stay under RPM limit
+  await new Promise((r) => setTimeout(r, 1200));
 
-  // Construct parts
+  // Construct parts payload
   const parts: any[] = [];
   if (mediaParts && mediaParts.length > 0) {
     for (const m of mediaParts) {
@@ -110,112 +115,63 @@ export async function callGeminiWithRotation(
   }
   parts.push({ text: prompt });
 
-  // If no keys in local storage, try the server default key
+  // If no client keys in local storage, route to server using environment GEMINI_API_KEY
   if (keys.length === 0) {
     const serverRes = await fetch('/api/gemini/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, parts, systemInstruction, model: activeModel }),
+      body: JSON.stringify({ prompt, parts, systemInstruction, model: 'gemini-2.5-flash' }),
     });
 
     if (!serverRes.ok) {
       const errJson = await serverRes.json().catch(() => ({}));
       const msg = errJson.error || 'Server Gemini API call failed. Please add Gemini API keys in Step 1 (API Settings).';
       if (msg.includes('PROXY_GENERATION_DISABLED')) {
-        throw new Error('Gemini API Key မရှိသေးပါ။ ကျေးဇူးပြု၍ အဆင့် 1 တွင် Gemini API Key (AIzaSy...) ထည့်သွင်းပေးပါ။');
+        throw new Error('Gemini API Key မရှိသေးပါ။ ကျေးဇူးပြု၍ အဆင့် 1 တွင် Gemini API Key (AIzaSy...) သို့မဟုတ် AQ Key ထည့်သွင်းပေးပါ။');
       }
       throw new Error(msg);
     }
     const data = await serverRes.json();
-    return { text: data.text, usedKeyName: 'Server Default Key' };
+    return { text: data.text, usedKeyName: 'Server Flash Engine' };
   }
 
-  // Filter keys that haven't been permanently invalidated in this cycle
+  // Filter keys and attempt server proxy call per rotated key
   const maxAttempts = keys.length * 2;
   let attempts = 0;
   let lastError = '';
 
   while (attempts < maxAttempts) {
-    // Pick next key in round-robin order
     const keyInfo = keys[currentKeyIndex % keys.length];
     currentKeyIndex = (currentKeyIndex + 1) % keys.length;
     attempts++;
 
-    // Skip keys marked as quota_exceeded or invalid if other active keys exist
     const hasActiveKeys = keys.some((k) => k.status === 'active');
     if (hasActiveKeys && keyInfo.status !== 'active') {
       continue;
     }
 
     try {
-      // Direct Google Gemini API call (phone & browser direct call support)
-      const directUrl = `https://generativelanguage.googleapis.com/v1beta/models/${activeModel}:generateContent?key=${encodeURIComponent(keyInfo.key)}`;
-      
-      const payload: any = {
-        contents: [
-          {
-            parts,
-          },
-        ],
-      };
+      // If key is an AQ Key, pass empty string to let server handle Gemini while AQ powers Whisper
+      const isAqKey = keyInfo.key.startsWith('AQ') || keyInfo.key.startsWith('aq');
+      const keyToSend = isAqKey ? '' : keyInfo.key;
 
-      if (systemInstruction) {
-        payload.systemInstruction = {
-          parts: [{ text: systemInstruction }],
-        };
-      }
+      // Call server route with selected rotated key
+      const res = await fetch('/api/gemini/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apiKey: keyToSend,
+          model: 'gemini-2.5-flash',
+          prompt,
+          parts,
+          systemInstruction,
+        }),
+      });
 
-      let res: Response | null = null;
-
-      try {
-        res = await fetch(directUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-      } catch (directFetchErr) {
-        console.warn('Direct Gemini API fetch notice:', directFetchErr);
-      }
-
-      // Fallback 1: Server proxy endpoint (/api/gemini/generate)
-      if (!res || (!res.ok && res.status !== 429 && res.status !== 400 && res.status !== 403)) {
-        try {
-          res = await fetch('/api/gemini/generate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              apiKey: keyInfo.key,
-              model: activeModel,
-              prompt,
-              parts,
-              systemInstruction,
-            }),
-          });
-        } catch (proxyErr) {
-          console.warn('Server Gemini proxy notice:', proxyErr);
-        }
-      }
-
-      // Fallback 2: CORS Proxy wrapper endpoint
-      if (!res || (!res.ok && res.status !== 429 && res.status !== 400 && res.status !== 403)) {
-        try {
-          const corsUrl = `https://corsproxy.io/?${encodeURIComponent(directUrl)}`;
-          res = await fetch(corsUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          });
-        } catch (corsErr) {
-          console.warn('CORS proxy Gemini notice:', corsErr);
-        }
-      }
-
-      if (res && res.ok) {
+      if (res.ok) {
         const data = await res.json();
-        const candidateText =
-          data.candidates?.[0]?.content?.parts?.[0]?.text || data.text || '';
+        const candidateText = data.text || '';
 
-        // Success! Update key stats
         keyInfo.callCount = (keyInfo.callCount || 0) + 1;
         keyInfo.status = 'active';
         keyInfo.lastUsed = new Date().toLocaleTimeString();
@@ -225,23 +181,17 @@ export async function callGeminiWithRotation(
         return { text: candidateText, usedKeyName: keyInfo.name };
       }
 
-      if (!res) {
-        keyInfo.lastError = 'API Unreachable / Network Error';
-        saveGeminiKeys(keys);
-        lastError = 'API Unreachable';
-        continue;
-      }
-
-      // Check if error is quota exhaustion or invalid key
       const errText = await res.text();
       const isQuota = res.status === 429 || errText.includes('RESOURCE_EXHAUSTED') || errText.includes('quota');
       const isInvalid = res.status === 400 && (errText.includes('API_KEY_INVALID') || errText.includes('key not valid') || errText.includes('PROXY_GENERATION_DISABLED'));
 
       if (isQuota) {
-        console.warn(`Key ${keyInfo.name} reached quota limit. Rotating to next key.`);
+        console.warn(`Key ${keyInfo.name} reached quota limit (429). Pacing with backoff and rotating to next key.`);
         keyInfo.status = 'quota_exceeded';
         keyInfo.lastError = '429 Quota Exceeded';
-      } else if (isInvalid) {
+        // Exponential backoff delay on 429 before next attempt
+        await new Promise((r) => setTimeout(r, Math.min(6000, 1500 * attempts)));
+      } else if (isInvalid && !isAqKey) {
         console.warn(`Key ${keyInfo.name} is invalid.`);
         keyInfo.status = 'invalid';
         keyInfo.lastError = 'Invalid Key';
@@ -360,9 +310,9 @@ export async function generateTimestampedTranscript(
         const offsetSec = chunk.startTimeSeconds; // Part 1: 0, Part 2: 180s (+3m), Part 3: 360s (+6m)...
         const partNum = chunk.partIndex;
 
-        // Pacing delay between chunk API calls to protect API quota
+        // Pacing delay between chunk API calls to protect API quota (Rate limit / RPM control)
         if (i > 0) {
-          await new Promise((r) => setTimeout(r, 1200));
+          await new Promise((r) => setTimeout(r, 2000));
         }
 
         const partMsg = `🎙️ [အဆင့် ၁: Part ${partNum}/${totalParts}] (Offset: +${Math.floor(offsetSec / 60)}m / +${offsetSec}s) - Transcribing & Translating speech to Myanmar TTX...`;
@@ -402,7 +352,7 @@ Return ONLY a valid JSON array matching this exact format:
             const { text: chunkResText, usedKeyName } = await callGeminiWithRotation(
               chunkPrompt,
               buildSystemPromptForMode(aiMode),
-              'gemini-2.0-flash',
+              'gemini-2.5-flash',
               [{ mimeType: chunk.mimeType, data: chunk.base64Wav }]
             );
 

@@ -132,15 +132,13 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
 
     try {
       const activeKey = geminiKeys.find((k) => k.status === 'active') || geminiKeys[0];
-      const directUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${encodeURIComponent(
-        activeKey.key
-      )}`;
-
-      const res = await fetch(directUrl, {
+      const res = await fetch('/api/gemini/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: 'Hello, respond with: OK' }] }],
+          apiKey: activeKey.key,
+          prompt: 'Hello, respond with: OK',
+          model: 'gemini-3.8-flash',
         }),
       });
 

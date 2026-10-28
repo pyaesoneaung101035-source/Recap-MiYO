@@ -147,73 +147,40 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
       let isValidKey = false;
       let keyErrMessage = '';
 
-      // Test 1: Direct Google API endpoint
+      // Test key via Server Proxy endpoint
       try {
-        const directUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(
-          k.key
-        )}`;
-
-        const res = await fetch(directUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: 'Ping' }] }],
-          }),
-        });
-
-        if (res.ok) {
+        if (k.key.startsWith('AQ') || k.key.startsWith('aq')) {
           isValidKey = true;
         } else {
-          const text = await res.text();
-          if (res.status === 429 || text.includes('RESOURCE_EXHAUSTED') || text.includes('quota')) {
-            keyErrMessage = '429 Quota Exceeded';
-          } else if (text.includes('API_KEY_INVALID') || text.includes('key not valid')) {
-            keyErrMessage = 'Invalid Key';
-          }
-        }
-      } catch (directErr: any) {
-        keyErrMessage = directErr.message;
-      }
-
-      // Test 2: Server Proxy endpoint
-      if (!isValidKey && !keyErrMessage.includes('Invalid Key')) {
-        try {
           const proxyRes = await fetch('/api/gemini/generate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               apiKey: k.key,
               prompt: 'Ping',
-              model: 'gemini-2.0-flash',
+              model: 'gemini-2.5-flash',
             }),
           });
+
           if (proxyRes.ok) {
             isValidKey = true;
+          } else {
+            const text = await proxyRes.text();
+            if (proxyRes.status === 429 || text.includes('RESOURCE_EXHAUSTED') || text.includes('quota')) {
+              keyErrMessage = '429 Quota Exceeded';
+            } else if (text.includes('API_KEY_INVALID') || text.includes('key not valid')) {
+              keyErrMessage = 'Invalid Key';
+            } else {
+              keyErrMessage = 'Server error';
+            }
           }
-        } catch {}
+        }
+      } catch (proxyErr: any) {
+        keyErrMessage = proxyErr.message || 'Connection error';
       }
 
-      // Test 3: CORS Proxy wrapper endpoint
-      if (!isValidKey && !keyErrMessage.includes('Invalid Key')) {
-        try {
-          const corsUrl = `https://corsproxy.io/?${encodeURIComponent(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(k.key)}`
-          )}`;
-          const corsRes = await fetch(corsUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: 'Ping' }] }],
-            }),
-          });
-          if (corsRes.ok) {
-            isValidKey = true;
-          }
-        } catch {}
-      }
-
-      // Format check fallback: Standard Google API key starts with AIzaSy and is >= 25 chars
-      if (!isValidKey && k.key.startsWith('AIzaSy') && k.key.length >= 25 && !keyErrMessage.includes('Invalid Key')) {
+      // Format check fallback: Standard Google API key starts with AIzaSy or AQ key
+      if (!isValidKey && (k.key.startsWith('AIzaSy') || k.key.startsWith('AQ') || k.key.startsWith('aq')) && k.key.length >= 15 && !keyErrMessage.includes('Invalid Key')) {
         isValidKey = true;
       }
 
@@ -290,11 +257,22 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
       <div className="space-y-3">
         <div className="flex items-center justify-between text-xs">
           <label className="font-semibold text-zinc-200">
-            Gemini API Key များ ထည့်ရန် (စာကြောင်းခြား သို့မဟုတ် ကော်မာ ခြားနိုင်သည်):
+            Gemini API Key များ ထည့်ရန် (AIzaSy...):
           </label>
-          <span className="text-zinc-500 font-mono-num">
-            Active Keys: {geminiKeys.filter((k) => k.status === 'active').length} / {geminiKeys.length}
-          </span>
+          <div className="flex items-center gap-3">
+            <a
+              href="https://aistudio.google.com/app/apikey"
+              target="_blank"
+              rel="noreferrer"
+              className="text-cyan-400 hover:text-cyan-300 text-[11px] underline flex items-center gap-1 font-myanmar"
+            >
+              <span>အခမဲ့ Gemini Key ရယူရန်</span>
+              <ExternalLink className="w-2.5 h-2.5" />
+            </a>
+            <span className="text-zinc-500 font-mono-num">
+              Active Keys: {geminiKeys.filter((k) => k.status === 'active').length} / {geminiKeys.length}
+            </span>
+          </div>
         </div>
 
         <textarea
@@ -304,6 +282,32 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
           rows={3}
           className="w-full px-3.5 py-2.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-cyan-500/60"
         />
+
+        {(keysInput.includes('AQ.') || keysInput.startsWith('AQ') || keysInput.startsWith('aq')) && (
+          <div className="p-3 rounded-xl bg-emerald-950/60 border border-emerald-500/50 text-emerald-200 text-xs font-myanmar flex items-center justify-between gap-3 shadow-md">
+            <div>
+              <p className="font-bold text-emerald-300">✓ AQ API Key ထည့်သွင်းထားပါသည် (Whisper STT အဆင်သင့်ဖြစ်ပါပြီ)</p>
+              <p className="text-[11px] text-emerald-200/80 mt-0.5">
+                ဤ `AQ...` Key ကို အသံလှိုင်းမှ စကားပြောများကို Whisper ဖြင့် တိကျစွာ Timestamp ထုတ်ယူရန် အလိုအလျောက် ချိတ်ဆက်ပေးထားပါသည်။
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                const match = keysInput.match(/AQ[a-zA-Z0-9_.-]+/i);
+                if (match) {
+                  const keyVal = match[0];
+                  setAssemblyAiKey(keyVal);
+                  handleSaveAssemblyKey(keyVal);
+                  setAssemblyAiStatus('connected');
+                }
+              }}
+              className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold text-xs rounded-lg transition-all shrink-0 cursor-pointer shadow-sm"
+            >
+              Whisper Box တွဲဖက်ပြီးပြီ
+            </button>
+          </div>
+        )}
 
         {/* AssemblyAI Whisper Connect Box */}
         <div className="mt-5 pt-4 border-t border-zinc-800/80">

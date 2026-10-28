@@ -18,7 +18,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const [exportProgress, setExportProgress] = useState<number>(0);
   const [downloadedUrl, setDownloadedUrl] = useState<string | null>(null);
   const [downloadFilename, setDownloadFilename] = useState<string>('recap_perfect.mp4');
-  const [frameSize, setFrameSize] = useState<'tiktok' | 'youtube' | 'landscape'>('tiktok');
+  const getInitialFrameSize = () => {
+    if (project.aspectRatio === '16:9') return 'youtube';
+    if (project.aspectRatio === '1:1') return 'square';
+    if (project.aspectRatio === '4:5') return 'portrait';
+    return 'tiktok';
+  };
+  const [frameSize, setFrameSize] = useState<'tiktok' | 'youtube' | 'square' | 'portrait' | 'landscape'>(getInitialFrameSize);
 
   if (!isOpen) return null;
 
@@ -64,6 +70,12 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       } else if (frameSize === 'youtube') {
         canvas.width = 1920;
         canvas.height = 1080; // 16:9 Standard YouTube
+      } else if (frameSize === 'square') {
+        canvas.width = 1080;
+        canvas.height = 1080; // 1:1 Square
+      } else if (frameSize === 'portrait') {
+        canvas.width = 1080;
+        canvas.height = 1350; // 4:5 Portrait
       } else {
         canvas.width = 1280;
         canvas.height = 720; // Standard Landscape HD
@@ -183,16 +195,30 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         const offCtx = offCanvas.getContext('2d');
 
         if (offCtx) {
+          const vw = (video.videoWidth && video.videoWidth > 0) ? video.videoWidth : canvas.width;
+          const vh = (video.videoHeight && video.videoHeight > 0) ? video.videoHeight : canvas.height;
+          const videoAspect = vw / vh;
+          const canvasAspect = canvas.width / canvas.height;
+
           const kf = getInterpolatedKeyframe(project.keyframes, currentTime);
-          const crop = project.frameCrop || { scale: 1.0, posX: 0, posY: 0, fitMode: 'cover', backgroundStyle: 'blur' };
+          const crop = project.frameCrop || { scale: 1.0, posX: 0, posY: 0, fitMode: 'contain', backgroundStyle: 'blur' };
 
           offCtx.clearRect(0, 0, canvas.width, canvas.height);
 
           if (crop.backgroundStyle === 'blur') {
             offCtx.save();
-            offCtx.filter = 'blur(25px) brightness(0.6)';
+            offCtx.filter = 'blur(28px) brightness(0.55)';
             try {
-              offCtx.drawImage(video, 0, 0, canvas.width, canvas.height);
+              let bgW = canvas.width;
+              let bgH = canvas.height;
+              if (videoAspect > canvasAspect) {
+                bgH = canvas.height;
+                bgW = canvas.height * videoAspect;
+              } else {
+                bgW = canvas.width;
+                bgH = canvas.width / videoAspect;
+              }
+              offCtx.drawImage(video, (canvas.width - bgW) / 2, (canvas.height - bgH) / 2, bgW, bgH);
             } catch {}
             offCtx.restore();
           } else {
@@ -218,8 +244,30 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             offCtx.filter = `${filterStr} ${kf.blur > 0 ? `blur(${kf.blur}px)` : ''}`.trim();
           }
 
+          // Calculate draw dimensions based on fitMode to avoid stretching/squashing
+          let drawW = canvas.width;
+          let drawH = canvas.height;
+          if (crop.fitMode === 'cover') {
+            if (videoAspect > canvasAspect) {
+              drawH = canvas.height;
+              drawW = canvas.height * videoAspect;
+            } else {
+              drawW = canvas.width;
+              drawH = canvas.width / videoAspect;
+            }
+          } else {
+            // 'contain' (default)
+            if (videoAspect > canvasAspect) {
+              drawW = canvas.width;
+              drawH = canvas.width / videoAspect;
+            } else {
+              drawH = canvas.height;
+              drawW = canvas.height * videoAspect;
+            }
+          }
+
           try {
-            offCtx.drawImage(video, -canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height);
+            offCtx.drawImage(video, -drawW / 2, -drawH / 2, drawW, drawH);
           } catch {}
 
           offCtx.restore();
@@ -228,73 +276,113 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           ctx.clearRect(0, 0, canvas.width, canvas.height);
           ctx.drawImage(offCanvas, 0, 0);
 
-          // Draw Blur Boxes
+          const videoLeft = (canvas.width - drawW) / 2;
+          const videoTop = (canvas.height - drawH) / 2;
+
+          const isLandscape = canvas.width > canvas.height;
+          const scaleFactor = Math.max(1.0, canvas.height / (isLandscape ? 540 : 960));
+
+          // Draw Blur Boxes with proportional scaling and coordinates
           if (project.blurBoxes && project.blurBoxes.length > 0) {
             for (const box of project.blurBoxes) {
-              const bx = (box.x / 100) * canvas.width;
-              const by = (box.y / 100) * canvas.height;
-              const bw = (box.width / 100) * canvas.width;
-              const bh = (box.height / 100) * canvas.height;
+              let bx = (box.x / 100) * canvas.width;
+              let by = (box.y / 100) * canvas.height;
+              let bw = (box.width / 100) * canvas.width;
+              let bh = (box.height / 100) * canvas.height;
+
+              if (drawW < canvas.width - 10) {
+                bx = videoLeft + (box.x / 100) * drawW;
+                bw = (box.width / 100) * drawW;
+              }
+              if (drawH < canvas.height - 10) {
+                by = videoTop + (box.y / 100) * drawH;
+                bh = (box.height / 100) * drawH;
+              }
 
               if (bw > 0 && bh > 0) {
                 ctx.save();
                 ctx.beginPath();
-                ctx.rect(bx, by, bw, bh);
+                if (ctx.roundRect) {
+                  ctx.roundRect(bx, by, bw, bh, 6 * scaleFactor);
+                } else {
+                  ctx.rect(bx, by, bw, bh);
+                }
                 ctx.clip();
 
-                const blurPx = Math.max(12, (box.blurAmount || 16) * (canvas.width / 640));
-                ctx.filter = `blur(${blurPx}px) brightness(0.85)`;
+                const blurPx = Math.max(16, (box.blurAmount || 20) * scaleFactor * 1.25);
+                ctx.filter = `blur(${blurPx}px) brightness(0.8)`;
 
                 ctx.drawImage(offCanvas, 0, 0);
 
-                ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
                 ctx.fillRect(bx, by, bw, bh);
 
                 ctx.restore();
               }
             }
           }
-        }
 
-        // Draw Live Myanmar Subtitles Overlay
-        const activeSeg = project.segments.find(
-          (s) => currentTime >= s.startTime && currentTime <= s.endTime
-        );
+          // Draw Live Myanmar Subtitles Overlay with accurate scaling and positioning
+          const activeSeg = project.segments.find(
+            (s) => currentTime >= s.startTime && currentTime <= s.endTime
+          );
 
-        if (activeSeg) {
-          const text = activeSeg.myanmarTranslation || activeSeg.originalText;
-          if (text) {
-            const settings = project.subtitleSettings;
-            ctx.save();
-            const fontSize = (canvas.width / 640) * settings.fontSize;
-            ctx.font = `600 ${fontSize}px '${settings.fontFamily}', 'Pyidaungsu', 'Noto Sans Myanmar', sans-serif`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
+          if (activeSeg) {
+            const text = activeSeg.myanmarTranslation || activeSeg.originalText;
+            if (text) {
+              const settings = project.subtitleSettings;
+              ctx.save();
 
-            let posY = canvas.height - 70;
-            if (settings.positionY === 'center') posY = canvas.height / 2;
-            if (settings.positionY === 'top') posY = 70;
+              const baseFontSize = Math.max(26, settings.fontSize || 28);
+              const targetFontSize = Math.round(baseFontSize * scaleFactor);
+              const cleanFont = (settings.fontFamily || 'Pyidaungsu').replace(/['"]/g, '').trim();
 
-            const metrics = ctx.measureText(text);
-            const bgWidth = metrics.width + 32;
-            const bgHeight = fontSize + 18;
+              ctx.font = `bold ${targetFontSize}px "${cleanFont}", "Noto Sans Myanmar", sans-serif`;
+              if (ctx.font.startsWith('10px') || ctx.font.includes('10px sans-serif')) {
+                ctx.font = `bold ${targetFontSize}px sans-serif`;
+              }
 
-            if (settings.backgroundColor && settings.backgroundColor !== 'transparent') {
-              ctx.fillStyle = settings.backgroundColor;
-              ctx.beginPath();
-              ctx.roundRect(canvas.width / 2 - bgWidth / 2, posY - bgHeight / 2, bgWidth, bgHeight, 8);
-              ctx.fill();
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+
+              let posY = (drawH < canvas.height - 10) ? (videoTop + drawH * 0.85) : (canvas.height * 0.86);
+              if (settings.positionY === 'center') posY = (drawH < canvas.height - 10) ? (videoTop + drawH * 0.50) : (canvas.height * 0.50);
+              if (settings.positionY === 'top') posY = (drawH < canvas.height - 10) ? (videoTop + drawH * 0.12) : (canvas.height * 0.12);
+
+              const textX = canvas.width / 2 + (settings.offsetX || 0) * scaleFactor;
+              const textY = posY + (settings.offsetY || 0) * scaleFactor;
+
+              const metrics = ctx.measureText(text);
+              const padX = 28 * scaleFactor;
+              const padY = 16 * scaleFactor;
+              const bgWidth = metrics.width + padX;
+              const bgHeight = targetFontSize * 1.35 + padY;
+              const radius = 12 * scaleFactor;
+
+              if (settings.backgroundColor && settings.backgroundColor !== 'transparent') {
+                ctx.fillStyle = settings.backgroundColor;
+                ctx.beginPath();
+                if (ctx.roundRect) {
+                  ctx.roundRect(textX - bgWidth / 2, textY - bgHeight / 2, bgWidth, bgHeight, radius);
+                } else {
+                  ctx.rect(textX - bgWidth / 2, textY - bgHeight / 2, bgWidth, bgHeight);
+                }
+                ctx.fill();
+              }
+
+              const strokeWidth = Math.max(2.5, (settings.strokeWidth || 3) * scaleFactor);
+              if (strokeWidth > 0) {
+                ctx.strokeStyle = settings.strokeColor || '#000000';
+                ctx.lineWidth = strokeWidth * 2;
+                ctx.lineJoin = 'round';
+                ctx.miterLimit = 2;
+                ctx.strokeText(text, textX, textY);
+              }
+
+              ctx.fillStyle = settings.color || '#ffffff';
+              ctx.fillText(text, textX, textY);
+              ctx.restore();
             }
-
-            if (settings.strokeWidth > 0) {
-              ctx.strokeStyle = settings.strokeColor;
-              ctx.lineWidth = settings.strokeWidth * 1.5;
-              ctx.strokeText(text, canvas.width / 2, posY);
-            }
-
-            ctx.fillStyle = settings.color;
-            ctx.fillText(text, canvas.width / 2, posY);
-            ctx.restore();
           }
         }
 
