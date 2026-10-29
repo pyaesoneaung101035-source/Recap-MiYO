@@ -532,25 +532,30 @@ export async function synthesizeMyanmarVoice(
     );
   }
 
-  // Decode audio data via Web Audio API (Full 24kHz Studio Fidelity)
-  const ctx = getAudioContext();
-  let decodedBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
+  let audioUrl = '';
+  let duration = 3.0;
 
-  // Only trim if explicitly requested, but preserve natural sentence pauses up to 0.85s and protect word endings
-  if (options.trimSilence === true) {
-    decodedBuffer = trimAudioSilence(decodedBuffer, ctx, 0.85, 0.002);
+  try {
+    const ctx = getAudioContext();
+    let decodedBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
+    duration = decodedBuffer.duration;
+
+    if (options.trimSilence === true) {
+      decodedBuffer = trimAudioSilence(decodedBuffer, ctx, 0.85, 0.002);
+    }
+    decodedBuffer = cleanAndFadeAudioBuffer(decodedBuffer, ctx, 0.25);
+
+    const wavBlob = audioBufferToWav(decodedBuffer);
+    audioUrl = URL.createObjectURL(wavBlob);
+  } catch (decodeErr) {
+    console.warn('Web Audio decodeAudioData notice, fallback to direct WAV Blob URL:', decodeErr);
+    const rawBlob = new Blob([arrayBuffer], { type: 'audio/wav' });
+    audioUrl = URL.createObjectURL(rawBlob);
   }
-
-  // Clean trailing static/buzzing, apply soft cosine fade-in/out, and add clean silence padding
-  decodedBuffer = cleanAndFadeAudioBuffer(decodedBuffer, ctx, 0.25);
-
-  // Convert to playable WAV Blob URL
-  const wavBlob = audioBufferToWav(decodedBuffer);
-  const audioUrl = URL.createObjectURL(wavBlob);
 
   return {
     audioUrl,
-    duration: decodedBuffer.duration,
+    duration,
     isRealityGemini,
   };
 }

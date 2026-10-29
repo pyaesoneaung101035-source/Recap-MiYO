@@ -119,16 +119,37 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
     }
 
     stopAudio();
-    const audio = new Audio(url);
+    const audio = new Audio();
+    audio.src = url;
     const speedToUse = targetSpeed || project.voicePlaybackRate || 1.0;
-    audio.playbackRate = speedToUse;
-    (audio as any).preservesPitch = true;
-    (audio as any).webkitPreservesPitch = true;
+    try {
+      audio.playbackRate = speedToUse;
+      (audio as any).preservesPitch = true;
+      (audio as any).webkitPreservesPitch = true;
+    } catch (_) {}
+
     audio.onended = () => setPlayingAudioId(null);
-    audio.onerror = () => setPlayingAudioId(null);
-    audio.play().catch(() => setPlayingAudioId(null));
-    setAudioElement(audio);
-    setPlayingAudioId(clipId);
+    audio.onerror = (e) => {
+      console.warn('Audio playback error:', e);
+      setPlayingAudioId(null);
+    };
+
+    audio.play().then(() => {
+      setAudioElement(audio);
+      setPlayingAudioId(clipId);
+    }).catch((playErr) => {
+      console.warn('Audio play error, retrying standard play:', playErr);
+      // Retry standard play without pitch preservation
+      audio.playbackRate = 1.0;
+      audio.play().then(() => {
+        setAudioElement(audio);
+        setPlayingAudioId(clipId);
+      }).catch((err2) => {
+        console.error('Playback failed:', err2);
+        setErrorMessage('အသံဖွင့်ရန် စာမျက်နှာပေါ်တွင် မောက်စ်/လက်ဖြင့် Click နှိပ်ပေးပါ။ (' + (err2.message || 'Autoplay blocked') + ')');
+        setPlayingAudioId(null);
+      });
+    });
   };
 
   const handleTestVoice = async (vKey: VoiceOption) => {
