@@ -11,6 +11,16 @@ export interface AssemblyAiUtterance {
   speaker?: string;
 }
 
+function base64ToUint8Array(base64: string): Uint8Array {
+  const binaryString = atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+}
+
 export async function transcribeVideoWithAssemblyAi(
   videoSource: File | string,
   options?: {
@@ -20,7 +30,7 @@ export async function transcribeVideoWithAssemblyAi(
   const { assemblyAiKey } = loadApiKeys();
   const cleanKey = (assemblyAiKey || '').replace(/[^\x21-\x7E]/g, '').trim();
   if (!cleanKey) {
-    throw new Error('AssemblyAI API Key မတွေ့ရှိပါ သို့မဟုတ် မမှန်ကန်ပါ။ ကျေးဇူးပြု၍ Step 1 သို့မဟုတ် Settings တွင် AssemblyAI Key အစစ်ကို ချိတ်ဆက်ပေးပါ။');
+    throw new Error('AssemblyAI API Key မတွေ့ရှိပါ။ Step 1 တွင် AssemblyAI Key (32-digit Token) ထည့်သွင်းပေးပါ။');
   }
 
   const onProgress = options?.onProgress || (() => {});
@@ -31,27 +41,30 @@ export async function transcribeVideoWithAssemblyAi(
 
   const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 
-  // 2. Upload audio to AssemblyAI (Direct browser fetch first for static deployments like Vercel)
+  // 2. Upload audio to AssemblyAI
   onProgress('☁️ [AssemblyAI Whisper] - အသံဖိုင်ကို AssemblyAI Cloud သို့ လုံခြုံစွာ ပေးပို့နေပါသည်...');
   let uploadUrl = '';
 
   try {
-    const binaryData = Uint8Array.from(atob(base64Wav), (c) => c.charCodeAt(0));
+    const binaryData = base64ToUint8Array(base64Wav);
     const directUploadRes = await fetch('https://api.assemblyai.com/v2/upload', {
       method: 'POST',
       headers: {
         Authorization: cleanKey,
         'Content-Type': 'application/octet-stream',
       },
-      body: binaryData,
+      body: binaryData as unknown as BodyInit,
     });
 
     if (directUploadRes.ok) {
       const directUploadData = await directUploadRes.json();
       uploadUrl = directUploadData.upload_url || '';
+    } else {
+      const errText = await directUploadRes.text().catch(() => '');
+      console.warn('Direct AssemblyAI upload error:', directUploadRes.status, errText);
     }
   } catch (directUploadErr) {
-    console.warn('Direct AssemblyAI upload notice:', directUploadErr);
+    console.warn('Direct AssemblyAI upload exception:', directUploadErr);
   }
 
   // Server proxy upload fallback (only on localhost Express)
@@ -260,20 +273,20 @@ export async function transcribeVideoWithAssemblyAi(
   onProgress('🇲🇲 [Direct Myanmar Translation] - သဘာဝကျသော လူပြောစကား မြန်မာစကားပြောအဖြစ် တိုက်ရိုက် ဘာသာပြန်ဆိုနေပါသည် (Narrator ပုံစံမသုံးပါ)...');
 
   const translationPrompt = `
-Translate the following English/original speech sentences into natural, conversational Burmese (မြန်မာဘာသာ).
+You are a professional film dubbing translator. Translate the following transcribed video speech sentences line-by-line directly into natural, conversational Burmese dialogue (မြန်မာစကားပြော).
 
-CRITICAL INSTRUCTIONS:
-1. DO NOT WRITE IN NARRATOR STYLE (narrator ပုံစံဖြင့် လုံးဝမရေးရ).
-2. Write as direct conversational speech/dialogue or realistic movie recap dubbing line (သဘာဝကျသော နှုတ်ထွက် စကားပြော တိုက်ရိုက်ပြန်ဆိုချက်).
-3. Do not include extra commentary, facts list, or narrator introductions.
-4. Keep the meaning accurate to the original sentence.
+CRITICAL DUBBING TRANSLATION INSTRUCTIONS:
+1. TRANSLATE EACH LINE FAITHFULLY according to the spoken meaning in the original video sentence.
+2. DO NOT WRITE IN NARRATOR STYLE (narrator ပုံစံဖြင့် လုံးဝမရေးရ). Use direct spoken dialogue or authentic movie dubbing style.
+3. Keep each Burmese line concise (<12-18 words) so the spoken TTS audio fits the exact video timestamp slot.
+4. Do NOT add extraneous summary facts or commentary. Translate line #1 to line #1, line #2 to line #2.
 5. Return ONLY a valid JSON array matching this exact format:
 [
   { "id": 1, "translation": "မြန်မာစကားပြောစာသား" }
 ]
 
-SENTENCES TO TRANSLATE:
-${JSON.stringify(items.map((it, idx) => ({ id: idx + 1, original: it.text })), null, 2)}
+SPOKEN LINES FROM CUSTOM VIDEO TO TRANSLATE:
+${JSON.stringify(items.map((it, idx) => ({ id: idx + 1, original_spoken_text: it.text })), null, 2)}
 `;
 
   let translationsMap: Record<number, string> = {};

@@ -201,16 +201,15 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
 
       setProgressPercent(90);
       const sorted = [...rawSegments].sort((a, b) => a.startTime - b.startTime);
-      let curTime = 0;
       const segments = sorted.map((s) => {
-        const duration = Math.max(2.0, s.endTime - s.startTime);
-        const start = Math.max(curTime, s.startTime);
-        const end = start + duration;
-        curTime = end + 0.1;
+        const start = Math.max(0, s.startTime);
+        const end = Math.max(start + 0.5, s.endTime);
+        const dur = parseFloat((end - start).toFixed(2));
         return {
           ...s,
-          startTime: parseFloat(start.toFixed(1)),
-          endTime: parseFloat(end.toFixed(1)),
+          startTime: parseFloat(start.toFixed(2)),
+          endTime: parseFloat(end.toFixed(2)),
+          duration: s.duration || dur,
         };
       });
 

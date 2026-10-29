@@ -288,6 +288,29 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
     setStatusText(`✓ Voice style updated to "${newStyle}".`);
   };
 
+  const handleUpdateSegmentRate = (segId: string, newRate: number) => {
+    setProject((prev) => ({
+      ...prev,
+      segments: prev.segments.map((s) => (s.id === segId ? { ...s, playbackRate: newRate } : s)),
+    }));
+    setStatusText(`✓ Segment speed adjusted to ${newRate.toFixed(2)}x.`);
+  };
+
+  const handleAutoRetimeAll = () => {
+    setProject((prev) => ({
+      ...prev,
+      segments: prev.segments.map((s) => {
+        const slotDuration = Math.max(1.0, s.endTime - s.startTime);
+        if (s.audioDuration && s.audioDuration > 0) {
+          const autoRate = Math.min(2.0, Math.max(0.7, parseFloat((s.audioDuration / slotDuration).toFixed(2))));
+          return { ...s, playbackRate: autoRate };
+        }
+        return s;
+      }),
+    }));
+    setStatusText('✓ Auto-Fit Retime All: Segment playback rates adjusted to match original video dialogue duration window (atempo pitch-preserved).');
+  };
+
   const handleGenerateSingle = async (seg: TranscriptSegment) => {
     const text = seg.myanmarTranslation || seg.originalText;
     if (!text) return;
@@ -716,7 +739,7 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
               <span className="text-[10px] font-mono text-zinc-400 font-bold">2.0x</span>
             </div>
 
-            <div className="pt-2 border-t border-white/10 flex items-center justify-between">
+            <div className="pt-2 border-t border-white/10 flex items-center justify-between gap-2 flex-wrap">
               <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer">
                 <input
                   type="checkbox"
@@ -727,6 +750,16 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                 <Scissors className="w-3.5 h-3.5 text-amber-400" />
                 <span className="font-medium text-[11px]">Silence Trimmer</span>
               </label>
+
+              <button
+                type="button"
+                onClick={handleAutoRetimeAll}
+                className="px-2.5 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 rounded-xl text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 shadow"
+                title="Auto-adjust all generated segment audio speeds (atempo) to fit exact clip durations"
+              >
+                <Zap className="w-3 h-3 text-emerald-400" />
+                <span>⚡ Auto-Fit All Retime Speeds</span>
+              </button>
 
               <span className="text-[10px] text-zinc-400 font-mono">
                 Generated: {generatedCount} / {project.segments.length}
@@ -910,6 +943,37 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                       placeholder="မြန်မာဘာသာပြန်..."
                       className="w-full px-3 py-1.5 bg-zinc-950/70 border border-white/10 rounded-xl text-xs font-myanmar text-white focus:outline-none focus:border-emerald-400"
                     />
+
+                    {/* Duration Alignment & Auto-Retime Speed Control */}
+                    <div className="flex items-center justify-between text-[10px] text-zinc-400 pt-1 border-t border-white/5 flex-wrap gap-1">
+                      <div className="flex items-center gap-2 font-mono">
+                        <span>Slot: {(seg.endTime - seg.startTime).toFixed(1)}s</span>
+                        {seg.audioDuration ? (
+                          <span className={seg.audioDuration > (seg.endTime - seg.startTime) ? 'text-amber-400 font-bold' : 'text-emerald-400 font-bold'}>
+                            | Audio: {seg.audioDuration.toFixed(1)}s
+                          </span>
+                        ) : null}
+                        <span className="text-zinc-500">
+                          | Speed: {(seg.playbackRate || project.voicePlaybackRate || 1.0).toFixed(2)}x
+                        </span>
+                      </div>
+
+                      {seg.audioDuration && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const slotDur = Math.max(1.0, seg.endTime - seg.startTime);
+                            const autoRate = Math.min(2.0, Math.max(0.7, parseFloat((seg.audioDuration! / slotDur).toFixed(2))));
+                            handleUpdateSegmentRate(seg.id, autoRate);
+                          }}
+                          className="px-2 py-0.5 bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 rounded-lg hover:bg-emerald-500/30 transition-all font-bold cursor-pointer flex items-center gap-1"
+                          title="Auto-Fit audio duration to original video dialogue duration window"
+                        >
+                          <Zap className="w-2.5 h-2.5 text-emerald-400" />
+                          <span>⚡ Auto-Fit ({(seg.audioDuration / Math.max(1.0, seg.endTime - seg.startTime)).toFixed(2)}x)</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
                 );
               })}

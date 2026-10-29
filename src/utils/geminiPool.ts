@@ -583,14 +583,14 @@ export async function callGeminiWithRotation(
 }
 
 export function buildSystemPromptForMode(mode: AiMode): string {
-  const directInstruction = 'ဗီဒီယို အသံနှင့် မြင်ကွင်းကို အခြေခံပြီး Timestamp Segment တစ်ခုချင်းစီအလိုက် သဘာဝကျသော မြန်မာဘာသာစကားပြော ပြန်ဆိုချက်များအဖြစ် တိကျစွာ ခွဲခြမ်းစိတ်ဖြာ ထုတ်ပေးပါ။ WRITE IN DIRECT, PLAIN LANGUAGE. DO NOT USE NARRATOR STYLE. DO NOT LIST FACTS, DATA, OR BULLET POINTS. USE NATURAL, SPOKEN BURMESE.';
+  const directInstruction = 'ဗီဒီယို အသံနှင့် မြင်ကွင်းကို အခြေခံပြီး Timestamp Segment တစ်ခုချင်းစီအလိုက် သဘာဝကျသော မြန်မာဘာသာစကားပြော ပြန်ဆိုချက်များအဖြစ် တိကျစွာ ခွဲခြမ်းစိတ်ဖြာ ထုတ်ပေးပါ။ WRITE IN DIRECT, PLAIN LANGUAGE. DO NOT USE NARRATOR STYLE. DO NOT LIST FACTS, DATA, OR BULLET POINTS. USE NATURAL, SPOKEN BURMESE. CRITICAL DUBBING RULE: Burmese spoken words take longer to pronounce than Chinese syllables. KEEP BURMESE TRANSLATION VERY CONCISE, SHORT, AND PUNCHY (<12-18 words per segment) so TTS audio duration strictly fits the video dialogue slot!';
   switch (mode) {
     case 'Dubbing':
       return `You are a master Chinese-to-Burmese film dubbing director and audio sync engineer.
 When dubbing Chinese video dialogue into Burmese:
 1. Extract the exact spoken dialogue in the original language (e.g. Chinese).
-2. Translate into natural conversational spoken Burmese (မြန်မာစကားပြောသံပေါက်). Do NOT translate word-for-word. Make it sound like real Burmese dialogue that fits the speaker's emotional beats, pacing, and pauses.
-3. Keep the Burmese sentence strictly inside the original start and end duration.
+2. Translate into natural conversational spoken Burmese (မြန်မာစကားပြောသံပေါက်). Do NOT translate word-for-word.
+3. CONCISE DURATION MATCHING RULE: Spoken Burmese takes longer to utter than Chinese syllables. KEEP BURMESE TRANSLATIONS VERY CONCISE AND SHORT (under 12-18 words per segment or <35 Burmese characters). Omit unnecessary filler words so the spoken Burmese TTS fits neatly within the original video clip's start and end duration window.
 4. Dubbing voice: adult Burmese male voice with natural vocal cadence.
 5. Provide clean Burmese subtitles: max 2 lines per subtitle, under 35 characters per line, NO Chinese characters.
 6. Provide speaker identity, delivery emotion, on-screen status, target duration, and a lip-sync pacing note.
@@ -688,26 +688,28 @@ export async function generateTimestampedTranscript(
         if (onProgress) onProgress('🎙️ [အဆင့် ၂: Gemini Flash STT] - အသံဖိုင်ကို မြန်မာစကားပြော TTX / Dubbing Plan သို့ ဘာသာပြန်ဆိုနေပါသည်...');
 
         const prompt = `
-YOU ARE PROCESSING THE VIDEO "${videoTitle}".
+YOU ARE PROCESSING THE UPLOADED CUSTOM VIDEO "${videoTitle}".
 Duration: ${audioRes.duration} seconds.
 Mode: ${aiMode}.
-Creator Context: ${customContext || 'Natural Chinese-to-Burmese video dubbing for Myanmar audience'}.
+Creator Context: ${customContext || 'Exact line-by-line Chinese-to-Burmese video dubbing'}.
 
-Perform a complete dubbing analysis:
-1. Transcribe the original dialogue spoken in the video (e.g. Chinese).
-2. Translate into natural conversational spoken Burmese dialogue (သဘာဝကျသော လူပြောစကား မြန်မာစကားပြော တိုက်ရိုက်ပြန်ဆိုချက်). Fit the duration precisely.
-3. Clean Burmese subtitle text (max 2 lines, under 35 Burmese characters per line, NO Chinese characters).
-4. Identify speaker identity, speaking emotion & delivery, whether speaker is on screen, and lip-sync guidance.
+STRICT INSTRUCTIONS FOR CUSTOM VIDEO DUBBING:
+1. LISTEN TO THE AUDIO IN THIS ATTACHED VIDEO CAREFULLY.
+2. TRANSCRIBE EXACTLY WHAT IS SPOKEN IN THE VIDEO AUDIO IN ITS ORIGINAL LANGUAGE (e.g. Chinese) LINE BY LINE. DO NOT MAKE UP OR HALLUCINATE GENERIC RECAP STORIES. TRANSCRIBE THE ACTUAL SPOKEN DIALOGUE FROM THE VIDEO.
+3. BREAK DOWN THE DIALOGUE INTO MANY SHORT, CONCISE SENTENCE SEGMENTS (each segment 1.5s to 3.5s long, creating many frequent short lines that match video cut points and short Chinese speech phrases).
+4. TRANSLATE EACH SHORT LINE DIRECTLY INTO CONCISE, NATURAL BURMESE SPOKEN DIALOGUE (မြန်မာစကားပြော တိုတိုနှင့် လိုရင်း တိုက်ရိုက်ပြန်ဆိုချက်).
+5. Clean Burmese subtitle text (max 2 lines, under 35 Burmese characters per line, NO Chinese characters).
+6. Identify speaker identity, speaking emotion & delivery, whether speaker is on screen, and lip-sync guidance.
 
 Return ONLY a valid JSON array matching this exact format:
 [
   {
     "id": 1,
     "start": "00:00:00,000",
-    "end": "00:00:03,500",
-    "duration": 3.5,
+    "end": "00:00:02,500",
+    "duration": 2.5,
     "speaker": "Speaker 1 (Adult Male)",
-    "originalText": "original dialogue (e.g. Chinese)",
+    "originalText": "actual spoken line from video (e.g. Chinese)",
     "text": "ဒီနေရာမှာတော့...",
     "subtitleText": "ဒီနေရာမှာတော့...",
     "emotion": "Conversational, calm",
@@ -789,11 +791,15 @@ Return ONLY a valid JSON array matching this exact format:
           }
 
           const chunkPrompt = `
-YOU ARE PROCESSING CHUNK PART ${partNum} OF ${totalParts} FROM THE VIDEO "${videoTitle}".
+YOU ARE PROCESSING CHUNK PART ${partNum} OF ${totalParts} FROM THE ATTACHED CUSTOM VIDEO "${videoTitle}".
 Chunk Offset: ${offsetSec} seconds. Chunk Duration: ${chunk.durationSeconds} seconds.
-Mode: ${aiMode}. Context: ${customContext || 'Natural video dubbing'}.
+Mode: ${aiMode}. Context: ${customContext || 'Exact line-by-line video dubbing'}.
 
-Listen to this audio chunk, transcribe original speech, and translate into natural, direct spoken Burmese dialogue with accurate relative timestamps.
+STRICT INSTRUCTIONS:
+1. LISTEN TO THIS AUDIO CHUNK CAREFULLY.
+2. TRANSCRIBE EXACTLY WHAT IS SPOKEN IN THE AUDIO IN ITS ORIGINAL LANGUAGE (e.g. Chinese). DO NOT MAKE UP OR HALLUCINATE RECAP STORIES.
+3. BREAK DOWN THE SPOKEN LINES INTO MANY FREQUENT SHORT SENTENCE SEGMENTS (each segment 1.5s to 3.5s long) MATCHING VIDEO CUT POINTS.
+4. TRANSLATE EACH SHORT ORIGINAL LINE DIRECTLY INTO NATURAL CONCISE BURMESE SPOKEN DIALOGUE (မြန်မာစကားပြော တိုတိုနှင့် လိုရင်း ပြန်ဆိုချက်).
 Provide speaker, emotion, lip-sync pacing, and clean subtitle without Chinese characters.
 Return ONLY a valid JSON array:
 [
