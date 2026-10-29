@@ -77,62 +77,403 @@ export function resetKeyStatuses(keys: GeminiKeyInfo[]): GeminiKeyInfo[] {
   return updated;
 }
 
+export interface GeminiErrorAnalysis {
+  status: string;
+  statusCode: number;
+  message: string;
+  quotaType: string;
+  detailedDescription: string;
+  details: string;
+  retryDelay?: string;
+}
+
+export function analyzeGeminiError(errObj: any, defaultStatus = 500): GeminiErrorAnalysis {
+  const code = errObj?.code || errObj?.status || defaultStatus;
+  const rawStatus = typeof code === 'number' ? code : defaultStatus;
+  const statusStr = String(errObj?.status || rawStatus);
+  const message = errObj?.message || (typeof errObj === 'string' ? errObj : JSON.stringify(errObj));
+  const rawDetails = errObj?.details || [];
+  const detailsStr = Array.isArray(rawDetails) || typeof rawDetails === 'object'
+    ? JSON.stringify(rawDetails)
+    : String(rawDetails);
+
+  let retryDelay: string | undefined;
+  if (Array.isArray(rawDetails)) {
+    const retryInfo = rawDetails.find((d: any) => d && (d['@type']?.includes('RetryInfo') || d.retryDelay));
+    if (retryInfo && retryInfo.retryDelay) {
+      retryDelay = retryInfo.retryDelay;
+    }
+  }
+
+  const combined = `${statusStr} ${message} ${detailsStr}`.toLowerCase();
+
+  let quotaType = 'General Error';
+  let detailedDescription = message;
+
+  if (rawStatus === 429 || combined.includes('resource_exhausted') || combined.includes('quota') || combined.includes('rate limit')) {
+    if (combined.includes('tokencount') || combined.includes('tokens per minute') || combined.includes('tpm')) {
+      quotaType = 'TPM (Tokens Per Minute)';
+      detailedDescription = '1 မိနစ်အတွင်း Token အသုံးပြုမှု ပမာဏ (Tokens Per Minute) ကန့်သတ်ချက် ပြည့်သွားပါပြီ။ 60 စက္ကန့် စောင့်ပါ သို့မဟုတ် Prompt အရွယ်အစားကို လျှော့ချပါ။';
+    } else if (combined.includes('requestsperminute') || combined.includes('requests per minute') || combined.includes('rpm')) {
+      quotaType = 'RPM (Requests Per Minute)';
+      detailedDescription = '1 မိနစ်အတွင်း ခေါ်ဆိုမှု အကြိမ်ရေ (Requests Per Minute) ကန့်သတ်ချက် ပြည့်သွားပါပြီ။ 30-60 စက္ကန့် စောင့်ပါ။';
+    } else if (combined.includes('requestsperday') || combined.includes('requests per day') || combined.includes('rpd') || combined.includes('day')) {
+      quotaType = 'RPD (Requests Per Day)';
+      detailedDescription = 'တစ်ရက်တာ အခမဲ့ခေါ်ဆိုမှု အကြိမ်ရေ (Daily Free Quota) ပြည့်သွားပါပြီ။ နောက်နေ့အထိ စောင့်ပါ သို့မဟုတ် နောက်ထပ် API Key အသစ်တစ်ခု ထပ်ထည့်ပါ။';
+    } else if (combined.includes('billing') || combined.includes('payment') || combined.includes('credit') || combined.includes('billing account')) {
+      quotaType = 'Billing Restriction';
+      detailedDescription = 'Google Cloud Project တွင် ငွေပေးချေမှုစနစ် (Billing Account) ချိတ်ဆက်ရန် လိုအပ်သော ကန့်သတ်ချက် ဖြစ်ပါသည်။';
+    } else if (combined.includes('project') || combined.includes('consumer')) {
+      quotaType = 'Project Quota';
+      detailedDescription = 'Google Cloud Project တစ်ခုလုံးအတွက် သတ်မှတ်ထားသော Quota ပြည့်သွားခြင်း ဖြစ်ပါသည်။';
+    } else {
+      quotaType = 'Quota Exceeded (429)';
+      detailedDescription = 'Gemini API အသုံးပြုခွင့် Quota ကန့်သတ်ချက် ပြည့်သွားပါပြီ။';
+    }
+    if (retryDelay) {
+      detailedDescription += ` (Retry delay: ${retryDelay})`;
+    }
+  } else if (combined.includes('api_key_service_blocked') || combined.includes('access_token_type_unsupported')) {
+    quotaType = 'API_KEY_SERVICE_BLOCKED (401)';
+    detailedDescription = 'Google Cloud Console တွင် သင်၏ API Key အတွက် "Generative Language API" ကို Enable ပြုလုပ်ရန် သို့မဟုတ် Key Restrictions တွင် Allow ပြုလုပ်ပေးရန် လိုအပ်ပါသည်။ (aistudio.google.com မှ API Key အသစ် ထုတ်ယူပါက တိုက်ရိုက် အသုံးပြုနိုင်ပါသည်)';
+  } else if (rawStatus === 401 || rawStatus === 403 || combined.includes('unauthenticated') || combined.includes('api_key_invalid')) {
+    quotaType = 'Unauthorized / Invalid Key';
+    detailedDescription = 'API Key မမှန်ကန်ပါ သို့မဟုတ် ခွင့်ပြုချက်မရှိပါ (401/403)။ Google AI Studio (aistudio.google.com/app/apikey) မှ API Key အသစ် ပြန်ယူပါ။';
+  } else if (rawStatus === 404 || combined.includes('not_found')) {
+    quotaType = 'Model Not Found';
+    detailedDescription = 'ရွေးချယ်ထားသော Gemini Model ကို ရှာမတွေ့ပါ သို့မဟုတ် သင့်အကောင့်တွင် ခွင့်မပြုသေးပါ။ အခြား Flash Model ကို ရွေးချယ်ပေးပါ။';
+  }
+
+  return {
+    status: statusStr,
+    statusCode: rawStatus,
+    message,
+    quotaType,
+    detailedDescription,
+    details: detailsStr,
+    retryDelay,
+  };
+}
+
 /**
- * Execute a Gemini prompt with smart multi-key rotation, 1.2s pacing delay, and automatic 429 quota backoff.
- * Uses high-quota Flash model (gemini-2.5-flash) by default.
+ * Direct browser call to Google Generative Language API with candidate model fallbacks.
+ * Used for static deployments (Netlify, GitHub Pages, Mobile) where no Express server is running.
  */
-export async function fetchDirectGoogleGeminiApi(
-  apiKey: string,
+export async function callDirectGoogleRest(
+  cleanKey: string,
+  model: string,
+  partsPayload: any[],
+  systemInstruction?: string
+): Promise<{ text: string }> {
+  const candidateModels = [
+    model,
+    'gemini-3.5-flash',
+    'gemini-3.5-flash-lite',
+    'gemini-3.8-flash',
+    'gemini-2.5-flash',
+    'gemini-2.5-flash-lite',
+    'gemini-flash-latest',
+  ].filter(Boolean).filter((m, idx, arr) => arr.indexOf(m) === idx);
+
+  const requestBody: any = {
+    contents: [
+      {
+        parts: partsPayload,
+      },
+    ],
+  };
+
+  if (systemInstruction) {
+    requestBody.systemInstruction = {
+      parts: [{ text: systemInstruction }],
+    };
+  }
+
+  let lastError: any = null;
+
+  for (const m of candidateModels) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${encodeURIComponent(cleanKey)}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': cleanKey,
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (text !== undefined) {
+          return { text };
+        }
+        return { text: '' };
+      }
+
+      const status = res.status;
+      const errObj = data.error || data;
+      const analysis = analyzeGeminiError(errObj, status);
+
+      // If 404 Model Not Found / deprecated for this user, or 503 / 400 not available, try next model
+      if (status === 404 || status === 503 || (status === 400 && String(analysis.message).includes('not available'))) {
+        lastError = new Error(`[${analysis.status}] ${analysis.quotaType}: ${analysis.message}`);
+        continue;
+      }
+
+      const err = new Error(
+        `[${analysis.status}] ${analysis.quotaType}: ${analysis.detailedDescription} (${analysis.message})`
+      );
+      (err as any).status = status;
+      (err as any).errorDetails = analysis;
+      throw err;
+    } catch (netErr: any) {
+      if (netErr?.status || netErr?.errorDetails) throw netErr;
+      lastError = netErr;
+    }
+  }
+
+  throw lastError || new Error('All Gemini model candidates failed.');
+}
+
+/**
+ * Execute a Gemini prompt by calling the server-side proxy route (/api/gemini/generate)
+ * with automatic fallback to direct Google API call if hosted on static platforms like Netlify.
+ */
+export async function fetchServerGeminiApi(
+  apiKey: string | undefined,
   model: string,
   prompt: string,
   parts?: any[],
   systemInstruction?: string
 ): Promise<{ text: string }> {
-  const cleanKey = apiKey.trim().replace(/[^\x21-\x7E]/g, '');
-  if (!cleanKey) {
-    throw new Error('API Key မမှန်ကန်ပါ သို့မဟုတ် မရှိပါ။');
+  const cleanKey = apiKey ? apiKey.trim().replace(/[^\x21-\x7E]/g, '') : undefined;
+  const partsPayload = parts && parts.length > 0 ? parts : [{ text: prompt }];
+
+  const isNetlifyOrStatic = typeof window !== 'undefined' && (
+    window.location.hostname.includes('netlify.app') ||
+    window.location.hostname.includes('github.io')
+  );
+
+  // If on Netlify and user provided a key, call direct Google API directly (fastest, avoids Netlify edge 401)
+  if (isNetlifyOrStatic && cleanKey) {
+    return await callDirectGoogleRest(cleanKey, model, partsPayload, systemInstruction);
   }
 
-  const modelToUse = model || 'gemini-2.0-flash';
-  const contentsPayload = parts && parts.length > 0 ? parts : [{ text: prompt }];
+  // 1. Try server-side route
+  try {
+    const res = await fetch('/api/gemini/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: cleanKey,
+        model: model || 'gemini-3.5-flash',
+        prompt,
+        parts: partsPayload,
+        systemInstruction,
+      }),
+    });
 
-  const serverRes = await fetch('/api/gemini/generate', {
+    const contentType = res.headers.get('content-type') || '';
+    const isHtml = contentType.includes('text/html');
+
+    // Only process if response is real JSON from the server and not HTML redirect / 404
+    if (!isHtml && res.status !== 404 && (res.status !== 401 || !isHtml)) {
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data && data.text !== undefined) {
+        return { text: data.text };
+      }
+      const status = res.status;
+      const details = data.errorDetails;
+      let errMsg = data.error || `Gemini API Error (HTTP ${status})`;
+      if (details) {
+        errMsg = `[${details.status}] Quota Type: ${details.quotaType} — ${details.detailedDescription} (Message: ${details.message})`;
+      }
+      const err = new Error(errMsg);
+      (err as any).status = status;
+      (err as any).errorDetails = details;
+      throw err;
+    }
+  } catch (serverErr: any) {
+    if (serverErr?.status && serverErr.status !== 404 && !serverErr?.message?.includes('HTML')) {
+      throw serverErr;
+    }
+  }
+
+  // 2. Direct browser fallback if static hosting (Netlify) without backend
+  if (cleanKey) {
+    return await callDirectGoogleRest(cleanKey, model, partsPayload, systemInstruction);
+  }
+
+  throw new Error('Gemini API Key မရှိသေးပါ။ ကျေးဇူးပြု၍ API Settings တွင် Google Gemini API Key ထည့်သွင်းပေးပါ။');
+}
+
+// Keep backward-compatible alias so existing components call the server proxy
+export const fetchDirectGoogleGeminiApi = fetchServerGeminiApi;
+
+/**
+ * Test a Gemini key or server connection via /api/gemini/test,
+ * with seamless fallback to direct Google API testing on static sites.
+ */
+export async function testGeminiKeyDirect(
+  apiKey?: string,
+  model = 'gemini-3.5-flash'
+): Promise<{ ok: boolean; message: string; errorDetails?: GeminiErrorAnalysis }> {
+  const cleanKey = apiKey ? apiKey.trim().replace(/[^\x21-\x7E]/g, '') : undefined;
+  const isNetlifyOrStatic = typeof window !== 'undefined' && (
+    window.location.hostname.includes('netlify.app') ||
+    window.location.hostname.includes('github.io')
+  );
+
+  // If on Netlify and user provided a key, test directly against Google API to avoid Netlify edge 401 html
+  if (isNetlifyOrStatic && cleanKey) {
+    try {
+      const result = await callDirectGoogleRest(cleanKey, model, [{ text: 'Ping' }]);
+      if (result && result.text !== undefined) {
+        return {
+          ok: true,
+          message: 'ချိတ်ဆက်မှု အောင်မြင်ပါသည်! (Direct Google Gemini API Connected)',
+        };
+      }
+    } catch (directErr: any) {
+      const details = directErr?.errorDetails || analyzeGeminiError(directErr, directErr?.status || 500);
+      return {
+        ok: false,
+        message: directErr?.message || 'Connection test failed',
+        errorDetails: details,
+      };
+    }
+  }
+
+  // Otherwise, try server route
+  try {
+    const res = await fetch('/api/gemini/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: cleanKey,
+        model,
+      }),
+    });
+
+    const contentType = res.headers.get('content-type') || '';
+    const isHtml = contentType.includes('text/html');
+
+    if (!isHtml && res.status !== 404) {
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
+        return {
+          ok: true,
+          message: 'ချိတ်ဆက်မှု အောင်မြင်ပါသည်! (Gemini API Connected Successfully)',
+        };
+      }
+      const details = data.errorDetails;
+      return {
+        ok: false,
+        message: data.error || `[${res.status}] Error`,
+        errorDetails: details,
+      };
+    }
+  } catch (serverErr: any) {
+    // Proceed to direct test if server endpoint is not present
+  }
+
+  // 2. Direct test against Google Generative Language API if static/Netlify or server returned HTML
+  if (cleanKey) {
+    try {
+      const result = await callDirectGoogleRest(cleanKey, model, [{ text: 'Ping' }]);
+      if (result && result.text !== undefined) {
+        return {
+          ok: true,
+          message: 'ချိတ်ဆက်မှု အောင်မြင်ပါသည်! (Direct Google API Connected)',
+        };
+      }
+    } catch (directErr: any) {
+      const details = directErr?.errorDetails || analyzeGeminiError(directErr, directErr?.status || 500);
+      return {
+        ok: false,
+        message: directErr?.message || 'Connection test failed',
+        errorDetails: details,
+      };
+    }
+  }
+
+  return {
+    ok: false,
+    message: 'စစ်ဆေးရန် Gemini API Key ထည့်သွင်းပေးပါ။',
+  };
+}
+
+/**
+ * Stream responses from the server-side Gemini Streaming API route (/api/gemini/stream).
+ */
+export async function streamGeminiFromServer(
+  prompt: string,
+  onChunk: (chunkText: string) => void,
+  options?: {
+    apiKey?: string;
+    model?: string;
+    systemInstruction?: string;
+    parts?: any[];
+  }
+): Promise<string> {
+  const cleanKey = options?.apiKey ? options.apiKey.trim().replace(/[^\x21-\x7E]/g, '') : undefined;
+  const res = await fetch('/api/gemini/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       apiKey: cleanKey,
-      model: modelToUse,
+      model: options?.model || 'gemini-3.8-flash',
       prompt,
-      parts: contentsPayload,
-      systemInstruction,
+      parts: options?.parts,
+      systemInstruction: options?.systemInstruction,
     }),
   });
 
-  const data = await serverRes.json().catch(() => ({}));
-
-  if (serverRes.ok && data && data.text) {
-    return { text: data.text };
+  if (!res.ok || !res.body) {
+    throw new Error(`Streaming failed with HTTP ${res.status}`);
   }
 
-  const status = serverRes.status;
-  const details = data.errorDetails;
-  let errMsg = data.error || `Gemini API Error (HTTP ${status})`;
-  if (details) {
-    errMsg = `[${details.status}] ${details.quotaType}: ${details.detailedDescription} (${details.message})`;
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let fullText = '';
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n\n');
+    buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data: ')) continue;
+      const dataStr = trimmed.slice(6);
+      if (dataStr === '[DONE]') break;
+      try {
+        const parsed = JSON.parse(dataStr);
+        if (parsed.text) {
+          fullText += parsed.text;
+          onChunk(parsed.text);
+        }
+      } catch (_) {}
+    }
   }
-  throw new Error(errMsg);
+
+  return fullText;
 }
 
 export async function callGeminiWithRotation(
   prompt: string,
   systemInstruction?: string,
-  model = 'gemini-2.5-flash',
+  model = 'gemini-3.5-flash',
   mediaParts?: Array<{ mimeType: string; data: string }>
 ): Promise<{ text: string; usedKeyName: string }> {
   const keys = loadGeminiKeys();
-  const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 
-  // Include all valid keys (AIzaSy... as well as AQ... OAuth / custom keys)
+  // Include all valid keys in the pool
   const geminiKeys = keys.filter(
     (k) => k && typeof k.key === 'string' && k.key.trim().length >= 10
   );
@@ -151,34 +492,26 @@ export async function callGeminiWithRotation(
   }
   parts.push({ text: prompt });
 
-  // If no Gemini client keys in local storage
+  // If no Gemini client keys in local storage, use server-side default key directly
+  // This ensures the app keeps working for EVERYONE who opens it out of the box!
   if (geminiKeys.length === 0) {
-    if (isLocalhost) {
-      try {
-        const serverRes = await fetch('/api/gemini/generate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt, parts, systemInstruction, model }),
-        });
-
-        if (serverRes.ok) {
-          const data = await serverRes.json();
-          return { text: data.text, usedKeyName: 'Server Flash Engine' };
-        }
-        const errJson = await serverRes.json().catch(() => ({}));
-        const msg = errJson.error || 'Server Gemini API call failed.';
-        throw new Error(msg);
-      } catch (serverErr: any) {
-        throw new Error(serverErr.message || 'ကျေးဇူးပြု၍ အဆင့် 1 (API Settings) တွင် Google Gemini API Key ("AIzaSy..." သို့မဟုတ် "AQ...") ကို ထည့်သွင်းပေးပါ။');
-      }
-    } else {
-      throw new Error(
-        'ကျေးဇူးပြု၍ အဆင့် 1 (API Settings) တွင် Google Gemini API Key ("AIzaSy..." သို့မဟုတ် "AQ...") ကို ထည့်သွင်းပေးပါ။'
+    try {
+      const serverRes = await fetchServerGeminiApi(
+        undefined,
+        model,
+        prompt,
+        parts,
+        systemInstruction
       );
+      if (serverRes && serverRes.text) {
+        return { text: serverRes.text, usedKeyName: 'Server Flash Engine (Auto-Configured)' };
+      }
+    } catch (serverErr: any) {
+      throw new Error(serverErr.message || 'Server Gemini API call failed.');
     }
   }
 
-  // Filter keys and attempt direct Google API per rotated key
+  // If user provided custom keys, rotate through them
   const maxAttempts = geminiKeys.length * 2;
   let attempts = 0;
   let lastError = '';
@@ -193,10 +526,9 @@ export async function callGeminiWithRotation(
       continue;
     }
 
-    // 1. Direct Google Gemini API Call (Primary for client-side keys, Works 100% on Vercel, Static Hosts, and Browsers)
     if (keyInfo.key && keyInfo.key.trim().length >= 10) {
       try {
-        const directData = await fetchDirectGoogleGeminiApi(
+        const data = await fetchServerGeminiApi(
           keyInfo.key,
           model,
           prompt,
@@ -204,79 +536,48 @@ export async function callGeminiWithRotation(
           systemInstruction
         );
 
-        if (directData && directData.text) {
+        if (data && data.text) {
           keyInfo.callCount = (keyInfo.callCount || 0) + 1;
           keyInfo.status = 'active';
           keyInfo.lastUsed = new Date().toLocaleTimeString();
           keyInfo.lastError = undefined;
           saveGeminiKeys(keys);
 
-          return { text: directData.text, usedKeyName: `${keyInfo.name} (Direct API)` };
+          return { text: data.text, usedKeyName: `${keyInfo.name} (Server Proxy)` };
         }
       } catch (directErr: any) {
-        console.warn(`Direct Google API call notice for ${keyInfo.name}:`, directErr);
+        console.warn(`Server proxy call notice for ${keyInfo.name}:`, directErr);
         const errMsg = directErr?.message || '';
-        if (errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED')) {
+        const details = directErr?.errorDetails;
+        if (errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED') || details?.statusCode === 429) {
           keyInfo.status = 'quota_exceeded';
-          keyInfo.lastError = '429 Quota Exceeded';
-        } else if (errMsg.includes('400') && (errMsg.includes('API_KEY_INVALID') || errMsg.includes('key not valid'))) {
+          keyInfo.lastError = details?.quotaType ? `429 (${details.quotaType})` : '429 Quota Exceeded';
+        } else if (errMsg.includes('401') || errMsg.includes('403') || details?.statusCode === 401 || details?.statusCode === 403) {
           keyInfo.status = 'invalid';
-          keyInfo.lastError = 'Invalid Key';
+          keyInfo.lastError = '401/403 Invalid Key';
         } else {
           keyInfo.lastError = errMsg;
         }
-      }
-    }
-
-    // 2. Server Proxy Fallback (/api/gemini/generate) - ONLY when running locally on Express server
-    if (isLocalhost) {
-      try {
-        const res = await fetch('/api/gemini/generate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            apiKey: keyInfo.key,
-            model,
-            prompt,
-            parts,
-            systemInstruction,
-          }),
-        });
-
-        if (res.ok) {
-          const data = await res.json();
-          const candidateText = data.text || '';
-
-          keyInfo.callCount = (keyInfo.callCount || 0) + 1;
-          keyInfo.status = 'active';
-          keyInfo.lastUsed = new Date().toLocaleTimeString();
-          keyInfo.lastError = undefined;
-          saveGeminiKeys(keys);
-
-          return { text: candidateText, usedKeyName: keyInfo.name };
-        }
-
-        const errText = await res.text().catch(() => '');
-        const isQuota = res.status === 429 || errText.includes('RESOURCE_EXHAUSTED') || errText.includes('quota');
-        const isInvalid = res.status === 400 && (errText.includes('API_KEY_INVALID') || errText.includes('key not valid'));
-
-        if (isQuota) {
-          keyInfo.status = 'quota_exceeded';
-          keyInfo.lastError = '429 Quota Exceeded';
-        } else if (isInvalid) {
-          keyInfo.status = 'invalid';
-          keyInfo.lastError = 'Invalid Key';
-        } else if (res.status !== 404) {
-          keyInfo.lastError = `HTTP ${res.status}: ${errText.substring(0, 100)}`;
-        }
-      } catch (netErr: any) {
-        console.warn(`Server proxy call failed for ${keyInfo.name}:`, netErr);
+        lastError = keyInfo.lastError || errMsg || 'Gemini API Error';
       }
     }
 
     saveGeminiKeys(keys);
-    lastError = keyInfo.lastError || 'Gemini API Error';
   }
+
+  // Final fallback: try server-side default key if all client keys were exhausted
+  try {
+    const fallbackRes = await fetchServerGeminiApi(
+      undefined,
+      model,
+      prompt,
+      parts,
+      systemInstruction
+    );
+    if (fallbackRes && fallbackRes.text) {
+      return { text: fallbackRes.text, usedKeyName: 'Server Flash Engine (Fallback)' };
+    }
+  } catch (_) {}
 
   throw new Error(`All Gemini API keys in the pool were attempted and failed. Last error: ${lastError}. Please check keys or wait for quota reset.`);
 }
@@ -370,7 +671,7 @@ export async function generateTimestampedTranscript(
   videoFile?: File | null,
   videoUrl?: string | null,
   onProgress?: (msg: string) => void,
-  model = 'gemini-2.0-flash'
+  model = 'gemini-3.5-flash'
 ): Promise<TranscriptSegment[]> {
   const allSegments: TranscriptSegment[] = [];
   const isDubbingMode = aiMode === 'Dubbing';

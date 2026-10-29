@@ -65,7 +65,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
   const [selectedPartFilter, setSelectedPartFilter] = useState<number | 'all'>('all');
   const [selectedEngine, setSelectedEngine] = useState<'assemblyai' | 'gemini'>('assemblyai');
   const [hasAssemblyAiKey, setHasAssemblyAiKey] = useState(false);
-  const [selectedGeminiModel, setSelectedGeminiModel] = useState<string>('gemini-2.0-flash');
+  const [selectedGeminiModel, setSelectedGeminiModel] = useState<string>('gemini-3.5-flash');
   const [showDubbingPlanModal, setShowDubbingPlanModal] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
 
@@ -443,9 +443,12 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
             className="px-3 py-2.5 bg-zinc-900 border border-cyan-500/30 rounded-xl text-xs text-cyan-300 font-mono font-semibold focus:outline-none cursor-pointer shrink-0"
             title="Gemini Model Selection"
           >
-            <option value="gemini-2.0-flash">⚡ Gemini 2.0 Flash (Recommended)</option>
-            <option value="gemini-1.5-flash">⚡ Gemini 1.5 Flash</option>
-            <option value="gemini-1.5-pro">🧠 Gemini 1.5 Pro</option>
+            <option value="gemini-3.5-flash">⚡ Gemini 3.5 Flash (Super Fast & Stable - Active)</option>
+            <option value="gemini-3.5-flash-lite">⚡ Gemini 3.5 Flash Lite (Ultra Fast)</option>
+            <option value="gemini-3.8-flash">⚡ Gemini 3.8 Flash (Latest Multi-modal)</option>
+            <option value="gemini-2.5-flash">⚡ Gemini 2.5 Flash (Legacy Accounts)</option>
+            <option value="gemini-2.5-flash-lite">⚡ Gemini 2.5 Flash Lite (Legacy Accounts)</option>
+            <option value="gemini-flash-latest">⚡ Gemini Flash Latest</option>
           </select>
 
           <button

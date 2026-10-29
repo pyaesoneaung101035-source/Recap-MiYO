@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, KeyRound, Check, RefreshCw, AlertCircle, ShieldCheck, Sparkles, Smartphone, Radio, Zap, Loader2, ExternalLink } from 'lucide-react';
 import { GeminiKeyInfo } from '../types';
-import { parseKeysFromInput, saveGeminiKeys, resetKeyStatuses } from '../utils/geminiPool';
+import { parseKeysFromInput, saveGeminiKeys, resetKeyStatuses, testGeminiKeyDirect } from '../utils/geminiPool';
 import { loadApiKeys, saveApiKeys, verifyAssemblyAiKey, verifyHuggingFaceKey, isAsciiOnly, sanitizeApiKey } from '../utils/apiKeys';
 
 interface ApiKeyModalProps {
@@ -121,55 +121,59 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
 
   const handleTestKeyRotation = async () => {
     if (geminiKeys.length === 0) {
-      setTestResult({
-        status: 'error',
-        message: 'ကျေးဇူးပြု၍ စစ်ဆေးရန် Gemini API Key အနည်းဆုံး တစ်ခု ထည့်သွင်းပေးပါ။',
-      });
+      setTestResult({ status: 'testing', message: 'Server Gemini API ချိတ်ဆက်မှုကို စစ်ဆေးနေပါသည်...' });
+      const testRes = await testGeminiKeyDirect(undefined, 'gemini-3.5-flash');
+      if (testRes.ok) {
+        setTestResult({
+          status: 'success',
+          message: '✓ Server Gemini API ချိတ်ဆက်မှု အောင်မြင်ပါသည်! (အသုံးပြုသူအားလုံးအတွက် အဆင်သင့်ဖြစ်ပါပြီ)',
+        });
+      } else {
+        setTestResult({
+          status: 'error',
+          message: testRes.message,
+        });
+      }
       return;
     }
 
-    setTestResult({ status: 'testing', message: 'Gemini API သို့ ချိတ်ဆက်စစ်ဆေးနေပါသည်...' });
+    setTestResult({ status: 'testing', message: 'Gemini API ချိတ်ဆက်မှုကို စစ်ဆေးနေပါသည်...' });
 
     try {
       const activeKey = geminiKeys.find((k) => k.status === 'active') || geminiKeys[0];
-      const res = await fetch('/api/gemini/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          apiKey: activeKey.key,
-          model: 'gemini-2.0-flash',
-        }),
-      });
+      const result = await testGeminiKeyDirect(activeKey.key, 'gemini-3.5-flash');
 
-      const data = await res.json().catch(() => ({}));
-
-      if (res.ok && data.ok) {
+      if (result.ok) {
         setTestResult({
           status: 'success',
-          message: `ချိတ်ဆက်မှု အောင်မြင်ပါသည်! (${activeKey.name} - Gemini API Connection Successful)`,
+          message: `ချိတ်ဆက်မှု အောင်မြင်ပါသည်! (${activeKey.name} - Gemini API Direct Connection Successful)`,
         });
+        activeKey.status = 'active';
+        activeKey.lastError = undefined;
+        saveGeminiKeys(geminiKeys);
       } else {
-        const status = res.status;
-        const details = data.errorDetails;
-        let errMsg = data.error || `HTTP ${status} Error`;
+        const details = result.errorDetails;
+        let errMsg = result.message;
         if (details) {
           errMsg = `[${details.status}] Quota Type: ${details.quotaType} — ${details.detailedDescription} (Message: ${details.message})`;
-        } else if (status === 401 || status === 403) {
-          errMsg = `API Key မမှန်ကန်ပါ (401/403 Invalid API Key)။ Google AI Studio မှ Key အမှန်ကို ထည့်သွင်းပါ။`;
-        } else if (status === 404) {
-          errMsg = `Model ရှာမတွေ့ပါ (404 Model Not Found)။`;
-        } else if (status === 429) {
-          errMsg = `API Key Quota ပြည့်သွားပါပြီ (429 Quota Exceeded)။ နောက် Key တစ်ခု ထည့်ပါ။`;
         }
         setTestResult({
           status: 'error',
           message: errMsg,
         });
+        if (details?.statusCode === 429) {
+          activeKey.status = 'quota_exceeded';
+          activeKey.lastError = `429 (${details.quotaType})`;
+        } else if (details?.statusCode === 401 || details?.statusCode === 403) {
+          activeKey.status = 'invalid';
+          activeKey.lastError = '401/403 Invalid';
+        }
+        saveGeminiKeys(geminiKeys);
       }
     } catch (err: any) {
       setTestResult({
         status: 'error',
-        message: `ကွန်ရက် ချိတ်ဆက်မှု အမှား (Network Error): ${err.message || 'Server unreachable'}`,
+        message: `ကွန်ရက် ချိတ်ဆက်မှု အမှား (Network Error): ${err.message || 'Connection failed'}`,
       });
     }
   };
@@ -203,10 +207,10 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
             <Smartphone className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
             <div className="space-y-1">
               <p className="font-medium text-cyan-300">
-                တိုက်ရိုက်ချိတ်ဆက်မှုစနစ် (Phone & Browser Direct Call)
+                Server-Side Gemini AI Engine (အသုံးပြုသူအားလုံးအတွက် အလိုအလျောက် အဆင်သင့်ဖြစ်ပါသည်)
               </p>
               <p className="text-cyan-200/80 leading-relaxed font-myanmar">
-                ဤနေရာတွင် ထည့်သွင်းထားသော Gemini API Key များသည် ဖုန်း သို့မဟုတ် ဘရောက်ဇာမှ Google servers သို့ တိုက်ရိုက် ချိတ်ဆက်အလုပ်လုပ်ပါသည်။ Quota ပြည့်ပါက နောက် Key တစ်ခုသို့ အလိုအလျောက် ရွှေ့ပြောင်းပေးပါမည် (Round-Robin Auto Rotation)။
+                ဤအက်ပ်အား ဖွင့်သူတိုင်း အသုံးပြုနိုင်ရန် Server-Side Gemini API Engine ကို အလိုအလျောက် တပ်ဆင်ထားပါသည်။ မိမိကိုယ်ပိုင် API Key များကိုလည်း Quota Rotation အတွက် ထည့်သွင်းအသုံးပြုနိုင်ပါသည်။
               </p>
             </div>
           </div>

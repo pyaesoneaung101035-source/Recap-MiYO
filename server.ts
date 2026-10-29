@@ -1,9 +1,11 @@
 import express from 'express';
+import http from 'http';
+import { WebSocketServer } from 'ws';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, Modality, LiveServerMessage } from '@google/genai';
 import { synthesizeNeuralRealityMyanmar, REALITY_VOICE_CONFIGS } from './server/neuralRealityTts';
 
 dotenv.config();
@@ -86,8 +88,16 @@ function analyzeGeminiError(error: any) {
   };
 }
 
-function createGeminiClient(apiKey: string) {
-  return new GoogleGenAI({ apiKey });
+function createGeminiClient(apiKey?: string) {
+  const key = apiKey || process.env.GEMINI_API_KEY;
+  return new GoogleGenAI({
+    apiKey: key,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
+    },
+  });
 }
 
 async function callGeminiRest(keyToUse: string, model: string, contentsPayload: any, systemInstruction?: any) {
@@ -99,13 +109,10 @@ async function callGeminiRest(keyToUse: string, model: string, contentsPayload: 
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'User-Agent': 'aistudio-build',
   };
 
   if (isOAuth) {
     headers['Authorization'] = `Bearer ${keyToUse}`;
-  } else {
-    headers['x-goog-api-key'] = keyToUse;
   }
 
   const body: any = {
@@ -166,12 +173,12 @@ async function startServer() {
   // Server-side Gemini API route
   app.post(['/api/gemini/generate', '/gemini/generate', '/generate'], async (req, res) => {
     try {
-      const { apiKey, model = 'gemini-2.0-flash', prompt, contents, parts, systemInstruction } = req.body;
+      const { apiKey, model = 'gemini-2.5-flash', prompt, contents, parts, systemInstruction } = req.body;
       const rawKey = apiKey || process.env.GEMINI_API_KEY;
 
       if (!rawKey) {
         return res.status(400).json({
-          error: 'Gemini API Key မရှိသေးပါ။ ကျေးဇူးပြု၍ Google AI Studio မှ API Key ထည့်သွင်းပေးပါ။',
+          error: 'Gemini API Key is not configured on the server. Please check Settings > Secrets or provide an API Key.',
         });
       }
 
@@ -184,7 +191,16 @@ async function startServer() {
       }
 
       const contentsPayload = contents || (parts ? { parts } : prompt);
-      const candidateModels = [model || 'gemini-2.0-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'];
+      const requestedModel = model || 'gemini-3.5-flash';
+      const candidateModels = [
+        requestedModel,
+        'gemini-3.5-flash',
+        'gemini-3.5-flash-lite',
+        'gemini-3.8-flash',
+        'gemini-2.5-flash',
+        'gemini-2.5-flash-lite',
+        'gemini-flash-latest',
+      ].filter(Boolean).filter((m, idx, arr) => arr.indexOf(m) === idx);
 
       let lastError: any = null;
       for (const m of candidateModels) {
@@ -207,12 +223,16 @@ async function startServer() {
                 status,
               });
             }
+            if (status === 404) {
+              // Model not found or deprecated, try next candidate model
+              break;
+            }
             const errMsg = modelErr?.message || '';
             const isQuota = status === 429 || errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('quota');
             
             if (isQuota && retries === 0) {
               retries++;
-              await new Promise((r) => setTimeout(r, 1500));
+              await new Promise((r) => setTimeout(r, 1200));
               continue;
             }
             break;
@@ -238,21 +258,38 @@ async function startServer() {
   // Test connection route
   app.post(['/api/gemini/test', '/gemini/test', '/test'], async (req, res) => {
     try {
-      const { apiKey, model = 'gemini-2.5-flash' } = req.body;
+      const { apiKey, model = 'gemini-3.5-flash' } = req.body;
       const rawKey = apiKey || process.env.GEMINI_API_KEY;
 
       if (!rawKey || !isValidAsciiApiKey(rawKey)) {
-        return res.status(400).json({ ok: false, error: 'Valid Gemini API Key is required (400 Bad Request).' });
+        return res.status(400).json({ ok: false, error: 'Valid Gemini API Key is required.' });
       }
 
       const keyToUse = cleanAsciiHeader(rawKey);
-      const textResult = await callGeminiRest(keyToUse, model || 'gemini-2.5-flash', 'Ping');
+      const candidateModels = [
+        model || 'gemini-3.5-flash',
+        'gemini-3.5-flash',
+        'gemini-3.5-flash-lite',
+        'gemini-3.8-flash',
+        'gemini-2.5-flash',
+        'gemini-2.5-flash-lite',
+      ].filter(Boolean).filter((m, idx, arr) => arr.indexOf(m) === idx);
 
-      if (textResult !== undefined) {
-        return res.json({ ok: true, message: 'Gemini API connection test successful.' });
+      let lastError: any = null;
+      for (const m of candidateModels) {
+        try {
+          const textResult = await callGeminiRest(keyToUse, m, 'Ping');
+          if (textResult !== undefined) {
+            return res.json({ ok: true, message: 'Gemini API connection test successful.', text: textResult, model: m });
+          }
+        } catch (mErr: any) {
+          lastError = mErr;
+          if (mErr?.status === 404 || mErr?.status === 503) continue;
+          break;
+        }
       }
 
-      return res.status(500).json({ ok: false, error: 'Empty response received from Gemini API.' });
+      throw lastError || new Error('Empty response received from Gemini API.');
     } catch (error: any) {
       const status = error?.status || error?.statusCode || 500;
       const errorDetails = analyzeGeminiError(error);
@@ -264,7 +301,7 @@ async function startServer() {
   // Server-side Gemini Streaming API route (Server-Sent Events)
   app.post('/api/gemini/stream', async (req, res) => {
     try {
-      const { apiKey, prompt, contents, parts, systemInstruction } = req.body;
+      const { apiKey, model = 'gemini-3.8-flash', prompt, contents, parts, systemInstruction } = req.body;
       const rawKey = apiKey || process.env.GEMINI_API_KEY;
 
       if (!rawKey || !isValidAsciiApiKey(rawKey)) {
@@ -280,7 +317,7 @@ async function startServer() {
 
       const contentsPayload = contents || (parts ? { parts } : prompt);
       const responseStream = await ai.models.generateContentStream({
-        model: 'gemini-3.8-flash',
+        model: model || 'gemini-3.8-flash',
         contents: contentsPayload,
         config: systemInstruction ? { systemInstruction } : undefined,
       });
@@ -294,7 +331,7 @@ async function startServer() {
       return res.end();
     } catch (error: any) {
       console.error('Gemini streaming error:', error);
-      res.write(`data: ${JSON.stringify({ error: error.message })}\n\n`);
+      res.write(`data: ${JSON.stringify({ error: error?.message || 'Streaming error' })}\n\n`);
       return res.end();
     }
   });
@@ -941,7 +978,82 @@ ${cleanText}`;
     });
   }
 
-  app.listen(PORT, () => {
+  const server = http.createServer(app);
+  const wss = new WebSocketServer({ server, path: '/live' });
+
+  wss.on('connection', async (clientWs, req) => {
+    let session: any = null;
+    try {
+      const urlObj = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`);
+      const clientKey = urlObj.searchParams.get('apiKey') || undefined;
+      const ai = createGeminiClient(clientKey);
+
+      session = await ai.live.connect({
+        model: 'gemini-3.8-live',
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } },
+          },
+          systemInstruction: 'You are an intelligent, helpful video assistant and Burmese voice translator. Respond helpfully and conversationally.',
+        },
+        callbacks: {
+          onmessage: (message: LiveServerMessage) => {
+            const audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+            if (audio && clientWs.readyState === 1) {
+              clientWs.send(JSON.stringify({ audio }));
+            }
+            if (message.serverContent?.interrupted && clientWs.readyState === 1) {
+              clientWs.send(JSON.stringify({ interrupted: true }));
+            }
+          },
+          onclose: () => {
+            if (clientWs.readyState === 1) {
+              clientWs.close();
+            }
+          },
+          onerror: (err: any) => {
+            console.error('Gemini Live session error:', err);
+            if (clientWs.readyState === 1) {
+              clientWs.send(JSON.stringify({ error: err?.message || 'Live session error' }));
+            }
+          },
+        },
+      });
+
+      clientWs.on('message', (data: any) => {
+        try {
+          const msg = JSON.parse(data.toString());
+          if (msg.audio) {
+            session.sendRealtimeInput({
+              audio: { data: msg.audio, mimeType: 'audio/pcm;rate=16000' },
+            });
+          }
+          if (msg.text) {
+            session.sendRealtimeInput({
+              text: msg.text,
+            });
+          }
+        } catch (e) {
+          console.error('Error parsing live client message:', e);
+        }
+      });
+
+      clientWs.on('close', () => {
+        try {
+          session?.close?.();
+        } catch (_) {}
+      });
+    } catch (err: any) {
+      console.error('Gemini Live connection failed:', err);
+      if (clientWs.readyState === 1) {
+        clientWs.send(JSON.stringify({ error: err?.message || 'Live connection failed' }));
+        clientWs.close();
+      }
+    }
+  });
+
+  server.listen(PORT, () => {
     console.log(`Server listening on port ${PORT}`);
   });
 }

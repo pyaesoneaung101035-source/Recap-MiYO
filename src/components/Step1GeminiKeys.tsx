@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { KeyRound, Check, RefreshCw, Smartphone, ShieldCheck, Sparkles, AlertCircle, ArrowRight, Zap, Radio, Loader2, ExternalLink } from 'lucide-react';
 import { GeminiKeyInfo, AiMode } from '../types';
-import { parseKeysFromInput, resetKeyStatuses, saveGeminiKeys, fetchDirectGoogleGeminiApi } from '../utils/geminiPool';
+import { parseKeysFromInput, resetKeyStatuses, saveGeminiKeys, fetchDirectGoogleGeminiApi, testGeminiKeyDirect } from '../utils/geminiPool';
 import { loadApiKeys, saveApiKeys, verifyAssemblyAiKey, verifyHuggingFaceKey, isAsciiOnly, sanitizeApiKey } from '../utils/apiKeys';
 
 interface Step1GeminiKeysProps {
@@ -129,61 +129,48 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
 
   const handleTestKeyRotation = async () => {
     if (geminiKeys.length === 0) {
-      setTestResult({
-        status: 'error',
-        message: 'ကျေးဇူးပြု၍ စစ်ဆေးရန် Gemini API Key အနည်းဆုံး တစ်ခု ထည့်သွင်းပေးပါ။',
-      });
+      setTestResult({ status: 'testing', message: 'Server Gemini API ချိတ်ဆက်မှုကို စစ်ဆေးနေပါသည်...' });
+      const testRes = await testGeminiKeyDirect(undefined, 'gemini-3.5-flash');
+      if (testRes.ok) {
+        setTestResult({
+          status: 'success',
+          message: '✓ Server Gemini API ချိတ်ဆက်မှု အောင်မြင်ပါသည်! (အသုံးပြုသူအားလုံးအတွက် အဆင်သင့်ဖြစ်ပါပြီ)',
+        });
+      } else {
+        setTestResult({
+          status: 'error',
+          message: testRes.message,
+        });
+      }
       return;
     }
 
     setTestResult({ status: 'testing', message: 'Gemini Key Pool ထဲရှိ Key များကို စစ်ဆေးနေပါသည်...' });
 
     const testKey = async (k: GeminiKeyInfo): Promise<GeminiKeyInfo> => {
-      let isValidKey = false;
-      let keyErrMessage = '';
-
       try {
-        const res = await fetch('/api/gemini/test', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            apiKey: k.key,
-            model: 'gemini-2.0-flash',
-          }),
-        });
-
-        const data = await res.json().catch(() => ({}));
-        if (res.ok && data.ok) {
-          isValidKey = true;
+        const result = await testGeminiKeyDirect(k.key, 'gemini-3.5-flash');
+        if (result.ok) {
+          return { ...k, status: 'active', lastError: undefined };
         } else {
-          const status = res.status;
-          const details = data.errorDetails;
+          const details = result.errorDetails;
+          let keyErrMessage = result.message;
           if (details) {
             keyErrMessage = `[${details.status}] ${details.quotaType}: ${details.detailedDescription} (${details.message})`;
-          } else {
-            keyErrMessage = data.error || `HTTP ${status}`;
-            if (status === 401 || status === 403) {
-              keyErrMessage = '401/403 Invalid API Key';
-            } else if (status === 404) {
-              keyErrMessage = '404 Model Not Found';
-            } else if (status === 429) {
-              keyErrMessage = '429 Quota Exceeded';
-            }
           }
+          const isQuota = details?.statusCode === 429;
+          const isInvalid = details?.statusCode === 401 || details?.statusCode === 403;
+          return {
+            ...k,
+            status: isQuota ? 'quota_exceeded' : isInvalid ? 'invalid' : 'active',
+            lastError: keyErrMessage,
+          };
         }
       } catch (err: any) {
-        keyErrMessage = err.message || 'Network Error';
-      }
-
-      if (isValidKey) {
-        return { ...k, status: 'active', lastError: undefined };
-      } else {
-        const isQuota = keyErrMessage.includes('429') || keyErrMessage.includes('Quota');
-        const isInvalid = keyErrMessage.includes('401') || keyErrMessage.includes('403') || keyErrMessage.includes('Invalid');
         return {
           ...k,
-          status: isQuota ? 'quota_exceeded' : isInvalid ? 'invalid' : 'active',
-          lastError: keyErrMessage,
+          status: 'invalid',
+          lastError: err?.message || 'Network Error',
         };
       }
     };
@@ -200,9 +187,10 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
         message: `✓ Auto-Rotation အဆင်သင့်ဖြစ်ပါသည်! (${validCount}/${geminiKeys.length} Key အသုံးပြုနိုင်ပါသည်။)`,
       });
     } else {
+      const firstError = updatedKeys[0]?.lastError || 'Invalid Key / Quota Exceeded';
       setTestResult({
         status: 'error',
-        message: 'ထည့်သွင်းထားသော Key များ 401/403 Invalid, 429 Quota ပြည့်နေ သို့မဟုတ် Network Error ဖြစ်နေပါသည်။',
+        message: `ထည့်သွင်းထားသော Key စစ်ဆေးမှု မအောင်မြင်ပါ: ${firstError}`,
       });
     }
   };
@@ -239,10 +227,10 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
         <Smartphone className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
         <div className="space-y-1">
           <p className="font-semibold text-cyan-300">
-            မှတ်ချက်: ဖုန်း/ကွန်ပျူတာမှ Google သို့ တိုက်ရိုက်ခေါ်ဆိုသော စနစ် (Direct Google API)
+            Server-Side Gemini AI Engine (အသုံးပြုသူအားလုံးအတွက် အလိုအလျောက် အဆင်သင့်ဖြစ်ပါသည်)
           </p>
           <p className="text-cyan-200/80 font-myanmar leading-relaxed">
-            ဤနေရာတွင် ထည့်သွင်းထားသော Gemini API Key များသည် ဖုန်း သို့မဟုတ် ဘရောက်ဇာမှ Google servers သို့ တိုက်ရိုက် ချိတ်ဆက်အလုပ်လုပ်ပါသည်။ Quota ပြည့်လျှင်လည်း အလိုအလျောက် နောက် Key သို့ ကူးပြောင်းပေးပါမည်။
+            ဤအက်ပ်အား ဖွင့်သူတိုင်း အသုံးပြုနိုင်ရန် Server-Side Gemini API Engine ကို အလိုအလျောက် တပ်ဆင်ထားပါသည်။ မိမိကိုယ်ပိုင် API Key များကိုလည်း Quota Rotation အတွက် ထည့်သွင်းအသုံးပြုနိုင်ပါသည်။
           </p>
         </div>
       </div>
@@ -278,28 +266,13 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
         />
 
         {(keysInput.includes('AQ.') || keysInput.startsWith('AQ') || keysInput.startsWith('aq') || keysInput.includes('aq.')) && (
-          <div className="p-3 rounded-xl bg-emerald-950/60 border border-emerald-500/50 text-emerald-200 text-xs font-myanmar flex items-center justify-between gap-3 shadow-md">
+          <div className="p-3 rounded-xl bg-cyan-950/60 border border-cyan-500/50 text-cyan-200 text-xs font-myanmar flex items-center justify-between gap-3 shadow-md">
             <div>
-              <p className="font-bold text-emerald-300">✓ AQ API Key ကို Gemini AI Engine & Whisper STT နှစ်ခုစလုံးတွင် အသုံးပြုနိုင်ပါသည်</p>
-              <p className="text-[11px] text-emerald-200/80 mt-0.5">
-                ဤ `AQ...` Key ကို Bearer Token Authentication စနစ်ဖြင့် Gemini AI Engine ဘာသာပြန်အတွက်ရော Whisper STT အတွက်ပါ အလိုအလျောက် တွဲဖက်ပေးထားပါသည်။
+              <p className="font-bold text-cyan-300">✓ Google AI Studio API Key (AQ... / AIzaSy...) ကို တိုက်ရိုက် ထောက်ပံ့ထားပါသည်</p>
+              <p className="text-[11px] text-cyan-200/80 mt-0.5">
+                ဤ Key များကို Google Generative Language API သို့ တိုက်ရိုက် ချိတ်ဆက်အသုံးပြုပါမည်။ Netlify Function သို့မဟုတ် Serverless မလိုအပ်ဘဲ တိုက်ရိုက် အလုပ်လုပ်ပါသည်။
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => {
-                const match = keysInput.match(/AQ[a-zA-Z0-9_.-]+/i) || keysInput.match(/aq[a-zA-Z0-9_.-]+/i);
-                if (match) {
-                  const keyVal = match[0];
-                  setAssemblyAiKey(keyVal);
-                  handleSaveAssemblyKey(keyVal);
-                  setAssemblyAiStatus('connected');
-                }
-              }}
-              className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold text-xs rounded-lg transition-all shrink-0 cursor-pointer shadow-sm"
-            >
-              Whisper Box သို့ပါ တွဲဖက်မည်
-            </button>
           </div>
         )}
 
