@@ -92,16 +92,27 @@ function analyzeGeminiError(error: any) {
 }
 
 function createGeminiClient(keyToUse: string) {
-  const headers: Record<string, string> = {
-    'User-Agent': 'aistudio-build',
-    'Authorization': `Bearer ${keyToUse}`,
-    'x-goog-api-key': keyToUse,
-  };
-
-  return new GoogleGenAI({
-    apiKey: keyToUse,
-    httpOptions: { headers },
-  });
+  const isOAuthToken = keyToUse.startsWith('AQ') || keyToUse.startsWith('aq') || keyToUse.startsWith('ya29') || keyToUse.startsWith('ya29.');
+  if (isOAuthToken) {
+    return new GoogleGenAI({
+      apiKey: '',
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+          'Authorization': `Bearer ${keyToUse}`,
+        },
+      },
+    });
+  } else {
+    return new GoogleGenAI({
+      apiKey: keyToUse,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
+  }
 }
 
 // Multi-route support for Netlify functions routing (/api/gemini/generate, /gemini/generate, /generate)

@@ -87,16 +87,27 @@ function analyzeGeminiError(error: any) {
 }
 
 function createGeminiClient(keyToUse: string) {
-  const headers: Record<string, string> = {
-    'User-Agent': 'aistudio-build',
-    'Authorization': `Bearer ${keyToUse}`,
-    'x-goog-api-key': keyToUse,
-  };
-
-  return new GoogleGenAI({
-    apiKey: keyToUse,
-    httpOptions: { headers },
-  });
+  const isOAuthToken = keyToUse.startsWith('AQ') || keyToUse.startsWith('aq') || keyToUse.startsWith('ya29') || keyToUse.startsWith('ya29.');
+  if (isOAuthToken) {
+    return new GoogleGenAI({
+      apiKey: '',
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+          'Authorization': `Bearer ${keyToUse}`,
+        },
+      },
+    });
+  } else {
+    return new GoogleGenAI({
+      apiKey: keyToUse,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
+  }
 }
 
 async function startServer() {
@@ -237,12 +248,7 @@ async function startServer() {
       }
 
       const keyToUse = cleanAsciiHeader(rawKey);
-      const ai = new GoogleGenAI({
-        apiKey: keyToUse,
-        httpOptions: {
-          headers: { 'User-Agent': 'aistudio-build' },
-        },
-      });
+      const ai = createGeminiClient(keyToUse);
 
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
@@ -511,14 +517,7 @@ EXACT HUMAN REALITY DIRECTIVES:
       // If a Gemini API key is present, attempt Gemini synthesis first
       if (keyToUse) {
         try {
-          const ai = new GoogleGenAI({
-            apiKey: keyToUse,
-            httpOptions: {
-              headers: {
-                'User-Agent': 'aistudio-build',
-              },
-            },
-          });
+          const ai = createGeminiClient(keyToUse);
 
           const tryModel = async (modelName: string): Promise<Buffer> => {
             const fullPromptText = `Instructions: Perform the following Burmese narration with exact vocal emotion, pitch, tempo, and character style.
