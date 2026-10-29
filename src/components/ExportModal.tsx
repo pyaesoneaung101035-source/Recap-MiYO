@@ -3,6 +3,7 @@ import { X, Download, FileText, Video, CheckCircle2, RotateCw, Play } from 'luci
 import { ProjectState } from '../types';
 import { generateSrtContent, downloadFile, getInterpolatedKeyframe, getFilterCss } from '../utils/alightMotionRenderer';
 import { drawCanvasSubtitle } from '../utils/canvasSubtitleRenderer';
+import { exportToDubbingPlanJSON, generateBurmeseDubbingSRT } from '../utils/geminiPool';
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -31,8 +32,14 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
   // Export SRT Subtitle File
   const handleDownloadSrt = () => {
-    const srt = generateSrtContent(project.segments);
-    downloadFile(srt, `${project.videoName || 'video'}_myanmar.srt`, 'text/plain;charset=utf-8');
+    const srt = generateBurmeseDubbingSRT(project.segments);
+    downloadFile(srt, `${project.videoName || 'video'}_burmese_subtitles.srt`, 'text/plain;charset=utf-8');
+  };
+
+  // Export Dubbing Plan JSON (10-Point Analysis)
+  const handleDownloadDubbingPlan = () => {
+    const json = exportToDubbingPlanJSON(project.segments);
+    downloadFile(json, `${project.videoName || 'video'}_dubbing_plan.json`, 'application/json');
   };
 
   // Export Project JSON
@@ -517,19 +524,38 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             )}
           </div>
 
-          {/* Option 2: SRT Subtitle File */}
+          {/* Option 2: Dubbing Plan JSON (10-Point Analysis) */}
+          <div className="p-3.5 rounded-xl bg-zinc-950/70 border border-sky-500/20 flex items-center justify-between gap-3">
+            <div>
+              <h4 className="text-xs font-semibold text-sky-200 flex items-center gap-1.5">
+                <FileText className="w-4 h-4 text-sky-400" />
+                <span>Burmese Dubbing Plan (10-Point JSON)</span>
+              </h4>
+              <p className="text-[11px] text-zinc-400 font-myanmar">တရုတ်-မြန်မာ အသံထပ်စကားပြော အပြည့်အစုံ JSON</p>
+            </div>
+            <button
+              onClick={handleDownloadDubbingPlan}
+              disabled={project.segments.length === 0}
+              className="px-3 py-1.5 text-xs bg-sky-500/20 hover:bg-sky-500/30 text-sky-200 disabled:opacity-50 rounded-lg transition-colors flex items-center gap-1 cursor-pointer border border-sky-500/30"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Download JSON</span>
+            </button>
+          </div>
+
+          {/* Option 3: SRT Subtitle File */}
           <div className="p-3.5 rounded-xl bg-zinc-950/70 border border-zinc-800 flex items-center justify-between gap-3">
             <div>
               <h4 className="text-xs font-medium text-zinc-200 flex items-center gap-1.5">
                 <FileText className="w-4 h-4 text-emerald-400" />
-                <span>Myanmar SRT Subtitles (.srt)</span>
+                <span>Myanmar Clean SRT Subtitles (.srt)</span>
               </h4>
-              <p className="text-[11px] text-zinc-400">Timestamp ပါ မြန်မာစာတန်းထိုး ဖိုင်သီးသန့်</p>
+              <p className="text-[11px] text-zinc-400 font-myanmar">တရုတ်စာမပါ၊ ၂ ကြောင်းကန့်သတ် မြန်မာစာတန်းထိုး</p>
             </div>
             <button
               onClick={handleDownloadSrt}
               disabled={project.segments.length === 0}
-              className="px-3 py-1.5 text-xs bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-zinc-200 rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
+              className="px-3 py-1.5 text-xs bg-emerald-500/20 hover:bg-emerald-500/30 disabled:opacity-50 text-emerald-200 rounded-lg transition-colors flex items-center gap-1 cursor-pointer border border-emerald-500/30"
             >
               <Download className="w-3.5 h-3.5" />
               <span>Download SRT</span>

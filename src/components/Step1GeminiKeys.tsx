@@ -136,59 +136,51 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
       return;
     }
 
-    setTestResult({ status: 'testing', message: 'Gemini Key Pool ထဲရှိ Key များကို တစ်ခုချင်းစီ စစ်ဆေးနေပါသည်...' });
-
-    let validCount = 0;
-    const updatedKeys = [...geminiKeys];
+    setTestResult({ status: 'testing', message: 'Gemini Key Pool ထဲရှိ Key များကို စစ်ဆေးနေပါသည်...' });
 
     const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 
-    for (let i = 0; i < updatedKeys.length; i++) {
-      const k = updatedKeys[i];
+    const testKey = async (k: GeminiKeyInfo): Promise<GeminiKeyInfo> => {
       let isValidKey = false;
       let keyErrMessage = '';
 
       try {
-        if (k.key.startsWith('AQ') || k.key.startsWith('aq')) {
-          isValidKey = true;
-        } else {
-          // Attempt 1: Server Proxy (Localhost only)
-          if (isLocalhost) {
-            const proxyRes = await fetch('/api/gemini/generate', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                apiKey: k.key,
-                prompt: 'Ping',
-                model: 'gemini-3.8-flash',
-              }),
-            }).catch(() => null);
+        // Attempt 1: Server Proxy (Localhost only)
+        if (isLocalhost) {
+          const proxyRes = await fetch('/api/gemini/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              apiKey: k.key,
+              prompt: 'Ping',
+              model: 'gemini-2.5-flash',
+            }),
+          }).catch(() => null);
 
-            if (proxyRes && proxyRes.ok) {
+          if (proxyRes && proxyRes.ok) {
+            isValidKey = true;
+          }
+        }
+
+        // Attempt 2: Direct Google API
+        if (!isValidKey) {
+          try {
+            const directRes = await fetchDirectGoogleGeminiApi(
+              k.key,
+              'gemini-2.5-flash',
+              'Ping'
+            );
+            if (directRes.text) {
               isValidKey = true;
             }
-          }
-
-          // Attempt 2: Direct Google API
-          if (!isValidKey) {
-            try {
-              const directRes = await fetchDirectGoogleGeminiApi(
-                k.key,
-                'gemini-3.8-flash',
-                'Ping'
-              );
-              if (directRes.text) {
-                isValidKey = true;
-              }
-            } catch (directErr: any) {
-              const errMsg = directErr?.message || '';
-              if (errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED')) {
-                keyErrMessage = '429 Quota Exceeded';
-              } else if (errMsg.includes('API_KEY_INVALID') || errMsg.includes('key not valid')) {
-                keyErrMessage = 'Invalid Key';
-              } else {
-                keyErrMessage = errMsg;
-              }
+          } catch (directErr: any) {
+            const errMsg = directErr?.message || '';
+            if (errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED')) {
+              keyErrMessage = '429 Quota Exceeded';
+            } else if (errMsg.includes('API_KEY_INVALID') || errMsg.includes('key not valid')) {
+              keyErrMessage = 'Invalid Key';
+            } else {
+              keyErrMessage = errMsg;
             }
           }
         }
@@ -196,23 +188,25 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
         keyErrMessage = proxyErr.message || 'Connection error';
       }
 
-      // Resilient Format Validation: Standard Google API key starting with AIzaSy or AQ key
-      if (!isValidKey && (k.key.startsWith('AIzaSy') || k.key.startsWith('AQ') || k.key.startsWith('aq')) && k.key.length >= 15 && !keyErrMessage.includes('Invalid Key')) {
+      // Resilient Format Validation
+      if (!isValidKey && (k.key.startsWith('AIzaSy') || k.key.toLowerCase().startsWith('aq')) && k.key.length >= 15 && !keyErrMessage.includes('Invalid Key')) {
         isValidKey = true;
       }
 
       if (isValidKey) {
-        validCount++;
-        updatedKeys[i] = { ...k, status: 'active', lastError: undefined };
+        return { ...k, status: 'active', lastError: undefined };
       } else {
         const isQuota = keyErrMessage.includes('Quota');
-        updatedKeys[i] = {
+        return {
           ...k,
           status: isQuota ? 'quota_exceeded' : 'invalid',
           lastError: keyErrMessage || 'Connection error',
         };
       }
-    }
+    };
+
+    const updatedKeys = await Promise.all(geminiKeys.map(testKey));
+    const validCount = updatedKeys.filter((k) => k.status === 'active').length;
 
     setGeminiKeys(updatedKeys);
     saveGeminiKeys(updatedKeys);
@@ -220,12 +214,12 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
     if (validCount > 0) {
       setTestResult({
         status: 'success',
-        message: `✓ Auto-Rotation အဆင်သင့်ဖြစ်ပါသည်! (${validCount}/${geminiKeys.length} Key အသုံးပြုနိုင်ပါသည်။ Key 1 အလုပ်မလုပ်ပါက သို့မဟုတ် Limit ပြည့်ပါက နောက် Key 2, Key 3 ဘက်သို့ အလိုအလျောက် Auto ပြောင်းလဲချိတ်ဆက်ပါမည်)`,
+        message: `✓ Auto-Rotation အဆင်သင့်ဖြစ်ပါသည်! (${validCount}/${geminiKeys.length} Key အသုံးပြုနိုင်ပါသည်။)`,
       });
     } else {
       setTestResult({
         status: 'error',
-        message: 'ထည့်သွင်းထားသော Key များ Quota ပြည့်နေ သို့မဟုတ် မမှန်ကန်ပါ။ ကျေးဇူးပြု၍ Key သစ်များ ထည့်ပေးပါ။',
+        message: 'ထည့်သွင်းထားသော Key များ Quota ပြည့်နေ သို့မဟုတ် မမှန်ကန်ပါ။',
       });
     }
   };
@@ -262,7 +256,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
         <Smartphone className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
         <div className="space-y-1">
           <p className="font-semibold text-cyan-300">
-            မှတ်ချက် 3: ဖုန်း/ကွန်ပျူတာမှ Google သို့ တိုက်ရိုက်ခေါ်ဆိုသော စနစ် (Direct Google API)
+            မှတ်ချက်: ဖုန်း/ကွန်ပျူတာမှ Google သို့ တိုက်ရိုက်ခေါ်ဆိုသော စနစ် (Direct Google API)
           </p>
           <p className="text-cyan-200/80 font-myanmar leading-relaxed">
             ဤနေရာတွင် ထည့်သွင်းထားသော Gemini API Key များသည် ဖုန်း သို့မဟုတ် ဘရောက်ဇာမှ Google servers သို့ တိုက်ရိုက် ချိတ်ဆက်အလုပ်လုပ်ပါသည်။ Quota ပြည့်လျှင်လည်း အလိုအလျောက် နောက် Key သို့ ကူးပြောင်းပေးပါမည်။
@@ -287,7 +281,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
               <ExternalLink className="w-2.5 h-2.5" />
             </a>
             <span className="text-zinc-500 font-mono-num">
-              Active Keys: {geminiKeys.filter((k) => k.status === 'active').length} / {geminiKeys.length}
+              Active Gemini Keys: {geminiKeys.filter((k) => k.status === 'active').length} / {geminiKeys.length}
             </span>
           </div>
         </div>
@@ -295,23 +289,23 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
         <textarea
           value={keysInput}
           onChange={(e) => setKeysInput(e.target.value)}
-          placeholder="AIzaSy... သို့မဟုတ် AQ... (Key 1)&#10;AQ... (Key 2)&#10;AIzaSy... (Key 3)"
+          placeholder="AIzaSy... သို့မဟုတ် AQ... (Gemini Key 1)&#10;AQ... (Gemini Key 2)&#10;AIzaSy... (Gemini Key 3)"
           rows={3}
           className="w-full px-3.5 py-2.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-cyan-500/60"
         />
 
-        {(keysInput.includes('AQ.') || keysInput.startsWith('AQ') || keysInput.startsWith('aq')) && (
+        {(keysInput.includes('AQ.') || keysInput.startsWith('AQ') || keysInput.startsWith('aq') || keysInput.includes('aq.')) && (
           <div className="p-3 rounded-xl bg-emerald-950/60 border border-emerald-500/50 text-emerald-200 text-xs font-myanmar flex items-center justify-between gap-3 shadow-md">
             <div>
-              <p className="font-bold text-emerald-300">✓ AQ API Key ကို Gemini API Pool & Whisper STT တွင် အသုံးပြုနိုင်ပါသည်</p>
+              <p className="font-bold text-emerald-300">✓ AQ API Key ကို Gemini AI Engine & Whisper STT နှစ်ခုစလုံးတွင် အသုံးပြုနိုင်ပါသည်</p>
               <p className="text-[11px] text-emerald-200/80 mt-0.5">
-                ဤ `AQ...` Key ကို Gemini AI Engine အတွက်ရော Whisper STT Timestamp ခွဲထုတ်ခြင်းအတွက်ပါ အလိုအလျောက် တွဲဖက်ပေးထားပါသည်။
+                ဤ `AQ...` Key ကို Bearer Token Authentication စနစ်ဖြင့် Gemini AI Engine ဘာသာပြန်အတွက်ရော Whisper STT အတွက်ပါ အလိုအလျောက် တွဲဖက်ပေးထားပါသည်။
               </p>
             </div>
             <button
               type="button"
               onClick={() => {
-                const match = keysInput.match(/AQ[a-zA-Z0-9_.-]+/i);
+                const match = keysInput.match(/AQ[a-zA-Z0-9_.-]+/i) || keysInput.match(/aq[a-zA-Z0-9_.-]+/i);
                 if (match) {
                   const keyVal = match[0];
                   setAssemblyAiKey(keyVal);
@@ -321,7 +315,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
               }}
               className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold text-xs rounded-lg transition-all shrink-0 cursor-pointer shadow-sm"
             >
-              Whisper Box တွဲဖက်ပြီးပြီ
+              Whisper Box သို့ပါ တွဲဖက်မည်
             </button>
           </div>
         )}
@@ -401,7 +395,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
                   type="button"
                   onClick={handleConnectAssemblyAi}
                   disabled={assemblyAiStatus === 'testing' || !assemblyAiKey.trim() || !isAsciiOnly(assemblyAiKey)}
-                  className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white font-medium text-xs rounded-lg transition-colors flex items-center gap-1.5 shadow-sm"
+                  className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white font-medium text-xs rounded-lg transition-colors flex items-center gap-1.5 shadow-sm cursor-pointer"
                 >
                   {assemblyAiStatus === 'testing' ? (
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -538,7 +532,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
           <button
             onClick={handleAddKeys}
             disabled={!keysInput.trim()}
-            className="px-3.5 py-1.5 text-xs font-medium bg-cyan-500 hover:bg-cyan-400 disabled:bg-zinc-800 disabled:text-zinc-500 text-zinc-950 rounded-lg transition-colors flex items-center gap-1.5"
+            className="px-3.5 py-1.5 text-xs font-medium bg-cyan-500 hover:bg-cyan-400 disabled:bg-zinc-800 disabled:text-zinc-500 text-zinc-950 rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
           >
             <Check className="w-3.5 h-3.5" />
             <span>Add Keys to Rotation Pool</span>
@@ -547,7 +541,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
           <div className="flex items-center gap-2">
             <button
               onClick={() => setGeminiKeys(resetKeyStatuses(geminiKeys))}
-              className="px-2.5 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 bg-zinc-800 rounded-lg transition-colors flex items-center gap-1"
+              className="px-2.5 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 bg-zinc-800 rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
               title="Reset all 429 quota states"
             >
               <RefreshCw className="w-3 h-3" />
@@ -557,7 +551,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
             <button
               onClick={handleTestKeyRotation}
               disabled={testResult.status === 'testing'}
-              className="px-3 py-1.5 text-xs text-cyan-300 hover:text-cyan-200 bg-cyan-950/50 border border-cyan-800/60 rounded-lg transition-colors flex items-center gap-1.5"
+              className="px-3 py-1.5 text-xs text-cyan-300 hover:text-cyan-200 bg-cyan-950/50 border border-cyan-800/60 rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
             >
               <ShieldCheck className="w-3.5 h-3.5" />
               <span>Test Connection</span>
@@ -610,7 +604,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
                     </span>
                     <button
                       onClick={() => handleRemoveKey(k.id)}
-                      className="text-zinc-500 hover:text-rose-400 p-1"
+                      className="text-zinc-500 hover:text-rose-400 p-1 cursor-pointer"
                     >
                       ✕
                     </button>
@@ -632,7 +626,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
             <button
               key={mode.id}
               onClick={() => setSelectedAiMode(mode.id)}
-              className={`p-2.5 rounded-lg border text-left transition-all ${
+              className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer ${
                 selectedAiMode === mode.id
                   ? 'bg-cyan-950/60 border-cyan-500/70 text-cyan-200 shadow-sm'
                   : 'bg-zinc-950/60 border-zinc-800 text-zinc-400 hover:text-zinc-200'

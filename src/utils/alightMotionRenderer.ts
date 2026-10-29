@@ -237,11 +237,43 @@ export function generateSrtContent(segments: TranscriptSegment[]): string {
     return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')},${String(ms).padStart(3, '0')}`;
   }
 
+  function formatBurmeseLines(text: string): string {
+    const cleaned = text.replace(/[\u4e00-\u9fa5\u3000-\u303f\uff01-\uff5e]/g, '').trim();
+    if (!cleaned) return '';
+
+    const explicit = cleaned.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (explicit.length > 0 && explicit.length <= 2 && explicit.every((l) => l.length <= 40)) {
+      return explicit.join('\n');
+    }
+
+    if (cleaned.length <= 35) {
+      return cleaned;
+    }
+
+    const tokens = cleaned.split(/(\s+|(?<=[၊။]))/);
+    let line1 = '';
+    let line2 = '';
+    const mid = Math.floor(cleaned.length / 2);
+
+    for (const t of tokens) {
+      if ((line1 + t).length <= mid || !line1) {
+        line1 += t;
+      } else {
+        line2 += t;
+      }
+    }
+
+    const t1 = line1.trim();
+    const t2 = line2.trim();
+    return t2 ? `${t1}\n${t2}` : t1;
+  }
+
   return segments
+    .filter((seg) => (seg.subtitleText || seg.myanmarTranslation || seg.originalText || '').trim().length > 0)
     .map((seg, idx) => {
       const start = formatTime(seg.startTime);
       const end = formatTime(seg.endTime);
-      const text = seg.myanmarTranslation || seg.originalText;
+      const text = formatBurmeseLines(seg.subtitleText || seg.myanmarTranslation || seg.originalText);
       return `${idx + 1}\n${start} --> ${end}\n${text}\n`;
     })
     .join('\n');

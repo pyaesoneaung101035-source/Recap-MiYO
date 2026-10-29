@@ -14,11 +14,22 @@ import {
   Check,
   ArrowRight,
   ArrowLeft,
+  Copy,
+  Download,
+  FileText,
+  Eye,
+  X,
+  Volume2,
 } from 'lucide-react';
 import { ProjectState, TranscriptSegment, AiMode } from '../types';
-import { generateTimestampedTranscript } from '../utils/geminiPool';
+import {
+  generateTimestampedTranscript,
+  exportToDubbingPlanJSON,
+  generateBurmeseDubbingSRT,
+} from '../utils/geminiPool';
 import { transcribeVideoWithAssemblyAi } from '../utils/assemblyAi';
 import { loadApiKeys } from '../utils/apiKeys';
+import { downloadFile } from '../utils/alightMotionRenderer';
 
 interface AiRecapStudioProps {
   project: ProjectState;
@@ -54,7 +65,29 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
   const [selectedPartFilter, setSelectedPartFilter] = useState<number | 'all'>('all');
   const [selectedEngine, setSelectedEngine] = useState<'assemblyai' | 'gemini'>('assemblyai');
   const [hasAssemblyAiKey, setHasAssemblyAiKey] = useState(false);
-  const [selectedGeminiModel, setSelectedGeminiModel] = useState<string>('gemini-3.8-flash');
+  const [selectedGeminiModel, setSelectedGeminiModel] = useState<string>('gemini-2.5-flash');
+  const [showDubbingPlanModal, setShowDubbingPlanModal] = useState(false);
+  const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
+
+  const handleCopyDubbingPlanJson = () => {
+    if (!project.segments.length) return;
+    const jsonStr = exportToDubbingPlanJSON(project.segments);
+    navigator.clipboard.writeText(jsonStr);
+    setCopyFeedback('Dubbing Plan (JSON) ကူးယူပြီးပါပြီ!');
+    setTimeout(() => setCopyFeedback(null), 3000);
+  };
+
+  const handleDownloadDubbingPlanJson = () => {
+    if (!project.segments.length) return;
+    const jsonStr = exportToDubbingPlanJSON(project.segments);
+    downloadFile(jsonStr, `${project.videoName || 'video'}_dubbing_plan.json`, 'application/json');
+  };
+
+  const handleDownloadBurmeseSRT = () => {
+    if (!project.segments.length) return;
+    const srtStr = generateBurmeseDubbingSRT(project.segments);
+    downloadFile(srtStr, `${project.videoName || 'video'}_burmese_subtitles.srt`, 'text/plain;charset=utf-8');
+  };
 
   // Live progress simulation timer when generating
   useEffect(() => {
@@ -117,6 +150,13 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
       return;
     }
 
+    if (selectedEngine === 'assemblyai' && !hasAssemblyAiKey) {
+      const msg = 'AssemblyAI API Key မတွေ့ရှိပါ။ ကျေးဇူးပြု၍ Step 1 တွင် AssemblyAI Key (32-digit Token) ကို ထည့်သွင်းပေးပါ။';
+      alert(msg);
+      setErrorMessage(msg);
+      return;
+    }
+
     setIsGenerating(true);
     setProgressPercent(15);
     setStatusMessage('အသံလှိုင်း စစ်ဆေးနေပါသည်...');
@@ -128,7 +168,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
       if (selectedEngine === 'assemblyai') {
         try {
           if (!hasAssemblyAiKey) {
-            throw new Error('AssemblyAI Key မရှိသေးပါ။ Gemini သို့ အလိုအလျောက် ပြောင်းပါသည်...');
+            throw new Error('AssemblyAI Key မတွေ့ရှိပါ။ ကျေးဇူးပြု၍ Step 1 တွင် AssemblyAI Key (32-digit Token) ထည့်သွင်းပေးပါ။');
           }
           setStatusMessage('🎙️ [AssemblyAI Whisper Engine] အသံလှိုင်း စစ်ဆေးနေပါသည်...');
           rawSegments = await transcribeVideoWithAssemblyAi(
@@ -138,19 +178,12 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
             }
           );
         } catch (assemblyErr: any) {
-          console.warn('AssemblyAI fallback to Gemini STT:', assemblyErr);
-          setStatusMessage('⚠️ Gemini STT သို့ အလိုအလျောက် ပြောင်းလဲ၍ ထုတ်ယူနေပါသည်...');
-          setProgressPercent(40);
-          rawSegments = await generateTimestampedTranscript(
-            project.videoName || 'Uploaded Video',
-            project.videoDuration || 30,
-            project.selectedAiMode,
-            customPrompt,
-            project.videoFile,
-            project.videoUrl,
-            (msg) => setStatusMessage(`[Gemini STT] ${msg}`),
-            selectedGeminiModel
-          );
+          console.warn('AssemblyAI fallback notice:', assemblyErr);
+          const alertMsg = `AssemblyAI Error: ${assemblyErr.message || 'AssemblyAI ချိတ်ဆက်မှု အဆင်မပြေပါ'}။`;
+          alert(alertMsg);
+          setErrorMessage(alertMsg);
+          setIsGenerating(false);
+          return;
         }
       } else {
         setProgressPercent(35);
@@ -410,9 +443,10 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
             className="px-3 py-2.5 bg-zinc-900 border border-cyan-500/30 rounded-xl text-xs text-cyan-300 font-mono font-semibold focus:outline-none cursor-pointer shrink-0"
             title="Gemini Model Selection"
           >
-            <option value="gemini-3.8-flash">⚡ Gemini 3.8 Flash (Recommended)</option>
-            <option value="gemini-3.1-flash-lite">⚡ Gemini 3.1 Flash Lite</option>
-            <option value="gemini-4-argon">🧠 Gemini 4 Argon Pro</option>
+            <option value="gemini-2.5-flash">⚡ Gemini 2.5 Flash (Recommended)</option>
+            <option value="gemini-2.0-flash">⚡ Gemini 2.0 Flash</option>
+            <option value="gemini-1.5-flash">⚡ Gemini 1.5 Flash Standard</option>
+            <option value="gemini-1.5-pro">🧠 Gemini 1.5 Pro</option>
           </select>
 
           <button
@@ -472,6 +506,66 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
         )}
       </div>
 
+      {/* Dubbing Plan & Subtitle Actions Toolbar */}
+      {project.segments.length > 0 && (
+        <div className="p-4 rounded-2xl bg-gradient-to-r from-sky-950/60 via-zinc-900 to-indigo-950/50 border border-sky-500/30 shadow-xl space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <FileText className="w-4 h-4 text-sky-400" />
+              <span className="text-xs font-bold text-white font-myanmar">
+                {project.selectedAiMode === 'Dubbing'
+                  ? 'Dubbing Plan & Subtitles (10-Point Analysis)'
+                  : 'Burmese Script & Subtitles Plan'}
+              </span>
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-sky-500/20 text-sky-300 border border-sky-500/30 font-mono">
+                {project.segments.length} Segments
+              </span>
+            </div>
+
+            {copyFeedback && (
+              <span className="text-xs text-emerald-400 font-semibold flex items-center gap-1.5 animate-pulse bg-emerald-500/10 px-2.5 py-1 rounded-lg border border-emerald-500/20">
+                <Check className="w-3.5 h-3.5" />
+                {copyFeedback}
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <button
+              onClick={handleCopyDubbingPlanJson}
+              className="px-3 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-sky-300 text-xs font-semibold flex items-center justify-center gap-1.5 border border-white/10 transition-colors cursor-pointer active:scale-95"
+            >
+              <Copy className="w-3.5 h-3.5" />
+              <span>Copy JSON Plan</span>
+            </button>
+
+            <button
+              onClick={handleDownloadDubbingPlanJson}
+              className="px-3 py-2 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 text-sky-200 text-xs font-semibold flex items-center justify-center gap-1.5 border border-sky-500/30 transition-colors cursor-pointer active:scale-95"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Download JSON</span>
+            </button>
+
+            <button
+              onClick={handleDownloadBurmeseSRT}
+              className="px-3 py-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-200 text-xs font-semibold flex items-center justify-center gap-1.5 border border-emerald-500/30 transition-colors cursor-pointer active:scale-95"
+            >
+              <FileText className="w-3.5 h-3.5" />
+              <span>Download .SRT</span>
+            </button>
+
+            <button
+              onClick={() => setShowDubbingPlanModal(true)}
+              className="px-3 py-2 rounded-xl bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-200 text-xs font-semibold flex items-center justify-center gap-1.5 border border-indigo-500/30 transition-colors cursor-pointer active:scale-95"
+            >
+              <Eye className="w-3.5 h-3.5" />
+              <span>View 10-Point Plan</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Segment List & Timestamp Editor */}
       <div className="space-y-3">
         <div className="flex items-center justify-between">
@@ -495,7 +589,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
             <p className="font-myanmar">စာသားအပိုင်းများ မရှိသေးပါ။ Transcribe & Translate ခလုတ်ကို နှိပ်ပါ။</p>
           </div>
         ) : (
-          <div className="space-y-2.5 max-h-96 overflow-y-auto pr-1">
+          <div className="space-y-3 max-h-[32rem] overflow-y-auto pr-1">
             {displayedSegments.map((seg, idx) => (
               <div
                 key={seg.id}
@@ -505,6 +599,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
                     : 'glass-card'
                 }`}
               >
+                {/* Header: Segment number, time, duration, and controls */}
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-2 text-xs">
                   <div className="flex items-center gap-2">
                     <span className="font-mono text-zinc-500 text-xs font-bold">#{idx + 1}</span>
@@ -517,6 +612,17 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
                         {formatMinSec(seg.startTime)} - {formatMinSec(seg.endTime)}
                       </span>
                     </button>
+                    <span className="px-2 py-0.5 rounded-md bg-zinc-800/80 text-[10px] text-zinc-400 font-mono">
+                      {(seg.duration || seg.endTime - seg.startTime).toFixed(2)}s
+                    </span>
+                    <span className="px-2 py-0.5 rounded-md bg-sky-500/10 text-sky-300 text-[10px] font-semibold border border-sky-500/20">
+                      {seg.speaker || 'Speaker 1 (Adult Male)'}
+                    </span>
+                    {seg.isOnScreen !== undefined && (
+                      <span className="px-1.5 py-0.5 rounded text-[9px] bg-zinc-800 text-zinc-400">
+                        {seg.isOnScreen ? '👁️ On Screen' : '🎙️ Off Screen'}
+                      </span>
+                    )}
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
@@ -527,9 +633,9 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
                       }
                       className="px-2.5 py-1 rounded-lg bg-zinc-900 border border-white/10 text-xs text-emerald-400 font-semibold focus:outline-none cursor-pointer"
                     >
-                      <optgroup label="Male Voices">
-                        <option value="Thiha">Thiha</option>
-                        <option value="KyawKyaw">Kyaw Kyaw</option>
+                      <optgroup label="Male Voices (Adult Burmese)">
+                        <option value="Thiha">Thiha (Adult Male)</option>
+                        <option value="KyawKyaw">Kyaw Kyaw (Adult Male)</option>
                         <option value="AungAung">Aung Aung</option>
                         <option value="MinThway">Min Thway</option>
                       </optgroup>
@@ -567,18 +673,156 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
                   </div>
                 </div>
 
-                <input
-                  type="text"
-                  value={seg.myanmarTranslation}
-                  onChange={(e) => handleUpdateSegment(seg.id, { myanmarTranslation: e.target.value })}
-                  placeholder="မြန်မာဘာသာပြန်..."
-                  className="w-full px-3 py-1.5 glass-input rounded-lg text-xs font-myanmar text-white"
-                />
+                {/* Original dialogue (e.g. Chinese) */}
+                {seg.originalText && (
+                  <div className="mb-2 px-3 py-1.5 rounded-lg bg-zinc-900/60 border border-white/5 text-[11px] text-zinc-400 flex items-baseline gap-2">
+                    <span className="text-[10px] font-semibold text-zinc-500 uppercase shrink-0">Original:</span>
+                    <span className="font-sans text-zinc-300">{seg.originalText}</span>
+                  </div>
+                )}
+
+                {/* Natural Spoken Burmese Dialogue Input */}
+                <div className="space-y-1 mb-2">
+                  <div className="flex items-center justify-between text-[10px] text-zinc-400">
+                    <span className="font-myanmar font-semibold text-cyan-300">
+                      သဘာဝကျသော မြန်မာစကားပြော (Dubbing Dialogue):
+                    </span>
+                    {seg.emotion && (
+                      <span className="text-zinc-500 italic">Emotion: {seg.emotion}</span>
+                    )}
+                  </div>
+                  <input
+                    type="text"
+                    value={seg.myanmarTranslation}
+                    onChange={(e) => handleUpdateSegment(seg.id, { myanmarTranslation: e.target.value })}
+                    placeholder="သဘာဝကျသော လူပြောစကား မြန်မာစကားပြော..."
+                    className="w-full px-3 py-1.5 glass-input rounded-lg text-xs font-myanmar text-white focus:ring-1 focus:ring-cyan-400"
+                  />
+                </div>
+
+                {/* Subtitle text & lip-sync note */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[10px]">
+                  <div>
+                    <span className="text-zinc-500 block mb-0.5">မြန်မာစာတန်းထိုး Subtitle (&lt;35 chars, max 2 lines):</span>
+                    <input
+                      type="text"
+                      value={seg.subtitleText !== undefined ? seg.subtitleText : seg.myanmarTranslation}
+                      onChange={(e) => handleUpdateSegment(seg.id, { subtitleText: e.target.value })}
+                      placeholder="စာတန်းထိုး စာသား..."
+                      className="w-full px-2.5 py-1 bg-zinc-900/90 border border-white/10 rounded text-xs text-zinc-200 font-myanmar"
+                    />
+                  </div>
+                  <div>
+                    <span className="text-zinc-500 block mb-0.5">Lip-Sync & Timing Note:</span>
+                    <input
+                      type="text"
+                      value={seg.lipSyncNote || 'Paced to match original duration'}
+                      onChange={(e) => handleUpdateSegment(seg.id, { lipSyncNote: e.target.value })}
+                      placeholder="နှုတ်ခမ်းလှုပ်ရှားမှုနှင့် အချိန်ကိုက် မှတ်ချက်..."
+                      className="w-full px-2.5 py-1 bg-zinc-900/90 border border-white/10 rounded text-xs text-zinc-400 font-myanmar"
+                    />
+                  </div>
+                </div>
               </div>
             ))}
           </div>
         )}
       </div>
+
+      {/* 10-Point Dubbing Plan Modal */}
+      {showDubbingPlanModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+          <div className="relative w-full max-w-5xl max-h-[90vh] bg-zinc-900 border border-white/10 rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+            {/* Modal Header */}
+            <div className="p-4 border-b border-white/10 flex items-center justify-between bg-zinc-950/70">
+              <div className="flex items-center gap-2.5">
+                <FileText className="w-5 h-5 text-sky-400" />
+                <div>
+                  <h3 className="text-sm font-bold text-white">Chinese to Burmese Dubbing Plan (10-Point Specification)</h3>
+                  <p className="text-[11px] text-zinc-400 font-myanmar">
+                    အချိန်ကိုက် မြန်မာစကားပြော အပြည့်အစုံ ဇယားနှင့် JSON အချက်အလက်များ
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleCopyDubbingPlanJson}
+                  className="px-3 py-1.5 rounded-lg bg-sky-500/20 text-sky-300 hover:bg-sky-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>Copy JSON</span>
+                </button>
+                <button
+                  onClick={handleDownloadDubbingPlanJson}
+                  className="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/15 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download JSON</span>
+                </button>
+                <button
+                  onClick={handleDownloadBurmeseSRT}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>Download SRT</span>
+                </button>
+                <button
+                  onClick={() => setShowDubbingPlanModal(false)}
+                  className="p-1.5 text-zinc-400 hover:text-white rounded-lg hover:bg-white/10 transition-colors cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Modal Table Body */}
+            <div className="flex-1 overflow-auto p-4">
+              <table className="w-full text-left text-xs text-zinc-300 border-collapse">
+                <thead>
+                  <tr className="border-b border-white/10 text-[11px] text-zinc-400 bg-zinc-950/40">
+                    <th className="p-2.5 font-bold"># / Time</th>
+                    <th className="p-2.5 font-bold">Speaker</th>
+                    <th className="p-2.5 font-bold">Original Dialogue</th>
+                    <th className="p-2.5 font-bold">Natural Burmese Translation</th>
+                    <th className="p-2.5 font-bold">Burmese Subtitle</th>
+                    <th className="p-2.5 font-bold">Duration</th>
+                    <th className="p-2.5 font-bold">Emotion & Lip-Sync</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {project.segments.map((s, i) => (
+                    <tr key={s.id} className="hover:bg-white/5 transition-colors">
+                      <td className="p-2.5 font-mono text-cyan-300 whitespace-nowrap">
+                        <div className="font-bold">#{i + 1}</div>
+                        <div className="text-[10px] text-zinc-400">
+                          {formatMinSec(s.startTime)} - {formatMinSec(s.endTime)}
+                        </div>
+                      </td>
+                      <td className="p-2.5 whitespace-nowrap">
+                        <span className="font-semibold text-white">{s.speaker || 'Speaker 1 (Adult Male)'}</span>
+                        <div className="text-[10px] text-zinc-400">{s.isOnScreen ? 'On-Screen' : 'Off-Screen'}</div>
+                      </td>
+                      <td className="p-2.5 text-zinc-300 font-sans max-w-xs">{s.originalText || '-'}</td>
+                      <td className="p-2.5 text-sky-200 font-myanmar max-w-xs">{s.myanmarTranslation}</td>
+                      <td className="p-2.5 text-emerald-300 font-myanmar max-w-xs">
+                        {s.subtitleText || s.myanmarTranslation}
+                      </td>
+                      <td className="p-2.5 font-mono text-zinc-300 whitespace-nowrap">
+                        {(s.duration || s.endTime - s.startTime).toFixed(2)}s
+                      </td>
+                      <td className="p-2.5 text-[11px] text-zinc-400 max-w-xs">
+                        <div className="text-zinc-200">{s.emotion || 'Natural conversational'}</div>
+                        <div className="text-[10px] text-zinc-500 italic">{s.lipSyncNote || 'Paced to match duration'}</div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Bottom Navigation Card */}
       <div className="pt-4 border-t border-white/10 flex items-center justify-between gap-4">

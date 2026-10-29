@@ -50,8 +50,14 @@ export interface TranscriptSegment {
   id: string;
   startTime: number; // in seconds
   endTime: number; // in seconds
-  originalText: string;
-  myanmarTranslation: string;
+  originalText: string; // Original Chinese / source dialogue
+  myanmarTranslation: string; // Natural conversational Burmese translation
+  subtitleText?: string; // Clean Burmese subtitle text (max 2 lines, < 35 chars/line)
+  duration?: number; // Target duration in seconds
+  speaker?: string; // Speaker identity (e.g. Speaker 1 Adult Male)
+  emotion?: string; // Speaking emotion and delivery
+  isOnScreen?: boolean; // Whether the speaker is on screen
+  lipSyncNote?: string; // Lip-sync note and pacing guidance
   voice: VoiceOption;
   audioUrl?: string;
   audioDuration?: number;
