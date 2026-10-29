@@ -38,7 +38,7 @@ function formatNetworkError(error: any, serviceName: string): string {
   const msg = error?.message || '';
   const status = error?.status || error?.statusCode;
   if (status === 401 || status === 403 || msg.includes('API_KEY_INVALID') || msg.includes('key not valid') || msg.includes('403')) {
-    return `${serviceName} API Key မမှန်ကန်ပါ သို့မဟုတ် ခွင့်ပြုချက်မရှိပါ (401/403 Invalid API Key)။ ကျေးဇူးပြု၍ Google AI Studio မှ Key အမှန်ကို ထည့်သွင်းပါ။`;
+    return `${serviceName} API Key မမှန်ကန်ပါ သို့မဟုတ် ခွင့်ပြုချက်မရှိပါ (401/403 Invalid API Key)။ Google AI Studio မှ API Key အမှန်ကို ထည့်သွင်းပါ။`;
   }
   if (status === 404 || msg.includes('404') || msg.includes('not found') || msg.includes('model not found')) {
     return `${serviceName} Model ရှာမတွေ့ပါ သို့မဟုတ် မရှိတော့ပါ (404 Model Not Found)။`;
@@ -49,15 +49,15 @@ function formatNetworkError(error: any, serviceName: string): string {
   return error?.message || `${serviceName} ချိတ်ဆက်မှု မအောင်မြင်ပါ`;
 }
 
-// Gemini generate route
-app.post('/api/gemini/generate', async (req, res) => {
+// Multi-route support for Netlify functions routing (/api/gemini/generate, /gemini/generate, /generate)
+app.post(['/api/gemini/generate', '/gemini/generate', '/generate'], async (req, res) => {
   try {
     const { apiKey, model = 'gemini-2.5-flash', prompt, contents, parts, systemInstruction } = req.body;
     const rawKey = apiKey || process.env.GEMINI_API_KEY;
 
     if (!rawKey) {
       return res.status(400).json({
-        error: 'Gemini API Key မရှိသေးပါ။ ကျေးဇူးပြု၍ Google AI Studio မှ API Key (AIzaSy...) ထည့်သွင်းပေးပါ။',
+        error: 'Gemini API Key မရှိသေးပါ။ ကျေးဇူးပြု၍ Google AI Studio မှ API Key ထည့်သွင်းပေးပါ။',
       });
     }
 
@@ -68,9 +68,18 @@ app.post('/api/gemini/generate', async (req, res) => {
       });
     }
 
+    const headers: Record<string, string> = {
+      'User-Agent': 'aistudio-build',
+    };
+    if (keyToUse.toLowerCase().startsWith('aq') || keyToUse.startsWith('ya29')) {
+      headers['Authorization'] = `Bearer ${keyToUse}`;
+    } else {
+      headers['x-goog-api-key'] = keyToUse;
+    }
+
     const ai = new GoogleGenAI({
       apiKey: keyToUse,
-      httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+      httpOptions: { headers },
     });
 
     const contentsPayload = contents || (parts ? { parts } : prompt);
@@ -90,7 +99,15 @@ app.post('/api/gemini/generate', async (req, res) => {
         }
       } catch (err: any) {
         lastError = err;
-        if (err?.status === 401 || err?.status === 403 || err?.status === 404 || err?.status === 429) {
+        const status = err?.status || err?.statusCode;
+        // Do not treat 401 as a model error - return 401 immediately
+        if (status === 401 || status === 403) {
+          return res.status(status).json({
+            error: 'Gemini API Key မမှန်ကန်ပါ (401/403 Unauthorized)။ Google AI Studio မှ API Key အမှန်ကို စစ်ဆေးထည့်သွင်းပါ။',
+            status,
+          });
+        }
+        if (status === 429) {
           throw err;
         }
       }
@@ -99,13 +116,14 @@ app.post('/api/gemini/generate', async (req, res) => {
     throw lastError || new Error('All Gemini model candidates failed');
   } catch (error: any) {
     console.error('Gemini error:', error);
+    const status = error?.status || error?.statusCode || 500;
     const errMsg = formatNetworkError(error, 'Gemini');
-    return res.status(error.status || 500).json({ error: errMsg, status: error.status });
+    return res.status(status).json({ error: errMsg, status });
   }
 });
 
 // Test connection route
-app.post('/api/gemini/test', async (req, res) => {
+app.post(['/api/gemini/test', '/gemini/test', '/test'], async (req, res) => {
   try {
     const { apiKey, model = 'gemini-2.5-flash' } = req.body;
     const rawKey = apiKey || process.env.GEMINI_API_KEY;
@@ -115,7 +133,17 @@ app.post('/api/gemini/test', async (req, res) => {
     }
 
     const keyToUse = cleanAsciiHeader(rawKey);
-    const ai = new GoogleGenAI({ apiKey: keyToUse });
+    const headers: Record<string, string> = {
+      'User-Agent': 'aistudio-build',
+    };
+    if (keyToUse.toLowerCase().startsWith('aq') || keyToUse.startsWith('ya29')) {
+      headers['Authorization'] = `Bearer ${keyToUse}`;
+    }
+
+    const ai = new GoogleGenAI({
+      apiKey: keyToUse,
+      httpOptions: { headers },
+    });
 
     const response = await ai.models.generateContent({
       model: model || 'gemini-2.5-flash',
