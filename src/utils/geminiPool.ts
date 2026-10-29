@@ -97,7 +97,7 @@ export async function fetchDirectGoogleGeminiApi(
   parts?: any[],
   systemInstruction?: string
 ): Promise<{ text: string }> {
-  const modelToUse = model || 'gemini-3.5-flash-lite';
+  const modelToUse = model || 'gemini-3.8-flash';
   const cleanKey = apiKey.trim().replace(/[^\x21-\x7E]/g, '');
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelToUse)}:generateContent?key=${encodeURIComponent(cleanKey)}`;
 
@@ -139,7 +139,7 @@ export async function fetchDirectGoogleGeminiApi(
 export async function callGeminiWithRotation(
   prompt: string,
   systemInstruction?: string,
-  model = 'gemini-2.5-flash',
+  model = 'gemini-3.8-flash',
   mediaParts?: Array<{ mimeType: string; data: string }>
 ): Promise<{ text: string; usedKeyName: string }> {
   const keys = loadGeminiKeys();
@@ -375,7 +375,7 @@ export async function generateTimestampedTranscript(
   videoFile?: File | null,
   videoUrl?: string | null,
   onProgress?: (msg: string) => void,
-  model = 'gemini-2.5-flash'
+  model = 'gemini-3.8-flash'
 ): Promise<TranscriptSegment[]> {
   const allSegments: TranscriptSegment[] = [];
 

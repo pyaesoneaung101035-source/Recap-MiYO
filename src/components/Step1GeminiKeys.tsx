@@ -160,7 +160,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
               body: JSON.stringify({
                 apiKey: k.key,
                 prompt: 'Ping',
-                model: 'gemini-3.5-flash-lite',
+                model: 'gemini-3.8-flash',
               }),
             }).catch(() => null);
 
@@ -174,7 +174,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
             try {
               const directRes = await fetchDirectGoogleGeminiApi(
                 k.key,
-                'gemini-3.5-flash-lite',
+                'gemini-3.8-flash',
                 'Ping'
               );
               if (directRes.text) {

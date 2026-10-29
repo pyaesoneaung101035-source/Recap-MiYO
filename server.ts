@@ -61,7 +61,7 @@ async function startServer() {
   // Server-side Gemini API route
   app.post('/api/gemini/generate', async (req, res) => {
     try {
-      const { apiKey, model = 'gemini-2.5-flash', prompt, contents, parts, systemInstruction } = req.body;
+      const { apiKey, model = 'gemini-3.8-flash', prompt, contents, parts, systemInstruction } = req.body;
       const rawKey = apiKey || process.env.GEMINI_API_KEY;
 
       if (!rawKey) {
@@ -96,13 +96,12 @@ async function startServer() {
 
       const contentsPayload = contents || (parts ? { parts } : prompt);
 
-      // Prioritize high-quota Flash models and valid models
+      // Prioritize standard official non-deprecated Gemini models
       const candidateModels = [
-        model || 'gemini-3.5-flash-lite',
-        'gemini-3.5-flash-lite',
-        'gemini-2.5-flash',
-        'gemini-3.1-pro-preview',
-        'gemini-1.5-flash',
+        model || 'gemini-3.8-flash',
+        'gemini-3.8-flash',
+        'gemini-3.1-flash-lite',
+        'gemini-4-argon',
       ];
 
       let lastError: any = null;
@@ -177,7 +176,7 @@ async function startServer() {
 
       const contentsPayload = contents || (parts ? { parts } : prompt);
       const responseStream = await ai.models.generateContentStream({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.8-flash',
         contents: contentsPayload,
         config: systemInstruction ? { systemInstruction } : undefined,
       });
