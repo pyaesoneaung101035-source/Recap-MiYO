@@ -141,31 +141,36 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
     let validCount = 0;
     const updatedKeys = [...geminiKeys];
 
+    const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+
     for (let i = 0; i < updatedKeys.length; i++) {
       const k = updatedKeys[i];
       let isValidKey = false;
       let keyErrMessage = '';
 
-      // Test key via Server Proxy endpoint
       try {
         if (k.key.startsWith('AQ') || k.key.startsWith('aq')) {
           isValidKey = true;
         } else {
-          // Attempt 1: Server Proxy
-          const proxyRes = await fetch('/api/gemini/generate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              apiKey: k.key,
-              prompt: 'Ping',
-              model: 'gemini-3.5-flash-lite',
-            }),
-          }).catch(() => null);
+          // Attempt 1: Server Proxy (Localhost only)
+          if (isLocalhost) {
+            const proxyRes = await fetch('/api/gemini/generate', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                apiKey: k.key,
+                prompt: 'Ping',
+                model: 'gemini-3.5-flash-lite',
+              }),
+            }).catch(() => null);
 
-          if (proxyRes && proxyRes.ok) {
-            isValidKey = true;
-          } else {
-            // Attempt 2: Direct Google API
+            if (proxyRes && proxyRes.ok) {
+              isValidKey = true;
+            }
+          }
+
+          // Attempt 2: Direct Google API
+          if (!isValidKey) {
             try {
               const directRes = await fetchDirectGoogleGeminiApi(
                 k.key,
@@ -269,7 +274,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
       <div className="space-y-3">
         <div className="flex items-center justify-between text-xs">
           <label className="font-semibold text-zinc-200">
-            Gemini API Key များ ထည့်ရန် (AIzaSy...):
+            Gemini API Key များ ထည့်ရန် (AIzaSy... သို့မဟုတ် AQ...):
           </label>
           <div className="flex items-center gap-3">
             <a
@@ -290,7 +295,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
         <textarea
           value={keysInput}
           onChange={(e) => setKeysInput(e.target.value)}
-          placeholder="AIzaSy... (Key 1)&#10;AIzaSy... (Key 2)&#10;AIzaSy... (Key 3)"
+          placeholder="AIzaSy... သို့မဟုတ် AQ... (Key 1)&#10;AQ... (Key 2)&#10;AIzaSy... (Key 3)"
           rows={3}
           className="w-full px-3.5 py-2.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-cyan-500/60"
         />
@@ -298,9 +303,9 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
         {(keysInput.includes('AQ.') || keysInput.startsWith('AQ') || keysInput.startsWith('aq')) && (
           <div className="p-3 rounded-xl bg-emerald-950/60 border border-emerald-500/50 text-emerald-200 text-xs font-myanmar flex items-center justify-between gap-3 shadow-md">
             <div>
-              <p className="font-bold text-emerald-300">✓ AQ API Key ထည့်သွင်းထားပါသည် (Whisper STT အဆင်သင့်ဖြစ်ပါပြီ)</p>
+              <p className="font-bold text-emerald-300">✓ AQ API Key ကို Gemini API Pool & Whisper STT တွင် အသုံးပြုနိုင်ပါသည်</p>
               <p className="text-[11px] text-emerald-200/80 mt-0.5">
-                ဤ `AQ...` Key ကို အသံလှိုင်းမှ စကားပြောများကို Whisper ဖြင့် တိကျစွာ Timestamp ထုတ်ယူရန် အလိုအလျောက် ချိတ်ဆက်ပေးထားပါသည်။
+                ဤ `AQ...` Key ကို Gemini AI Engine အတွက်ရော Whisper STT Timestamp ခွဲထုတ်ခြင်းအတွက်ပါ အလိုအလျောက် တွဲဖက်ပေးထားပါသည်။
               </p>
             </div>
             <button

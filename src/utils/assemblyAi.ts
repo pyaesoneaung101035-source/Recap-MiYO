@@ -29,6 +29,8 @@ export async function transcribeVideoWithAssemblyAi(
   onProgress('🎙️ [AssemblyAI Whisper] - ဗီဒီယိုမှ အသံလှိုင်းကို 16kHz Speech Format ဖြင့် ထုတ်ယူနေပါသည်...');
   const { base64Wav } = await extractAudioFromVideo(videoSource, 600); // up to 10 mins
 
+  const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+
   // 2. Upload audio to AssemblyAI (Direct browser fetch first for static deployments like Vercel)
   onProgress('☁️ [AssemblyAI Whisper] - အသံဖိုင်ကို AssemblyAI Cloud သို့ လုံခြုံစွာ ပေးပို့နေပါသည်...');
   let uploadUrl = '';
@@ -52,8 +54,8 @@ export async function transcribeVideoWithAssemblyAi(
     console.warn('Direct AssemblyAI upload notice:', directUploadErr);
   }
 
-  // Server proxy upload fallback
-  if (!uploadUrl) {
+  // Server proxy upload fallback (only on localhost Express)
+  if (!uploadUrl && isLocalhost) {
     try {
       const uploadRes = await fetch('/api/assemblyai/upload', {
         method: 'POST',
@@ -103,8 +105,8 @@ export async function transcribeVideoWithAssemblyAi(
     console.warn('Direct AssemblyAI transcript notice:', directTranscribErr);
   }
 
-  // Server proxy transcript fallback
-  if (!transcriptId) {
+  // Server proxy transcript fallback (only on localhost Express)
+  if (!transcriptId && isLocalhost) {
     try {
       const transcriptRes = await fetch('/api/assemblyai/proxy', {
         method: 'POST',
@@ -147,21 +149,23 @@ export async function transcribeVideoWithAssemblyAi(
 
     let pollData: any = null;
 
-    try {
-      const pollRes = await fetch('/api/assemblyai/proxy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          apiKey: cleanKey,
-          endpoint: `transcript/${transcriptId}`,
-          method: 'GET',
-        }),
-      });
+    if (isLocalhost) {
+      try {
+        const pollRes = await fetch('/api/assemblyai/proxy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            apiKey: cleanKey,
+            endpoint: `transcript/${transcriptId}`,
+            method: 'GET',
+          }),
+        });
 
-      if (pollRes.ok) {
-        pollData = await pollRes.json();
-      }
-    } catch {}
+        if (pollRes.ok) {
+          pollData = await pollRes.json();
+        }
+      } catch {}
+    }
 
     if (!pollData) {
       try {

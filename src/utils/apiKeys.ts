@@ -66,24 +66,28 @@ export async function verifyAssemblyAiKey(apiKey: string): Promise<{ ok: boolean
 
   const cleanKey = sanitizeApiKey(trimmed);
 
-  // 1. Try server proxy endpoint (/api/assemblyai/verify)
-  try {
-    const res = await fetch('/api/assemblyai/verify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey: cleanKey }),
-    });
+  const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 
-    if (res.ok) {
-      const data = await res.json().catch(() => ({}));
-      if (data.ok) {
-        return { ok: true, message: '✓ AssemblyAI ချိတ်ဆက်မှု အောင်မြင်ပါသည်! (Whisper STT အဆင်သင့်ဖြစ်ပါပြီ)', details: data.details };
+  // 1. Try server proxy endpoint (/api/assemblyai/verify) - ONLY on localhost Express
+  if (isLocalhost) {
+    try {
+      const res = await fetch('/api/assemblyai/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: cleanKey }),
+      });
+
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        if (data.ok) {
+          return { ok: true, message: '✓ AssemblyAI ချိတ်ဆက်မှု အောင်မြင်ပါသည်! (Whisper STT အဆင်သင့်ဖြစ်ပါပြီ)', details: data.details };
+        }
+      } else if (res.status === 401 || res.status === 403) {
+        return { ok: false, message: 'AssemblyAI API Key မမှန်ကန်ပါ (401 Invalid Key)။ ကျေးဇူးပြု၍ AssemblyAI Dashboard မှ 32-character Token အမှန်ကို ပြန်လည်စစ်ဆေးပေးပါ။' };
       }
-    } else if (res.status === 401 || res.status === 403) {
-      return { ok: false, message: 'AssemblyAI API Key မမှန်ကန်ပါ (401 Invalid Key)။ ကျေးဇူးပြု၍ AssemblyAI Dashboard မှ 32-character Token အမှန်ကို ပြန်လည်စစ်ဆေးပေးပါ။' };
+    } catch (serverErr) {
+      console.warn('Server proxy AssemblyAI verify notice:', serverErr);
     }
-  } catch (serverErr) {
-    console.warn('Server proxy AssemblyAI verify notice:', serverErr);
   }
 
   // 2. Try direct browser fetch to AssemblyAI API
@@ -161,32 +165,35 @@ export async function verifyHuggingFaceKey(apiKey: string): Promise<{ ok: boolea
   }
 
   const cleanKey = sanitizeApiKey(trimmed);
+  const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 
-  // 1. Try server proxy endpoint (/api/huggingface/verify)
-  try {
-    const res = await fetch('/api/huggingface/verify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey: cleanKey }),
-    });
+  // 1. Try server proxy endpoint (/api/huggingface/verify) - ONLY on localhost Express
+  if (isLocalhost) {
+    try {
+      const res = await fetch('/api/huggingface/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: cleanKey }),
+      });
 
-    if (res.ok) {
-      const data = await res.json().catch(() => ({}));
-      if (data.ok) {
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        if (data.ok) {
+          return {
+            ok: true,
+            message: data.message || '✓ Hugging Face ချိတ်ဆက်မှု အောင်မြင်ပါသည်! (Voice Clone အဆင်သင့်ဖြစ်ပါပြီ)',
+            username: data.username,
+          };
+        }
+      } else if (res.status === 401 || res.status === 403) {
         return {
-          ok: true,
-          message: data.message || '✓ Hugging Face ချိတ်ဆက်မှု အောင်မြင်ပါသည်! (Voice Clone အဆင်သင့်ဖြစ်ပါပြီ)',
-          username: data.username,
+          ok: false,
+          message: 'Hugging Face API Token မမှန်ကန်ပါ (401 Invalid Token)။ ကျေးဇူးပြု၍ https://huggingface.co/settings/tokens မှ hf_... Token အစစ်ကို ပြန်စစ်ပေးပါ။',
         };
       }
-    } else if (res.status === 401 || res.status === 403) {
-      return {
-        ok: false,
-        message: 'Hugging Face API Token မမှန်ကန်ပါ (401 Invalid Token)။ ကျေးဇူးပြု၍ https://huggingface.co/settings/tokens မှ hf_... Token အစစ်ကို ပြန်စစ်ပေးပါ။',
-      };
+    } catch (serverErr) {
+      console.warn('Server proxy verify notice:', serverErr);
     }
-  } catch (serverErr) {
-    console.warn('Server proxy verify notice:', serverErr);
   }
 
   // 2. Try direct browser fetch to Hugging Face WHOAMI endpoint

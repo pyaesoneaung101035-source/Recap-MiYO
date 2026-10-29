@@ -142,7 +142,13 @@ export async function callGeminiWithRotation(
   model = 'gemini-2.5-flash',
   mediaParts?: Array<{ mimeType: string; data: string }>
 ): Promise<{ text: string; usedKeyName: string }> {
-  let keys = loadGeminiKeys();
+  const keys = loadGeminiKeys();
+  const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+
+  // Include all stored keys (including AIzaSy... and AQ... keys) in the Gemini API pool
+  const geminiKeys = keys.filter(
+    (k) => k && typeof k.key === 'string' && k.key.trim().length >= 10
+  );
 
   // Construct parts payload
   const parts: any[] = [];
@@ -158,47 +164,50 @@ export async function callGeminiWithRotation(
   }
   parts.push({ text: prompt });
 
-  // If no client keys in local storage, route to server using environment GEMINI_API_KEY
-  if (keys.length === 0) {
-    try {
-      const serverRes = await fetch('/api/gemini/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, parts, systemInstruction, model }),
-      });
+  // If no Gemini client keys in local storage
+  if (geminiKeys.length === 0) {
+    if (isLocalhost) {
+      try {
+        const serverRes = await fetch('/api/gemini/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt, parts, systemInstruction, model }),
+        });
 
-      if (serverRes.ok) {
-        const data = await serverRes.json();
-        return { text: data.text, usedKeyName: 'Server Flash Engine' };
+        if (serverRes.ok) {
+          const data = await serverRes.json();
+          return { text: data.text, usedKeyName: 'Server Flash Engine' };
+        }
+        const errJson = await serverRes.json().catch(() => ({}));
+        const msg = errJson.error || 'Server Gemini API call failed.';
+        throw new Error(msg);
+      } catch (serverErr: any) {
+        throw new Error(serverErr.message || 'Gemini API Key မရှိသေးပါ။ ကျေးဇူးပြု၍ အဆင့် 1 တွင် Gemini API Key (AIzaSy... သို့မဟုတ် AQ...) ထည့်သွင်းပေးပါ။');
       }
-      const errJson = await serverRes.json().catch(() => ({}));
-      const msg = errJson.error || 'Server Gemini API call failed.';
-      throw new Error(msg);
-    } catch (serverErr: any) {
-      throw new Error(serverErr.message || 'Gemini API Key မရှိသေးပါ။ ကျေးဇူးပြု၍ အဆင့် 1 တွင် Gemini API Key (AIzaSy...) သို့မဟုတ် AQ Key ထည့်သွင်းပေးပါ။');
+    } else {
+      throw new Error(
+        'ကျေးဇူးပြု၍ အဆင့် 1 (API Settings) တွင် Gemini API Key ("AIzaSy..." သို့မဟုတ် "AQ...") ကို ထည့်သွင်းပေးပါ။'
+      );
     }
   }
 
-  // Filter keys and attempt direct Google API or server proxy call per rotated key
-  const maxAttempts = keys.length * 2;
+  // Filter keys and attempt direct Google API per rotated key
+  const maxAttempts = geminiKeys.length * 2;
   let attempts = 0;
   let lastError = '';
 
   while (attempts < maxAttempts) {
-    const keyInfo = keys[currentKeyIndex % keys.length];
-    currentKeyIndex = (currentKeyIndex + 1) % keys.length;
+    const keyInfo = geminiKeys[currentKeyIndex % geminiKeys.length];
+    currentKeyIndex = (currentKeyIndex + 1) % geminiKeys.length;
     attempts++;
 
-    const hasActiveKeys = keys.some((k) => k.status === 'active');
+    const hasActiveKeys = geminiKeys.some((k) => k.status === 'active');
     if (hasActiveKeys && keyInfo.status !== 'active') {
       continue;
     }
 
-    const isAqKey = keyInfo.key.startsWith('AQ') || keyInfo.key.startsWith('aq');
-    const keyToSend = isAqKey ? '' : keyInfo.key;
-
     // 1. Direct Google Gemini API Call (Primary for client-side keys, Works 100% on Vercel, Static Hosts, and Browsers)
-    if (!isAqKey && keyInfo.key && keyInfo.key.trim().length >= 10) {
+    if (keyInfo.key && keyInfo.key.trim().length >= 10) {
       try {
         const directData = await fetchDirectGoogleGeminiApi(
           keyInfo.key,
@@ -232,48 +241,50 @@ export async function callGeminiWithRotation(
       }
     }
 
-    // 2. Server Proxy Fallback (/api/gemini/generate)
-    try {
-      const res = await fetch('/api/gemini/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          apiKey: keyToSend,
-          model,
-          prompt,
-          parts,
-          systemInstruction,
-        }),
-      });
+    // 2. Server Proxy Fallback (/api/gemini/generate) - ONLY when running locally on Express server
+    if (isLocalhost) {
+      try {
+        const res = await fetch('/api/gemini/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            apiKey: keyInfo.key,
+            model,
+            prompt,
+            parts,
+            systemInstruction,
+          }),
+        });
 
-      if (res.ok) {
-        const data = await res.json();
-        const candidateText = data.text || '';
+        if (res.ok) {
+          const data = await res.json();
+          const candidateText = data.text || '';
 
-        keyInfo.callCount = (keyInfo.callCount || 0) + 1;
-        keyInfo.status = 'active';
-        keyInfo.lastUsed = new Date().toLocaleTimeString();
-        keyInfo.lastError = undefined;
-        saveGeminiKeys(keys);
+          keyInfo.callCount = (keyInfo.callCount || 0) + 1;
+          keyInfo.status = 'active';
+          keyInfo.lastUsed = new Date().toLocaleTimeString();
+          keyInfo.lastError = undefined;
+          saveGeminiKeys(keys);
 
-        return { text: candidateText, usedKeyName: keyInfo.name };
+          return { text: candidateText, usedKeyName: keyInfo.name };
+        }
+
+        const errText = await res.text().catch(() => '');
+        const isQuota = res.status === 429 || errText.includes('RESOURCE_EXHAUSTED') || errText.includes('quota');
+        const isInvalid = res.status === 400 && (errText.includes('API_KEY_INVALID') || errText.includes('key not valid'));
+
+        if (isQuota) {
+          keyInfo.status = 'quota_exceeded';
+          keyInfo.lastError = '429 Quota Exceeded';
+        } else if (isInvalid) {
+          keyInfo.status = 'invalid';
+          keyInfo.lastError = 'Invalid Key';
+        } else if (res.status !== 404) {
+          keyInfo.lastError = `HTTP ${res.status}: ${errText.substring(0, 100)}`;
+        }
+      } catch (netErr: any) {
+        console.warn(`Server proxy call failed for ${keyInfo.name}:`, netErr);
       }
-
-      const errText = await res.text().catch(() => '');
-      const isQuota = res.status === 429 || errText.includes('RESOURCE_EXHAUSTED') || errText.includes('quota');
-      const isInvalid = res.status === 400 && (errText.includes('API_KEY_INVALID') || errText.includes('key not valid'));
-
-      if (isQuota) {
-        keyInfo.status = 'quota_exceeded';
-        keyInfo.lastError = '429 Quota Exceeded';
-      } else if (isInvalid && !isAqKey) {
-        keyInfo.status = 'invalid';
-        keyInfo.lastError = 'Invalid Key';
-      } else if (res.status !== 404) {
-        keyInfo.lastError = `HTTP ${res.status}: ${errText.substring(0, 100)}`;
-      }
-    } catch (netErr: any) {
-      console.warn(`Server proxy call failed for ${keyInfo.name}:`, netErr);
     }
 
     saveGeminiKeys(keys);
