@@ -179,7 +179,7 @@ export async function callGeminiWithRotation(
     }
   }
 
-  // Filter keys and attempt server proxy call per rotated key
+  // Filter keys and attempt direct Google API or server proxy call per rotated key
   const maxAttempts = keys.length * 2;
   let attempts = 0;
   let lastError = '';
@@ -197,7 +197,42 @@ export async function callGeminiWithRotation(
     const isAqKey = keyInfo.key.startsWith('AQ') || keyInfo.key.startsWith('aq');
     const keyToSend = isAqKey ? '' : keyInfo.key;
 
-    // 1. Attempt Server Proxy
+    // 1. Direct Google Gemini API Call (Primary for client-side keys, Works 100% on Vercel, Static Hosts, and Browsers)
+    if (!isAqKey && keyInfo.key && keyInfo.key.trim().length >= 10) {
+      try {
+        const directData = await fetchDirectGoogleGeminiApi(
+          keyInfo.key,
+          model,
+          prompt,
+          parts,
+          systemInstruction
+        );
+
+        if (directData && directData.text) {
+          keyInfo.callCount = (keyInfo.callCount || 0) + 1;
+          keyInfo.status = 'active';
+          keyInfo.lastUsed = new Date().toLocaleTimeString();
+          keyInfo.lastError = undefined;
+          saveGeminiKeys(keys);
+
+          return { text: directData.text, usedKeyName: `${keyInfo.name} (Direct API)` };
+        }
+      } catch (directErr: any) {
+        console.warn(`Direct Google API call notice for ${keyInfo.name}:`, directErr);
+        const errMsg = directErr?.message || '';
+        if (errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED')) {
+          keyInfo.status = 'quota_exceeded';
+          keyInfo.lastError = '429 Quota Exceeded';
+        } else if (errMsg.includes('400') && (errMsg.includes('API_KEY_INVALID') || errMsg.includes('key not valid'))) {
+          keyInfo.status = 'invalid';
+          keyInfo.lastError = 'Invalid Key';
+        } else {
+          keyInfo.lastError = errMsg;
+        }
+      }
+    }
+
+    // 2. Server Proxy Fallback (/api/gemini/generate)
     try {
       const res = await fetch('/api/gemini/generate', {
         method: 'POST',
@@ -224,9 +259,9 @@ export async function callGeminiWithRotation(
         return { text: candidateText, usedKeyName: keyInfo.name };
       }
 
-      const errText = await res.text();
+      const errText = await res.text().catch(() => '');
       const isQuota = res.status === 429 || errText.includes('RESOURCE_EXHAUSTED') || errText.includes('quota');
-      const isInvalid = res.status === 400 && (errText.includes('API_KEY_INVALID') || errText.includes('key not valid') || errText.includes('PROXY_GENERATION_DISABLED'));
+      const isInvalid = res.status === 400 && (errText.includes('API_KEY_INVALID') || errText.includes('key not valid'));
 
       if (isQuota) {
         keyInfo.status = 'quota_exceeded';
@@ -234,49 +269,15 @@ export async function callGeminiWithRotation(
       } else if (isInvalid && !isAqKey) {
         keyInfo.status = 'invalid';
         keyInfo.lastError = 'Invalid Key';
-      } else {
+      } else if (res.status !== 404) {
         keyInfo.lastError = `HTTP ${res.status}: ${errText.substring(0, 100)}`;
       }
     } catch (netErr: any) {
-      console.warn(`Server proxy call failed for ${keyInfo.name}, attempting direct fallback:`, netErr);
-      keyInfo.lastError = netErr.message || 'Server Proxy Unreachable';
-    }
-
-    // 2. Direct Google Gemini API Fallback (handles Vercel static deployment or CORS proxy issues)
-    if (!isAqKey && keyInfo.key && keyInfo.key.startsWith('AIzaSy')) {
-      try {
-        const directData = await fetchDirectGoogleGeminiApi(
-          keyInfo.key,
-          model,
-          prompt,
-          parts,
-          systemInstruction
-        );
-
-        if (directData.text) {
-          keyInfo.callCount = (keyInfo.callCount || 0) + 1;
-          keyInfo.status = 'active';
-          keyInfo.lastUsed = new Date().toLocaleTimeString();
-          keyInfo.lastError = undefined;
-          saveGeminiKeys(keys);
-
-          return { text: directData.text, usedKeyName: `${keyInfo.name} (Direct API)` };
-        }
-      } catch (directErr: any) {
-        console.warn(`Direct Google API call failed for ${keyInfo.name}:`, directErr);
-        const errMsg = directErr.message || '';
-        if (errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED')) {
-          keyInfo.status = 'quota_exceeded';
-          keyInfo.lastError = '429 Quota Exceeded';
-        } else if (errMsg.includes('API_KEY_INVALID') || errMsg.includes('key not valid')) {
-          keyInfo.status = 'invalid';
-          keyInfo.lastError = 'Invalid Key';
-        }
-      }
+      console.warn(`Server proxy call failed for ${keyInfo.name}:`, netErr);
     }
 
     saveGeminiKeys(keys);
-    lastError = keyInfo.lastError || 'API error';
+    lastError = keyInfo.lastError || 'Gemini API Error';
   }
 
   throw new Error(`All Gemini API keys in the pool were attempted and failed. Last error: ${lastError}. Please check keys or wait for quota reset.`);

@@ -29,47 +29,47 @@ export async function transcribeVideoWithAssemblyAi(
   onProgress('🎙️ [AssemblyAI Whisper] - ဗီဒီယိုမှ အသံလှိုင်းကို 16kHz Speech Format ဖြင့် ထုတ်ယူနေပါသည်...');
   const { base64Wav } = await extractAudioFromVideo(videoSource, 600); // up to 10 mins
 
-  // 2. Upload audio to AssemblyAI (server proxy first, then direct browser fetch)
+  // 2. Upload audio to AssemblyAI (Direct browser fetch first for static deployments like Vercel)
   onProgress('☁️ [AssemblyAI Whisper] - အသံဖိုင်ကို AssemblyAI Cloud သို့ လုံခြုံစွာ ပေးပို့နေပါသည်...');
   let uploadUrl = '';
 
   try {
-    const uploadRes = await fetch('/api/assemblyai/upload', {
+    const binaryData = Uint8Array.from(atob(base64Wav), (c) => c.charCodeAt(0));
+    const directUploadRes = await fetch('https://api.assemblyai.com/v2/upload', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        apiKey: cleanKey,
-        base64Audio: base64Wav,
-      }),
+      headers: {
+        Authorization: cleanKey,
+        'Content-Type': 'application/octet-stream',
+      },
+      body: binaryData,
     });
 
-    if (uploadRes.ok) {
-      const uploadData = await uploadRes.json();
-      uploadUrl = uploadData.upload_url || '';
+    if (directUploadRes.ok) {
+      const directUploadData = await directUploadRes.json();
+      uploadUrl = directUploadData.upload_url || '';
     }
-  } catch (serverUploadErr) {
-    console.warn('Server AssemblyAI upload notice:', serverUploadErr);
+  } catch (directUploadErr) {
+    console.warn('Direct AssemblyAI upload notice:', directUploadErr);
   }
 
-  // Direct upload fallback
+  // Server proxy upload fallback
   if (!uploadUrl) {
     try {
-      const binaryData = Uint8Array.from(atob(base64Wav), (c) => c.charCodeAt(0));
-      const directUploadRes = await fetch('https://api.assemblyai.com/v2/upload', {
+      const uploadRes = await fetch('/api/assemblyai/upload', {
         method: 'POST',
-        headers: {
-          Authorization: cleanKey,
-          'Content-Type': 'application/octet-stream',
-        },
-        body: binaryData,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apiKey: cleanKey,
+          base64Audio: base64Wav,
+        }),
       });
 
-      if (directUploadRes.ok) {
-        const directUploadData = await directUploadRes.json();
-        uploadUrl = directUploadData.upload_url || '';
+      if (uploadRes.ok) {
+        const uploadData = await uploadRes.json();
+        uploadUrl = uploadData.upload_url || '';
       }
-    } catch (directUploadErr) {
-      console.warn('Direct AssemblyAI upload notice:', directUploadErr);
+    } catch (serverUploadErr) {
+      console.warn('Server AssemblyAI upload notice:', serverUploadErr);
     }
   }
 
@@ -82,52 +82,52 @@ export async function transcribeVideoWithAssemblyAi(
   let transcriptId = '';
 
   try {
-    const transcriptRes = await fetch('/api/assemblyai/proxy', {
+    const directTranscribRes = await fetch('https://api.assemblyai.com/v2/transcript', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        Authorization: cleanKey,
+        'Content-Type': 'application/json',
+      },
       body: JSON.stringify({
-        apiKey: cleanKey,
-        endpoint: 'transcript',
-        method: 'POST',
-        body: {
-          audio_url: uploadUrl,
-          punctuate: true,
-          format_text: true,
-          speech_models: ['universal-3-5-pro', 'universal-2'],
-        },
+        audio_url: uploadUrl,
+        punctuate: true,
+        format_text: true,
       }),
     });
 
-    if (transcriptRes.ok) {
-      const transcriptData = await transcriptRes.json();
-      transcriptId = transcriptData.id || '';
+    if (directTranscribRes.ok) {
+      const directTranscribData = await directTranscribRes.json();
+      transcriptId = directTranscribData.id || '';
     }
-  } catch (serverTranscribErr) {
-    console.warn('Server AssemblyAI proxy transcript notice:', serverTranscribErr);
+  } catch (directTranscribErr) {
+    console.warn('Direct AssemblyAI transcript notice:', directTranscribErr);
   }
 
-  // Direct transcript request fallback
+  // Server proxy transcript fallback
   if (!transcriptId) {
     try {
-      const directTranscribRes = await fetch('https://api.assemblyai.com/v2/transcript', {
+      const transcriptRes = await fetch('/api/assemblyai/proxy', {
         method: 'POST',
-        headers: {
-          Authorization: cleanKey,
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          audio_url: uploadUrl,
-          punctuate: true,
-          format_text: true,
+          apiKey: cleanKey,
+          endpoint: 'transcript',
+          method: 'POST',
+          body: {
+            audio_url: uploadUrl,
+            punctuate: true,
+            format_text: true,
+            speech_models: ['universal-3-5-pro', 'universal-2'],
+          },
         }),
       });
 
-      if (directTranscribRes.ok) {
-        const directTranscribData = await directTranscribRes.json();
-        transcriptId = directTranscribData.id || '';
+      if (transcriptRes.ok) {
+        const transcriptData = await transcriptRes.json();
+        transcriptId = transcriptData.id || '';
       }
-    } catch (directTranscribErr) {
-      console.warn('Direct AssemblyAI transcript notice:', directTranscribErr);
+    } catch (serverTranscribErr) {
+      console.warn('Server AssemblyAI proxy transcript notice:', serverTranscribErr);
     }
   }
 
