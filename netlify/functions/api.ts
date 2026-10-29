@@ -92,27 +92,22 @@ function analyzeGeminiError(error: any) {
 }
 
 function createGeminiClient(keyToUse: string) {
-  const isBearerToken = keyToUse.toLowerCase().startsWith('aq') || keyToUse.startsWith('ya29');
   const headers: Record<string, string> = {
     'User-Agent': 'aistudio-build',
+    'Authorization': `Bearer ${keyToUse}`,
+    'x-goog-api-key': keyToUse,
   };
-  if (isBearerToken) {
-    headers['Authorization'] = `Bearer ${keyToUse}`;
-  } else {
-    headers['x-goog-api-key'] = keyToUse;
-  }
 
-  return new GoogleGenAI(
-    isBearerToken
-      ? { apiKey: '', httpOptions: { headers } }
-      : { apiKey: keyToUse, httpOptions: { headers } }
-  );
+  return new GoogleGenAI({
+    apiKey: keyToUse,
+    httpOptions: { headers },
+  });
 }
 
 // Multi-route support for Netlify functions routing (/api/gemini/generate, /gemini/generate, /generate)
 app.post(['/api/gemini/generate', '/gemini/generate', '/generate'], async (req, res) => {
   try {
-    const { apiKey, model = 'gemini-2.5-flash', prompt, contents, parts, systemInstruction } = req.body;
+    const { apiKey, model = 'gemini-2.0-flash', prompt, contents, parts, systemInstruction } = req.body;
     const rawKey = apiKey || process.env.GEMINI_API_KEY;
 
     if (!rawKey) {
@@ -131,7 +126,7 @@ app.post(['/api/gemini/generate', '/gemini/generate', '/generate'], async (req, 
     const ai = createGeminiClient(keyToUse);
 
     const contentsPayload = contents || (parts ? { parts } : prompt);
-    const candidateModels = [model || 'gemini-2.5-flash', 'gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-2.5-flash-lite'];
+    const candidateModels = [model || 'gemini-2.0-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'];
 
     let lastError: any = null;
     for (const m of candidateModels) {

@@ -102,117 +102,34 @@ export async function fetchDirectGoogleGeminiApi(
     throw new Error('API Key မမှန်ကန်ပါ သို့မဟုတ် မရှိပါ။');
   }
 
-  const modelToUse = model || 'gemini-2.5-flash';
+  const modelToUse = model || 'gemini-2.0-flash';
   const contentsPayload = parts && parts.length > 0 ? parts : [{ text: prompt }];
 
-  // 1. Try server-side proxy endpoint (/api/gemini/generate) first to prevent browser CORS and PROXY_GENERATION_DISABLED errors
-  try {
-    const serverRes = await fetch('/api/gemini/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        apiKey: cleanKey,
-        model: modelToUse,
-        prompt,
-        parts: contentsPayload,
-        systemInstruction,
-      }),
-    });
+  const serverRes = await fetch('/api/gemini/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      apiKey: cleanKey,
+      model: modelToUse,
+      prompt,
+      parts: contentsPayload,
+      systemInstruction,
+    }),
+  });
 
-    if (serverRes.ok) {
-      const data = await serverRes.json();
-      if (data && data.text) {
-        return { text: data.text };
-      }
-    } else {
-      const errJson = await serverRes.json().catch(() => ({}));
-      if (errJson.error && (errJson.error.includes('429') || errJson.error.includes('INVALID'))) {
-        throw new Error(errJson.error);
-      }
-    }
-  } catch (serverProxyErr: any) {
-    if (serverProxyErr?.message && (serverProxyErr.message.includes('429') || serverProxyErr.message.includes('INVALID'))) {
-      throw serverProxyErr;
-    }
-    console.warn('Server-side Gemini proxy fallback notice:', serverProxyErr);
+  const data = await serverRes.json().catch(() => ({}));
+
+  if (serverRes.ok && data && data.text) {
+    return { text: data.text };
   }
 
-  // 2. Fallback to direct client fetch if server proxy is unavailable
-  // Model fallback candidates if primary model is 404 or unsupported
-  const candidateModels = Array.from(
-    new Set([modelToUse, 'gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-2.5-flash-lite'])
-  ).filter(Boolean);
-
-  const bodyPayload: any = {
-    contents: [{ parts: contentsPayload }],
-  };
-
-  if (systemInstruction) {
-    bodyPayload.systemInstruction = {
-      parts: [{ text: systemInstruction }],
-    };
+  const status = serverRes.status;
+  const details = data.errorDetails;
+  let errMsg = data.error || `Gemini API Error (HTTP ${status})`;
+  if (details) {
+    errMsg = `[${details.status}] ${details.quotaType}: ${details.detailedDescription} (${details.message})`;
   }
-
-  const isOAuthToken = cleanKey.toLowerCase().startsWith('aq') || cleanKey.startsWith('ya29');
-  let lastError = '';
-
-  for (const mToUse of candidateModels) {
-    const authStrategies = isOAuthToken
-      ? [
-          { useBearer: true, useQueryKey: false },
-          { useBearer: false, useQueryKey: true },
-        ]
-      : [
-          { useBearer: false, useQueryKey: true },
-          { useBearer: true, useQueryKey: false },
-        ];
-
-    for (const strat of authStrategies) {
-      try {
-        let url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(mToUse)}:generateContent`;
-        const headers: Record<string, string> = {
-          'Content-Type': 'application/json',
-        };
-
-        if (strat.useBearer) {
-          headers['Authorization'] = `Bearer ${cleanKey}`;
-        }
-        if (strat.useQueryKey) {
-          headers['x-goog-api-key'] = cleanKey;
-          url += `?key=${encodeURIComponent(cleanKey)}`;
-        }
-
-        const res = await fetch(url, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(bodyPayload),
-        });
-
-        if (!res.ok) {
-          const errText = await res.text().catch(() => '');
-          lastError = `Google Direct API (${mToUse}) HTTP ${res.status}: ${errText.substring(0, 150)}`;
-          if (res.status === 404 || errText.includes('not found') || errText.includes('no longer available')) {
-            break;
-          }
-          continue;
-        }
-
-        const data = await res.json();
-        const candidateText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        if (!candidateText) {
-          throw new Error('Google Direct API returned empty response.');
-        }
-        return { text: candidateText };
-      } catch (err: any) {
-        lastError = err.message || 'Google Direct API Request Failed';
-        if (err.message && (err.message.includes('429') || err.message.includes('INVALID'))) {
-          throw err;
-        }
-      }
-    }
-  }
-
-  throw new Error(lastError || 'All Gemini API endpoints and key authentication methods failed.');
+  throw new Error(errMsg);
 }
 
 export async function callGeminiWithRotation(
@@ -462,7 +379,7 @@ export async function generateTimestampedTranscript(
   videoFile?: File | null,
   videoUrl?: string | null,
   onProgress?: (msg: string) => void,
-  model = 'gemini-3.8-flash'
+  model = 'gemini-2.0-flash'
 ): Promise<TranscriptSegment[]> {
   const allSegments: TranscriptSegment[] = [];
   const isDubbingMode = aiMode === 'Dubbing';

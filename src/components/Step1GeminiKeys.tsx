@@ -148,7 +148,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             apiKey: k.key,
-            model: 'gemini-2.5-flash',
+            model: 'gemini-2.0-flash',
           }),
         });
 

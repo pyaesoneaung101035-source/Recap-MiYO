@@ -150,7 +150,7 @@ Example JSON format:
   const res = await callGeminiWithRotation(
     prompt,
     systemInstruction,
-    'gemini-3.8-flash'
+    'gemini-2.0-flash'
   );
   rawRes = res.text;
   usedKeyName = res.usedKeyName;
