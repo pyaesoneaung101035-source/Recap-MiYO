@@ -86,6 +86,24 @@ function analyzeGeminiError(error: any) {
   };
 }
 
+function createGeminiClient(keyToUse: string) {
+  const isBearerToken = keyToUse.toLowerCase().startsWith('aq') || keyToUse.startsWith('ya29');
+  const headers: Record<string, string> = {
+    'User-Agent': 'aistudio-build',
+  };
+  if (isBearerToken) {
+    headers['Authorization'] = `Bearer ${keyToUse}`;
+  } else {
+    headers['x-goog-api-key'] = keyToUse;
+  }
+
+  return new GoogleGenAI(
+    isBearerToken
+      ? { apiKey: '', httpOptions: { headers } }
+      : { apiKey: keyToUse, httpOptions: { headers } }
+  );
+}
+
 async function startServer() {
   const app = express();
   const PORT = process.env.PORT || 3000;
@@ -124,19 +142,7 @@ async function startServer() {
         });
       }
 
-      const headers: Record<string, string> = {
-        'User-Agent': 'aistudio-build',
-      };
-      if (keyToUse.toLowerCase().startsWith('aq') || keyToUse.startsWith('ya29')) {
-        headers['Authorization'] = `Bearer ${keyToUse}`;
-      } else {
-        headers['x-goog-api-key'] = keyToUse;
-      }
-
-      const ai = new GoogleGenAI({
-        apiKey: keyToUse,
-        httpOptions: { headers },
-      });
+      const ai = createGeminiClient(keyToUse);
 
       const contentsPayload = contents || (parts ? { parts } : prompt);
       const candidateModels = [model || 'gemini-2.5-flash', 'gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-2.5-flash-lite'];
@@ -205,17 +211,7 @@ async function startServer() {
       }
 
       const keyToUse = cleanAsciiHeader(rawKey);
-      const headers: Record<string, string> = {
-        'User-Agent': 'aistudio-build',
-      };
-      if (keyToUse.toLowerCase().startsWith('aq') || keyToUse.startsWith('ya29')) {
-        headers['Authorization'] = `Bearer ${keyToUse}`;
-      }
-
-      const ai = new GoogleGenAI({
-        apiKey: keyToUse,
-        httpOptions: { headers },
-      });
+      const ai = createGeminiClient(keyToUse);
 
       const response = await ai.models.generateContent({
         model: model || 'gemini-2.5-flash',
