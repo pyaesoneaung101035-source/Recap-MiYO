@@ -76,13 +76,6 @@ async function startServer() {
 
       let keyToUse = cleanAsciiHeader(rawKey);
 
-      // Support AQ API keys gracefully by linking to server engine
-      if (keyToUse.startsWith('AQ') || keyToUse.startsWith('aq')) {
-        if (process.env.GEMINI_API_KEY) {
-          keyToUse = cleanAsciiHeader(process.env.GEMINI_API_KEY);
-        }
-      }
-
       if (!isValidAsciiApiKey(keyToUse)) {
         return res.status(400).json({
           error: 'Gemini API Key မမှန်ကန်ပါ (မြန်မာစာလုံးများ မပါဝင်ရပါ)။ Google AI Studio မှ API Key (AIzaSy...) သို့မဟုတ် AQ Key အစစ်ကို ထည့်ပေးပါ။',
