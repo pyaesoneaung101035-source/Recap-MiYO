@@ -277,7 +277,8 @@ function getAudioContext(): AudioContext {
 }
 
 /**
- * Direct browser call to Google Gemini TTS REST API (gemini-3.8-flash-tts / gemini-3.8-flash-lite-tts).
+ * Direct browser call to Google Gemini TTS REST API.
+ * Uses gemini-3.1-flash-tts-preview, gemini-3.8-flash-tts, and gemini-3.8-flash-lite-tts.
  * Works on Netlify, GitHub Pages, Mobile, and Static SPA deployments without requiring an Express server.
  */
 export async function fetchDirectGeminiTtsRest(
@@ -286,7 +287,7 @@ export async function fetchDirectGeminiTtsRest(
   apiKey?: string
 ): Promise<ArrayBuffer> {
   const profile = VOICE_PROFILES[voice] || VOICE_PROFILES.Thiha;
-  const geminiVoice = profile.geminiVoice || 'Puck';
+  const rawGeminiVoice = profile.geminiVoice || 'Puck';
 
   const keys = loadGeminiKeys();
   const cleanUserKey = apiKey ? apiKey.trim().replace(/[^\x21-\x7E]/g, '') : undefined;
@@ -300,54 +301,75 @@ export async function fetchDirectGeminiTtsRest(
     throw new Error('Gemini API Key မရှိသေးပါ။ ကျေးဇူးပြု၍ API Settings တွင် Google Gemini API Key ထည့်သွင်းပေးပါ။');
   }
 
-  const candidateModels = ['gemini-3.8-flash-tts', 'gemini-3.8-flash-lite-tts'];
+  const candidateModels = [
+    'gemini-3.1-flash-tts-preview',
+    'gemini-3.8-flash-tts',
+    'gemini-3.8-flash-lite-tts',
+  ];
+
+  // Primary voice and fallback voice if model doesn't support specific voice name
+  const fallbackVoice = profile.gender === 'female' ? 'Kore' : 'Charon';
+  const voiceCandidates = [rawGeminiVoice, fallbackVoice, 'Puck'].filter(
+    (v, i, arr) => arr.indexOf(v) === i
+  );
+
   let lastErrMessage = '';
 
   for (const keyToUse of candidateKeys) {
     for (const model of candidateModels) {
-      try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(keyToUse)}`;
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-goog-api-key': keyToUse,
-          },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text }] }],
-            generationConfig: {
-              responseModalities: ['AUDIO'],
-              speechConfig: {
-                voiceConfig: {
-                  prebuiltVoiceConfig: {
-                    voiceName: geminiVoice,
+      for (const voiceToTry of voiceCandidates) {
+        try {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(keyToUse)}`;
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-goog-api-key': keyToUse,
+            },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text }] }],
+              generationConfig: {
+                responseModalities: ['AUDIO'],
+                speechConfig: {
+                  voiceConfig: {
+                    prebuiltVoiceConfig: {
+                      voiceName: voiceToTry,
+                    },
                   },
                 },
               },
-            },
-          }),
-        });
+            }),
+          });
 
-        if (res.ok) {
-          const data = await res.json().catch(() => ({}));
-          const inlineData = data.candidates?.[0]?.content?.parts?.[0]?.inlineData;
-          if (inlineData && inlineData.data) {
-            const base64Str = inlineData.data;
-            const binaryStr = atob(base64Str);
-            const bytes = new Uint8Array(binaryStr.length);
-            for (let i = 0; i < binaryStr.length; i++) {
-              bytes[i] = binaryStr.charCodeAt(i);
+          if (res.ok) {
+            const data = await res.json().catch(() => ({}));
+            const inlineData = data.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+            if (inlineData && inlineData.data) {
+              const base64Str = inlineData.data;
+              const binaryStr = atob(base64Str);
+              const bytes = new Uint8Array(binaryStr.length);
+              for (let i = 0; i < binaryStr.length; i++) {
+                bytes[i] = binaryStr.charCodeAt(i);
+              }
+              if (bytes.buffer && bytes.buffer.byteLength > 100) {
+                return bytes.buffer;
+              }
             }
-            if (bytes.buffer && bytes.buffer.byteLength > 100) {
-              return bytes.buffer;
+          } else {
+            const errData = await res.json().catch(() => ({}));
+            lastErrMessage = errData.error?.message || `HTTP ${res.status}`;
+            // If voice name error (400), continue to try fallbackVoice on same model
+            if (res.status === 400 && lastErrMessage.includes('speaker voice')) {
+              continue;
+            }
+            // If quota error (429), break voice loop to try next model/key
+            if (res.status === 429 || lastErrMessage.includes('quota') || lastErrMessage.includes('RESOURCE_EXHAUSTED')) {
+              break;
             }
           }
-        } else {
-          const errData = await res.json().catch(() => ({}));
-          lastErrMessage = errData.error?.message || `HTTP ${res.status}`;
+        } catch (netErr: any) {
+          lastErrMessage = netErr?.message || 'Network error';
         }
-      } catch (netErr: any) {
-        lastErrMessage = netErr?.message || 'Network error';
       }
     }
   }
