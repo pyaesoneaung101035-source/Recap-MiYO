@@ -112,14 +112,14 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
     setPlayingAudioId(null);
   };
 
-  const playVoiceClip = (clipId: string, url: string, targetSpeed?: number) => {
+  const playVoiceClip = (clipId: string, url: string, targetSpeed?: number, preAudio?: HTMLAudioElement) => {
     if (playingAudioId === clipId) {
       stopAudio();
       return;
     }
 
     stopAudio();
-    const audio = new Audio();
+    const audio = preAudio || new Audio();
     audio.src = url;
     const speedToUse = targetSpeed || project.voicePlaybackRate || 1.0;
     try {
@@ -154,6 +154,11 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
 
   const handleTestVoice = async (vKey: VoiceOption) => {
     if (testingVoice) return;
+
+    // Pre-unlock audio synchronously during user click handler
+    const preAudio = new Audio();
+    preAudio.play().catch(() => {});
+
     setTestingVoice(vKey);
     const profile = VOICE_PROFILES[vKey];
     const cacheKey = `${vKey}_${voiceStyle}`;
@@ -171,7 +176,7 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
       });
 
       setTestAudioUrls((prev) => ({ ...prev, [cacheKey]: result.audioUrl }));
-      playVoiceClip(`test_${cacheKey}`, result.audioUrl, activeSpeed);
+      playVoiceClip(`test_${cacheKey}`, result.audioUrl, activeSpeed, preAudio);
       setStatusText(null);
     } catch (err: any) {
       console.error('Test voice failed:', err);
@@ -184,6 +189,11 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
 
   const handleTestHfSpeaker = async (speakerId: string) => {
     if (testingVoice) return;
+
+    // Pre-unlock audio synchronously during user click handler
+    const preAudio = new Audio();
+    preAudio.play().catch(() => {});
+
     setTestingVoice(speakerId);
     const speakerInfo = HF_MULTI_SPEAKERS.find((s) => s.id === speakerId) || HF_MULTI_SPEAKERS[0];
     setStatusText(`[Hugging Face] ${speakerInfo.name} preview testing...`);
@@ -200,7 +210,7 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
       });
 
       setTestAudioUrls((prev) => ({ ...prev, [speakerId]: result.audioUrl }));
-      playVoiceClip(`test_${speakerId}`, result.audioUrl, activeSpeed);
+      playVoiceClip(`test_${speakerId}`, result.audioUrl, activeSpeed, preAudio);
       setStatusText(null);
     } catch (err: any) {
       console.error('Test HF speaker failed:', err);
@@ -1126,7 +1136,16 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-2.5">
+                        <div className="flex items-center gap-2 flex-wrap justify-end">
+                          {testAudioUrls[cacheKey] && (
+                            <audio
+                              src={testAudioUrls[cacheKey]}
+                              controls
+                              className="h-7 w-32 rounded-lg opacity-80 hover:opacity-100"
+                              onClick={(e) => e.stopPropagation()}
+                            />
+                          )}
+
                           {/* Test Voice Button */}
                           <button
                             type="button"
@@ -1358,7 +1377,16 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-2.5">
+                        <div className="flex items-center gap-2 flex-wrap justify-end">
+                          {testAudioUrls[sp.id] && (
+                            <audio
+                              src={testAudioUrls[sp.id]}
+                              controls
+                              className="h-7 w-32 rounded-lg opacity-80 hover:opacity-100"
+                              onClick={(e) => e.stopPropagation()}
+                            />
+                          )}
+
                           {/* Test Voice Button */}
                           <button
                             type="button"
