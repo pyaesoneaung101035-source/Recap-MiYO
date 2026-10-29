@@ -6,6 +6,7 @@
 
 import { VoiceOption } from '../types';
 import { loadGeminiKeys, saveGeminiKeys } from './geminiPool';
+import { generateOfflineWebAudioSpeech } from './webAudioTts';
 
 export type VoiceStyle = 'conversational' | 'recap' | 'broadcast' | 'energetic' | 'soothing' | 'affectionate';
 
@@ -527,9 +528,17 @@ export async function synthesizeMyanmarVoice(
   }
 
   if (!arrayBuffer || arrayBuffer.byteLength < 50) {
-    throw new Error(
-      `အသံထုတ်လုပ်၍ မရသေးပါ။ ကျေးဇူးပြု၍ API Settings တွင် Gemini API Key ရှိမရှိ စစ်ဆေးပေးပါ (${lastErrorMsg || 'Unknown Error'})`
-    );
+    try {
+      if (options.onStatusUpdate) {
+        options.onStatusUpdate(`⚡ Studio Offline Voice Engine (${profile.name}) ဖြင့် အသံထုတ်လုပ်ပေးနေပါသည်...`);
+      }
+      arrayBuffer = await generateOfflineWebAudioSpeech(text, options.voice, options.speed);
+      isRealityGemini = false;
+    } catch (offlineErr: any) {
+      throw new Error(
+        `အသံထုတ်လုပ်၍ မရသေးပါ။ ကျေးဇူးပြု၍ API Settings တွင် Gemini API Key ရှိမရှိ စစ်ဆေးပေးပါ (${lastErrorMsg || offlineErr?.message || 'Unknown Error'})`
+      );
+    }
   }
 
   let audioUrl = '';
