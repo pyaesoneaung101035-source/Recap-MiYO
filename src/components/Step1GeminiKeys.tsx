@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { KeyRound, Check, RefreshCw, Smartphone, ShieldCheck, Sparkles, AlertCircle, ArrowRight, Zap, Radio, Loader2, ExternalLink } from 'lucide-react';
 import { GeminiKeyInfo, AiMode } from '../types';
-import { parseKeysFromInput, resetKeyStatuses, saveGeminiKeys } from '../utils/geminiPool';
+import { parseKeysFromInput, resetKeyStatuses, saveGeminiKeys, fetchDirectGoogleGeminiApi } from '../utils/geminiPool';
 import { loadApiKeys, saveApiKeys, verifyAssemblyAiKey, verifyHuggingFaceKey, isAsciiOnly, sanitizeApiKey } from '../utils/apiKeys';
 
 interface Step1GeminiKeysProps {
@@ -151,26 +151,39 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
         if (k.key.startsWith('AQ') || k.key.startsWith('aq')) {
           isValidKey = true;
         } else {
+          // Attempt 1: Server Proxy
           const proxyRes = await fetch('/api/gemini/generate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               apiKey: k.key,
               prompt: 'Ping',
-              model: 'gemini-2.5-flash',
+              model: 'gemini-3.5-flash-lite',
             }),
-          });
+          }).catch(() => null);
 
-          if (proxyRes.ok) {
+          if (proxyRes && proxyRes.ok) {
             isValidKey = true;
           } else {
-            const text = await proxyRes.text();
-            if (proxyRes.status === 429 || text.includes('RESOURCE_EXHAUSTED') || text.includes('quota')) {
-              keyErrMessage = '429 Quota Exceeded';
-            } else if (text.includes('API_KEY_INVALID') || text.includes('key not valid')) {
-              keyErrMessage = 'Invalid Key';
-            } else {
-              keyErrMessage = 'Server error';
+            // Attempt 2: Direct Google API
+            try {
+              const directRes = await fetchDirectGoogleGeminiApi(
+                k.key,
+                'gemini-3.5-flash-lite',
+                'Ping'
+              );
+              if (directRes.text) {
+                isValidKey = true;
+              }
+            } catch (directErr: any) {
+              const errMsg = directErr?.message || '';
+              if (errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED')) {
+                keyErrMessage = '429 Quota Exceeded';
+              } else if (errMsg.includes('API_KEY_INVALID') || errMsg.includes('key not valid')) {
+                keyErrMessage = 'Invalid Key';
+              } else {
+                keyErrMessage = errMsg;
+              }
             }
           }
         }
@@ -178,7 +191,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
         keyErrMessage = proxyErr.message || 'Connection error';
       }
 
-      // Format check fallback: Standard Google API key starts with AIzaSy or AQ key
+      // Resilient Format Validation: Standard Google API key starting with AIzaSy or AQ key
       if (!isValidKey && (k.key.startsWith('AIzaSy') || k.key.startsWith('AQ') || k.key.startsWith('aq')) && k.key.length >= 15 && !keyErrMessage.includes('Invalid Key')) {
         isValidKey = true;
       }
