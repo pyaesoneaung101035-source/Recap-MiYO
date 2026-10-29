@@ -277,6 +277,85 @@ function getAudioContext(): AudioContext {
 }
 
 /**
+ * Direct browser call to Google Gemini TTS REST API (gemini-3.8-flash-tts / gemini-3.8-flash-lite-tts).
+ * Works on Netlify, GitHub Pages, Mobile, and Static SPA deployments without requiring an Express server.
+ */
+export async function fetchDirectGeminiTtsRest(
+  text: string,
+  voice: VoiceOption,
+  apiKey?: string
+): Promise<ArrayBuffer> {
+  const profile = VOICE_PROFILES[voice] || VOICE_PROFILES.Thiha;
+  const geminiVoice = profile.geminiVoice || 'Puck';
+
+  const keys = loadGeminiKeys();
+  const cleanUserKey = apiKey ? apiKey.trim().replace(/[^\x21-\x7E]/g, '') : undefined;
+  const poolKeys = keys
+    .map((k) => (k && k.key ? k.key.trim().replace(/[^\x21-\x7E]/g, '') : ''))
+    .filter((k) => k.length >= 10);
+
+  const candidateKeys = [cleanUserKey, ...poolKeys].filter(Boolean) as string[];
+
+  if (candidateKeys.length === 0) {
+    throw new Error('Gemini API Key မရှိသေးပါ။ ကျေးဇူးပြု၍ API Settings တွင် Google Gemini API Key ထည့်သွင်းပေးပါ။');
+  }
+
+  const candidateModels = ['gemini-3.8-flash-tts', 'gemini-3.8-flash-lite-tts'];
+  let lastErrMessage = '';
+
+  for (const keyToUse of candidateKeys) {
+    for (const model of candidateModels) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(keyToUse)}`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': keyToUse,
+          },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text }] }],
+            generationConfig: {
+              responseModalities: ['AUDIO'],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: {
+                    voiceName: geminiVoice,
+                  },
+                },
+              },
+            },
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json().catch(() => ({}));
+          const inlineData = data.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+          if (inlineData && inlineData.data) {
+            const base64Str = inlineData.data;
+            const binaryStr = atob(base64Str);
+            const bytes = new Uint8Array(binaryStr.length);
+            for (let i = 0; i < binaryStr.length; i++) {
+              bytes[i] = binaryStr.charCodeAt(i);
+            }
+            if (bytes.buffer && bytes.buffer.byteLength > 100) {
+              return bytes.buffer;
+            }
+          }
+        } else {
+          const errData = await res.json().catch(() => ({}));
+          lastErrMessage = errData.error?.message || `HTTP ${res.status}`;
+        }
+      } catch (netErr: any) {
+        lastErrMessage = netErr?.message || 'Network error';
+      }
+    }
+  }
+
+  throw new Error(`Gemini TTS Direct Call Error: ${lastErrMessage || 'Failed to generate audio'}`);
+}
+
+/**
  * Synthesize authentic Myanmar speech with multi-key rotation and automatic 429 quota handling.
  * Prioritizes Gemini Flagship Neural Voice Model for 100% lifelike human realism.
  */
@@ -291,8 +370,31 @@ export async function synthesizeMyanmarVoice(
   const profile = VOICE_PROFILES[options.voice] || VOICE_PROFILES.Thiha;
   const style = options.style || 'conversational';
 
-  // 1. PRIMARY: Gemini Neural Reality Voice (Studio Lifelike Human Speech)
-  if (!options.forceBackup) {
+  const isNetlifyOrStatic = typeof window !== 'undefined' && (
+    window.location.hostname.includes('netlify.app') ||
+    window.location.hostname.includes('github.io') ||
+    (!window.location.hostname.includes('localhost') && !window.location.hostname.includes('run.app') && !window.location.hostname.includes('127.0.0.1'))
+  );
+
+  // 1. PRIMARY: Direct Gemini REST TTS (if running on Netlify/static hosting)
+  if (isNetlifyOrStatic && !options.forceBackup) {
+    try {
+      if (options.onStatusUpdate) {
+        options.onStatusUpdate(`✨ Reality Human Voice (${profile.name} - ${profile.myanmarName}) ဖြင့် သဘာဝကျကျ အသံထုတ်လုပ်နေပါသည်...`);
+      }
+      const directBuf = await fetchDirectGeminiTtsRest(text, options.voice);
+      if (directBuf && directBuf.byteLength > 100) {
+        arrayBuffer = directBuf;
+        isRealityGemini = true;
+      }
+    } catch (directErr: any) {
+      console.warn('Direct Gemini TTS notice:', directErr);
+      lastErrorMsg = directErr.message || lastErrorMsg;
+    }
+  }
+
+  // 2. SECONDARY: Server Proxy endpoint (if running on full-stack server and direct wasn't attempted or failed)
+  if (!arrayBuffer && !options.forceBackup) {
     let keys = loadGeminiKeys();
     const activeKeys = keys.filter((k) => k.status === 'active');
     const availableKeys = activeKeys.length > 0 ? activeKeys : keys;
@@ -325,7 +427,8 @@ export async function synthesizeMyanmarVoice(
           }),
         });
 
-        if (res.ok) {
+        const contentType = res.headers.get('content-type') || '';
+        if (res.ok && !contentType.includes('text/html')) {
           const buf = await res.arrayBuffer();
           if (buf && buf.byteLength > 200) {
             arrayBuffer = buf;
@@ -340,33 +443,22 @@ export async function synthesizeMyanmarVoice(
             }
             break;
           }
+        } else {
+          if (contentType.includes('text/html')) {
+            break; // Skip server retries if Netlify returned HTML redirect
+          }
         }
 
         const errJson = await res.json().catch(() => ({}));
         const errText = errJson.error || `HTTP ${res.status}`;
         lastErrorMsg = errText;
-
-        const isQuota =
-          res.status === 429 ||
-          errJson.code === 'RESOURCE_EXHAUSTED' ||
-          errText.includes('429') ||
-          errText.includes('quota') ||
-          errText.includes('RESOURCE_EXHAUSTED');
-
-        if (isQuota && currentKey) {
-          currentKey.status = 'quota_exceeded';
-          currentKey.lastError = '429 Quota Exceeded (Cooling down)';
-          saveGeminiKeys(keys);
-          console.warn(`Key ${currentKey.name} hit 429 quota, rotating to next available key...`);
-        }
       } catch (err: any) {
         lastErrorMsg = err.message;
-        console.warn('Gemini TTS attempt error:', err);
       }
     }
 
-    // Also try server-side default key if user keys all failed or none provided
-    if (!arrayBuffer) {
+    // Also try server-side default key if user keys failed and not HTML redirect
+    if (!arrayBuffer && !isNetlifyOrStatic) {
       try {
         if (options.onStatusUpdate) {
           options.onStatusUpdate(`✨ Studio Reality Voice (${profile.name}) ဖြင့် အသံထုတ်လုပ်နေပါသည်...`);
@@ -382,15 +474,13 @@ export async function synthesizeMyanmarVoice(
           }),
         });
 
-        if (serverRes.ok) {
+        const contentType = serverRes.headers.get('content-type') || '';
+        if (serverRes.ok && !contentType.includes('text/html')) {
           const buf = await serverRes.arrayBuffer();
           if (buf && buf.byteLength > 200) {
             arrayBuffer = buf;
             isRealityGemini = true;
           }
-        } else {
-          const errJson = await serverRes.json().catch(() => ({}));
-          lastErrorMsg = errJson.error || `HTTP ${serverRes.status}`;
         }
       } catch (err: any) {
         lastErrorMsg = err.message;
@@ -398,42 +488,25 @@ export async function synthesizeMyanmarVoice(
     }
   }
 
-  // 2. SECONDARY / DIRECT 24kHz STUDIO NEURAL ENGINE:
+  // 3. TERTIARY DIRECT FALLBACK: If arrayBuffer is still empty, call Direct Gemini REST TTS
   if (!arrayBuffer) {
-    if (options.onStatusUpdate) {
-      options.onStatusUpdate(`✨ 24kHz Studio Neural Reality Voice (${profile.name} - ${profile.myanmarName}) ဖြင့် အသံထုတ်လုပ်နေပါသည်...`);
-    }
-
     try {
-      const freeRes = await fetch('/api/tts/free', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text,
-          voice: options.voice,
-          style,
-          speed: options.speed,
-        }),
-      });
-
-      if (freeRes.ok) {
-        const buf = await freeRes.arrayBuffer();
-        if (buf && buf.byteLength > 100) {
-          arrayBuffer = buf;
-          isRealityGemini = true;
-        }
-      } else {
-        const errJson = await freeRes.json().catch(() => ({}));
-        lastErrorMsg = errJson.error || `Free TTS HTTP ${freeRes.status}`;
+      if (options.onStatusUpdate) {
+        options.onStatusUpdate(`✨ Direct Gemini Studio TTS (${profile.name}) ဖြင့် အသံထုတ်လုပ်နေပါသည်...`);
       }
-    } catch (err: any) {
-      lastErrorMsg = err.message;
+      const directBuf = await fetchDirectGeminiTtsRest(text, options.voice);
+      if (directBuf && directBuf.byteLength > 100) {
+        arrayBuffer = directBuf;
+        isRealityGemini = true;
+      }
+    } catch (directErr: any) {
+      lastErrorMsg = directErr.message || lastErrorMsg;
     }
   }
 
   if (!arrayBuffer || arrayBuffer.byteLength < 50) {
     throw new Error(
-      `အသံထုတ်လုပ်၍ မရသေးပါ။ အင်တာနက် ချိတ်ဆက်မှု စစ်ဆေးပေးပါ (${lastErrorMsg || 'Unknown Error'})`
+      `အသံထုတ်လုပ်၍ မရသေးပါ။ ကျေးဇူးပြု၍ API Settings တွင် Gemini API Key ရှိမရှိ စစ်ဆေးပေးပါ (${lastErrorMsg || 'Unknown Error'})`
     );
   }
 

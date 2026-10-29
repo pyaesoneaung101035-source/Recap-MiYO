@@ -169,9 +169,6 @@ export async function synthesizeHuggingFaceVoice(
 ): Promise<{ audioUrl: string; duration: number }> {
   const apiKeys = loadApiKeys();
   const hfKey = apiKeys.huggingFaceKey;
-  if (!hfKey) {
-    throw new Error('Hugging Face API Key (Token) မရှိသေးပါ။ အဆင့် 1 တွင် Token ထည့်သွင်းပြီး Connect ပြုလုပ်ပေးပါ။');
-  }
 
   const cleanText = text.trim();
   if (!cleanText) {
@@ -186,63 +183,23 @@ export async function synthesizeHuggingFaceVoice(
     options.onStatusUpdate(`🤗 Hugging Face [${speakerInfo.name} (${speakerInfo.myanmarName})] ဖြင့် စကားပြောထုတ်လုပ်နေပါသည်...`);
   }
 
-  // 1. Attempt Server Proxy endpoint first
-  try {
-    const res = await fetch('/api/huggingface/tts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text: cleanText,
-        model: targetModel,
-        apiKey: hfKey,
-        speakerId,
-      }),
-    });
-
-    if (res.ok) {
-      const arrayBuffer = await res.arrayBuffer();
-      if (arrayBuffer && arrayBuffer.byteLength >= 50) {
-        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-        const ctx = new AudioContextClass();
-        let audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
-
-        try {
-          audioBuffer = await applyHfSpeakerProfile(audioBuffer, speakerInfo);
-        } catch (speakerAdaptErr) {
-          console.warn('Speaker profile notice:', speakerAdaptErr);
-        }
-
-        const wavBlob = audioBufferToWavBlob(audioBuffer);
-        return {
-          audioUrl: URL.createObjectURL(wavBlob),
-          duration: parseFloat(audioBuffer.duration.toFixed(2)),
-        };
-      }
-    }
-  } catch (serverErr) {
-    console.warn('Server proxy HF TTS notice:', serverErr);
-  }
-
-  // 2. Attempt direct / CORS proxy fetch to Hugging Face Inference API
-  const endpoints = [
-    `https://router.huggingface.co/hf-inference/models/${targetModel}`,
-    `https://api-inference.huggingface.co/models/${targetModel}`,
-    `https://corsproxy.io/?${encodeURIComponent(`https://router.huggingface.co/hf-inference/models/${targetModel}`)}`,
-  ];
-
-  for (const endpoint of endpoints) {
+  // 1. Attempt Server Proxy endpoint if key exists
+  if (hfKey) {
     try {
-      const hfRes = await fetch(endpoint, {
+      const res = await fetch('/api/huggingface/tts', {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${hfKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ inputs: cleanText }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: cleanText,
+          model: targetModel,
+          apiKey: hfKey,
+          speakerId,
+        }),
       });
 
-      if (hfRes.ok) {
-        const arrayBuffer = await hfRes.arrayBuffer();
+      const contentType = res.headers.get('content-type') || '';
+      if (res.ok && !contentType.includes('text/html')) {
+        const arrayBuffer = await res.arrayBuffer();
         if (arrayBuffer && arrayBuffer.byteLength >= 50) {
           const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
           const ctx = new AudioContextClass();
@@ -250,7 +207,9 @@ export async function synthesizeHuggingFaceVoice(
 
           try {
             audioBuffer = await applyHfSpeakerProfile(audioBuffer, speakerInfo);
-          } catch {}
+          } catch (speakerAdaptErr) {
+            console.warn('Speaker profile notice:', speakerAdaptErr);
+          }
 
           const wavBlob = audioBufferToWavBlob(audioBuffer);
           return {
@@ -259,8 +218,49 @@ export async function synthesizeHuggingFaceVoice(
           };
         }
       }
-    } catch (directErr) {
-      console.warn('Direct HF TTS notice:', directErr);
+    } catch (serverErr) {
+      console.warn('Server proxy HF TTS notice:', serverErr);
+    }
+
+    // 2. Attempt direct / CORS proxy fetch to Hugging Face Inference API
+    const endpoints = [
+      `https://router.huggingface.co/hf-inference/models/${targetModel}`,
+      `https://api-inference.huggingface.co/models/${targetModel}`,
+      `https://corsproxy.io/?${encodeURIComponent(`https://router.huggingface.co/hf-inference/models/${targetModel}`)}`,
+    ];
+
+    for (const endpoint of endpoints) {
+      try {
+        const hfRes = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${hfKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ inputs: cleanText }),
+        });
+
+        if (hfRes.ok) {
+          const arrayBuffer = await hfRes.arrayBuffer();
+          if (arrayBuffer && arrayBuffer.byteLength >= 50) {
+            const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+            const ctx = new AudioContextClass();
+            let audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
+
+            try {
+              audioBuffer = await applyHfSpeakerProfile(audioBuffer, speakerInfo);
+            } catch {}
+
+            const wavBlob = audioBufferToWavBlob(audioBuffer);
+            return {
+              audioUrl: URL.createObjectURL(wavBlob),
+              duration: parseFloat(audioBuffer.duration.toFixed(2)),
+            };
+          }
+        }
+      } catch (directErr) {
+        console.warn('Direct HF TTS notice:', directErr);
+      }
     }
   }
 
