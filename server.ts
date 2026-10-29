@@ -86,28 +86,57 @@ function analyzeGeminiError(error: any) {
   };
 }
 
-function createGeminiClient(keyToUse: string) {
-  const isOAuthToken = keyToUse.startsWith('AQ') || keyToUse.startsWith('aq') || keyToUse.startsWith('ya29') || keyToUse.startsWith('ya29.');
-  if (isOAuthToken) {
-    return new GoogleGenAI({
-      apiKey: '',
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-          'Authorization': `Bearer ${keyToUse}`,
-        },
-      },
-    });
-  } else {
-    return new GoogleGenAI({
-      apiKey: keyToUse,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        },
-      },
-    });
+async function callGeminiRest(keyToUse: string, model: string, contentsPayload: any, systemInstruction?: any) {
+  const isOAuth = keyToUse.startsWith('AQ') || keyToUse.startsWith('aq') || keyToUse.startsWith('ya29') || keyToUse.startsWith('ya29.');
+  
+  const url = isOAuth
+    ? `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`
+    : `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(keyToUse)}`;
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'User-Agent': 'aistudio-build',
+  };
+
+  if (isOAuth) {
+    headers['Authorization'] = `Bearer ${keyToUse}`;
   }
+
+  const body: any = {
+    contents: typeof contentsPayload === 'string' ? [{ parts: [{ text: contentsPayload }] }] : contentsPayload,
+  };
+
+  if (systemInstruction) {
+    if (typeof systemInstruction === 'string') {
+      body.systemInstruction = { parts: [{ text: systemInstruction }] };
+    } else {
+      body.systemInstruction = systemInstruction;
+    }
+  }
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  });
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    const errObj = data.error || data;
+    const err = new Error(errObj.message || `Gemini REST API error (HTTP ${res.status})`);
+    (err as any).status = res.status;
+    (err as any).details = errObj.details || errObj;
+    throw err;
+  }
+
+  const candidate = data.candidates?.[0];
+  const partText = candidate?.content?.parts?.[0]?.text;
+  if (partText !== undefined) {
+    return partText;
+  }
+
+  throw new Error('No text returned in Gemini REST response');
 }
 
 async function startServer() {
@@ -148,8 +177,6 @@ async function startServer() {
         });
       }
 
-      const ai = createGeminiClient(keyToUse);
-
       const contentsPayload = contents || (parts ? { parts } : prompt);
       const candidateModels = [model || 'gemini-2.0-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'];
 
@@ -158,14 +185,10 @@ async function startServer() {
         let retries = 0;
         while (retries < 2) {
           try {
-            const response = await ai.models.generateContent({
-              model: m,
-              contents: contentsPayload,
-              config: systemInstruction ? { systemInstruction } : undefined,
-            });
+            const textResult = await callGeminiRest(keyToUse, m, contentsPayload, systemInstruction);
 
-            if (response && response.text !== undefined) {
-              return res.json({ text: response.text });
+            if (textResult !== undefined) {
+              return res.json({ text: textResult });
             }
           } catch (modelErr: any) {
             lastError = modelErr;
@@ -217,14 +240,9 @@ async function startServer() {
       }
 
       const keyToUse = cleanAsciiHeader(rawKey);
-      const ai = createGeminiClient(keyToUse);
+      const textResult = await callGeminiRest(keyToUse, model || 'gemini-2.5-flash', 'Ping');
 
-      const response = await ai.models.generateContent({
-        model: model || 'gemini-2.5-flash',
-        contents: 'Ping',
-      });
-
-      if (response && response.text !== undefined) {
+      if (textResult !== undefined) {
         return res.json({ ok: true, message: 'Gemini API connection test successful.' });
       }
 
