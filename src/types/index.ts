@@ -100,7 +100,7 @@ export type AiMode =
   | 'Long to Short'
   | 'Original Recap'
   | 'Gemini TTS'
-  | 'Story plan/narrator'
+  | 'Dhamma AI'
   | 'Dhamma AI background';
 
 export interface BlurBox {

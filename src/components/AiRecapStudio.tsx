@@ -35,7 +35,7 @@ const AI_MODES: { id: AiMode; title: string; desc: string }[] = [
   { id: 'Long to Short', title: 'Long to Short', desc: '30-60s Viral Clips' },
   { id: 'Original Recap', title: 'Original Recap', desc: 'မူရင်း အသေးစိတ်' },
   { id: 'Gemini TTS', title: 'Gemini TTS', desc: 'အသံထွက်ဖတ်ရ လွယ်သောစာ' },
-  { id: 'Dhamma AI background', title: 'Dhamma AI', desc: 'ဓမ္မအငွေ့အသက်' },
+  { id: 'Dhamma AI', title: 'Dhamma AI', desc: 'ဓမ္မအငွေ့အသက်' },
 ];
 
 export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({

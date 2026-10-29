@@ -22,7 +22,7 @@ export const PasscodeLockModal: React.FC<PasscodeLockModalProps> = ({ onUnlock }
           sessionStorage.setItem('site_unlocked', 'true');
           onUnlock();
         } else {
-          setErrorMsg('PIN နံပါတ် မှားယွင်းနေပါသည်။ (762005 ဖြစ်ပါသည်)');
+          setErrorMsg('PIN နံပါတ် မှားယွင်းနေပါသည်။ ကျေးဇူးပြု၍ ပြန်လည်ကြိုးစားပါ။');
           setTimeout(() => {
             setEnteredPin('');
             setErrorMsg(null);

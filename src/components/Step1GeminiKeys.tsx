@@ -13,14 +13,13 @@ interface Step1GeminiKeysProps {
 }
 
 const AI_MODES: { id: AiMode; title: string; desc: string }[] = [
-  { id: 'Recap', title: 'Recap', desc: 'ဗီဒီယိုဇာတ်လမ်း အနှစ်ချုပ်နှင့် အဓိကအချက်များ' },
-  { id: 'Dubbing', title: 'Dubbing', desc: 'ဇာတ်ကောင်နှုတ်ခမ်းနှင့် အချိန်ကိုက် မြန်မာစကားပြော' },
-  { id: 'Subtitle', title: 'Subtitle', desc: 'တိကျသော Timestamp ပါဝင်သည့် မြန်မာစာတန်းထိုး' },
-  { id: 'Long to Short', title: 'Long to Short', desc: 'ဗီဒီယိုရှည်မှ Viral ဖြစ်စေမည့် 30-60s အပိုင်းတိုများ' },
-  { id: 'Original Recap', title: 'Original Recap', desc: 'မူရင်းအတိုင်း အခန်းဆက် အသေးစိတ် ရှင်းလင်းချက်' },
-  { id: 'Gemini TTS', title: 'Gemini TTS', desc: 'ဇာတ်ကြောင်းပြောရန် အသံထွက်ဖတ်ရ လွယ်ကူသောစာသား' },
-  { id: 'Story plan/narrator', title: 'Story plan/narrator', desc: 'ဇာတ်လမ်းဇာတ်ကွက် ဖန်တီးသူ စီစဉ်ချက်' },
-  { id: 'Dhamma AI background', title: 'Dhamma AI background', desc: 'အေးချမ်းကြည်လင်သော ဓမ္မအငွေ့အသက်နှင့် ဘဝသင်ခန်းစာ' },
+  { id: 'Recap', title: 'Recap', desc: 'ဇာတ်လမ်း အနှစ်ချုပ်' },
+  { id: 'Dubbing', title: 'Dubbing', desc: 'အချိန်ကိုက် မြန်မာစကားပြော' },
+  { id: 'Subtitle', title: 'Subtitle', desc: 'Timestamp ပါ စာတန်းထိုး' },
+  { id: 'Long to Short', title: 'Long to Short', desc: '30-60s Viral Clips' },
+  { id: 'Original Recap', title: 'Original Recap', desc: 'မူရင်း အသေးစိတ်' },
+  { id: 'Gemini TTS', title: 'Gemini TTS', desc: 'အသံထွက်ဖတ်ရ လွယ်သောစာ' },
+  { id: 'Dhamma AI', title: 'Dhamma AI', desc: 'ဓမ္မအငွေ့အသက်' },
 ];
 
 export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({

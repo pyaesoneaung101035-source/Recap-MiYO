@@ -222,6 +222,7 @@ export function buildSystemPromptForMode(mode: AiMode): string {
       return `You are a detailed movie/video explainer. Write a faithful, chronological Myanmar script describing the story, not just a list of actions. ${directInstruction}`;
     case 'Gemini TTS':
       return `You are a professional voiceover artist. Write a crisp, engaging Myanmar voiceover script ready for neural text-to-speech reading with natural rhythm. ${directInstruction}`;
+    case 'Dhamma AI':
     case 'Dhamma AI background':
       return `သင်သည် ဗုဒ္ဓဓမ္မအတွေးအမြင်နှင့် သတိပဋ္ဌာန်တရားတော်ကို အခြေခံသော တည်ငြိမ်အေးချမ်းသည့် တရားရှုထောင့်မှ ရှင်းလင်းဟောကြားသည့် ဓမ္မဆရာတစ်ဦးဖြစ်သည်။ ဗီဒီယိုပါ အကြောင်းအရာကို အေးချမ်းကြည်လင်သော မြန်မာစကားပြေဖြင့် ဘဝသင်ခန်းစာ၊ ကုသိုလ်စိတ်နှင့် စိတ်ငြိမ်းချမ်းမှု ရရှိစေမည့် ဓမ္မအနှစ်ချုပ် အဖြစ် ရေးသားပေးပါ။ ${directInstruction}`;
     default:
