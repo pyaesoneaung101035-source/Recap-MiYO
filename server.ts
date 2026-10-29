@@ -28,14 +28,18 @@ function cleanAsciiHeader(value: string): string {
 
 function formatNetworkError(error: any, serviceName: string): string {
   const msg = error?.message || '';
+  const status = error?.status || error?.statusCode;
+  if (status === 401 || status === 403 || msg.includes('API_KEY_INVALID') || msg.includes('key not valid') || msg.includes('403')) {
+    return `${serviceName} API Key မမှန်ကန်ပါ သို့မဟုတ် ခွင့်ပြုချက်မရှိပါ (401/403 Invalid API Key)။ Google AI Studio မှ API Key အမှန်ကို ထည့်သွင်းပါ။`;
+  }
+  if (status === 404 || msg.includes('404') || msg.includes('not found') || msg.includes('model not found')) {
+    return `${serviceName} Model ရှာမတွေ့ပါ သို့မဟုတ် မရှိတော့ပါ (404 Model Not Found)။`;
+  }
+  if (status === 429 || msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota')) {
+    return `${serviceName} API Key Quota ပြည့်သွားပါပြီ (429 Quota Exceeded)။ ခေတ္တစောင့်ပါ သို့မဟုတ် နောက် Key တစ်ခု ထည့်ပေးပါ။`;
+  }
   if (msg.includes('ByteString') || msg.includes('ERR_INVALID_CHAR')) {
-    return `${serviceName} API Key မမှန်ကန်ပါ (မြန်မာစာလုံးများ ပါဝင်နေပါသည်)။ ကျေးဇူးပြု၍ Dashboard မှ အင်္ဂလိပ် API Key အစစ်ကိုသာ ထည့်သွင်းပေးပါ။`;
-  }
-  if (msg.includes('API_KEY_INVALID') || msg.includes('key not valid')) {
-    return `${serviceName} API Key မမှန်ကန်ပါ (API_KEY_INVALID)။ Google AI Studio (https://aistudio.google.com/app/apikey) မှ 'AIzaSy...' ဖြင့် စတင်သော Key အမှန်ကို ရယူထည့်သွင်းပေးပါ။`;
-  }
-  if (msg.includes('RESOURCE_EXHAUSTED') || msg.includes('429')) {
-    return `${serviceName} API Key Quota ပြည့်သွားပါပြီ (429 RESOURCE_EXHAUSTED)။ ခေတ္တစောင့်ပါ သို့မဟုတ် အဆင့် 1 တွင် နောက် Key တစ်ခု ထည့်ပေးပါ။`;
+    return `${serviceName} API Key မမှန်ကန်ပါ (မြန်မာစာလုံးများ ပါဝင်နေပါသည်)။`;
   }
   return error?.message || `${serviceName} ချိတ်ဆက်မှု မအောင်မြင်ပါ`;
 }
@@ -149,6 +153,36 @@ async function startServer() {
         error: errMsg,
         status: error.status,
       });
+    }
+  });
+
+  // Test connection route
+  app.post('/api/gemini/test', async (req, res) => {
+    try {
+      const { apiKey, model = 'gemini-2.5-flash' } = req.body;
+      const rawKey = apiKey || process.env.GEMINI_API_KEY;
+
+      if (!rawKey || !isValidAsciiApiKey(rawKey)) {
+        return res.status(400).json({ ok: false, error: 'Valid Gemini API Key is required (400 Bad Request).' });
+      }
+
+      const keyToUse = cleanAsciiHeader(rawKey);
+      const ai = new GoogleGenAI({ apiKey: keyToUse });
+
+      const response = await ai.models.generateContent({
+        model: model || 'gemini-2.5-flash',
+        contents: 'Ping',
+      });
+
+      if (response && response.text !== undefined) {
+        return res.json({ ok: true, message: 'Gemini API connection test successful.' });
+      }
+
+      return res.status(500).json({ ok: false, error: 'Empty response received from Gemini API.' });
+    } catch (error: any) {
+      const status = error?.status || error?.statusCode || 500;
+      const errorMsg = formatNetworkError(error, 'Gemini');
+      return res.status(status).json({ ok: false, error: errorMsg, status });
     }
   });
 

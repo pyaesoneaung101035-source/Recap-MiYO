@@ -128,36 +128,45 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
       return;
     }
 
-    setTestResult({ status: 'testing', message: 'Google Gemini သို့ တိုက်ရိုက် ဆက်သွယ်စစ်ဆေးနေပါသည်...' });
+    setTestResult({ status: 'testing', message: 'Gemini API သို့ ချိတ်ဆက်စစ်ဆေးနေပါသည်...' });
 
     try {
       const activeKey = geminiKeys.find((k) => k.status === 'active') || geminiKeys[0];
-      const res = await fetch('/api/gemini/generate', {
+      const res = await fetch('/api/gemini/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           apiKey: activeKey.key,
-          prompt: 'Hello, respond with: OK',
-          model: 'gemini-3.8-flash',
+          model: 'gemini-2.5-flash',
         }),
       });
 
-      if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+
+      if (res.ok && data.ok) {
         setTestResult({
           status: 'success',
-          message: `ချိတ်ဆက်မှု အောင်မြင်ပါသည်! (${activeKey.name} မှ တုံ့ပြန်မှု ရရှိခဲ့ပါသည်)`,
+          message: `ချိတ်ဆက်မှု အောင်မြင်ပါသည်! (${activeKey.name} - Gemini API Connection Successful)`,
         });
       } else {
-        const text = await res.text();
+        const status = res.status;
+        let errMsg = data.error || `HTTP ${status} Error`;
+        if (status === 401 || status === 403) {
+          errMsg = `API Key မမှန်ကန်ပါ (401/403 Invalid API Key)။ Google AI Studio မှ Key အမှန်ကို ထည့်သွင်းပါ။`;
+        } else if (status === 404) {
+          errMsg = `Model ရှာမတွေ့ပါ (404 Model Not Found)။`;
+        } else if (status === 429) {
+          errMsg = `API Key Quota ပြည့်သွားပါပြီ (429 Quota Exceeded)။ နောက် Key တစ်ခု ထည့်ပါ။`;
+        }
         setTestResult({
           status: 'error',
-          message: `စစ်ဆေးမှု မအောင်မြင်ပါ (HTTP ${res.status}): ${text.substring(0, 120)}`,
+          message: errMsg,
         });
       }
     } catch (err: any) {
       setTestResult({
         status: 'error',
-        message: `ကွန်ရက် ချိတ်ဆက်မှု အမှား: ${err.message}`,
+        message: `ကွန်ရက် ချိတ်ဆက်မှု အမှား (Network Error): ${err.message || 'Server unreachable'}`,
       });
     }
   };

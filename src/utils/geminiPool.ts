@@ -140,7 +140,7 @@ export async function fetchDirectGoogleGeminiApi(
   // 2. Fallback to direct client fetch if server proxy is unavailable
   // Model fallback candidates if primary model is 404 or unsupported
   const candidateModels = Array.from(
-    new Set([modelToUse, 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'])
+    new Set([modelToUse, 'gemini-2.5-flash', 'gemini-3.8-flash', 'gemini-2.5-flash-lite'])
   ).filter(Boolean);
 
   const bodyPayload: any = {

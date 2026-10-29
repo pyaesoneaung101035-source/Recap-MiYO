@@ -138,69 +138,47 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
 
     setTestResult({ status: 'testing', message: 'Gemini Key Pool ထဲရှိ Key များကို စစ်ဆေးနေပါသည်...' });
 
-    const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
-
     const testKey = async (k: GeminiKeyInfo): Promise<GeminiKeyInfo> => {
       let isValidKey = false;
       let keyErrMessage = '';
 
       try {
-        // Attempt 1: Server Proxy (Localhost only)
-        if (isLocalhost) {
-          const proxyRes = await fetch('/api/gemini/generate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              apiKey: k.key,
-              prompt: 'Ping',
-              model: 'gemini-2.5-flash',
-            }),
-          }).catch(() => null);
+        const res = await fetch('/api/gemini/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            apiKey: k.key,
+            model: 'gemini-2.5-flash',
+          }),
+        });
 
-          if (proxyRes && proxyRes.ok) {
-            isValidKey = true;
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.ok) {
+          isValidKey = true;
+        } else {
+          const status = res.status;
+          keyErrMessage = data.error || `HTTP ${status}`;
+          if (status === 401 || status === 403) {
+            keyErrMessage = '401/403 Invalid API Key';
+          } else if (status === 404) {
+            keyErrMessage = '404 Model Not Found';
+          } else if (status === 429) {
+            keyErrMessage = '429 Quota Exceeded';
           }
         }
-
-        // Attempt 2: Direct Google API
-        if (!isValidKey) {
-          try {
-            const directRes = await fetchDirectGoogleGeminiApi(
-              k.key,
-              'gemini-2.5-flash',
-              'Ping'
-            );
-            if (directRes.text) {
-              isValidKey = true;
-            }
-          } catch (directErr: any) {
-            const errMsg = directErr?.message || '';
-            if (errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED')) {
-              keyErrMessage = '429 Quota Exceeded';
-            } else if (errMsg.includes('API_KEY_INVALID') || errMsg.includes('key not valid')) {
-              keyErrMessage = 'Invalid Key';
-            } else {
-              keyErrMessage = errMsg;
-            }
-          }
-        }
-      } catch (proxyErr: any) {
-        keyErrMessage = proxyErr.message || 'Connection error';
-      }
-
-      // Resilient Format Validation
-      if (!isValidKey && (k.key.startsWith('AIzaSy') || k.key.toLowerCase().startsWith('aq')) && k.key.length >= 15 && !keyErrMessage.includes('Invalid Key')) {
-        isValidKey = true;
+      } catch (err: any) {
+        keyErrMessage = err.message || 'Network Error';
       }
 
       if (isValidKey) {
         return { ...k, status: 'active', lastError: undefined };
       } else {
-        const isQuota = keyErrMessage.includes('Quota');
+        const isQuota = keyErrMessage.includes('429') || keyErrMessage.includes('Quota');
+        const isInvalid = keyErrMessage.includes('401') || keyErrMessage.includes('403') || keyErrMessage.includes('Invalid');
         return {
           ...k,
-          status: isQuota ? 'quota_exceeded' : 'invalid',
-          lastError: keyErrMessage || 'Connection error',
+          status: isQuota ? 'quota_exceeded' : isInvalid ? 'invalid' : 'active',
+          lastError: keyErrMessage,
         };
       }
     };
@@ -219,7 +197,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
     } else {
       setTestResult({
         status: 'error',
-        message: 'ထည့်သွင်းထားသော Key များ Quota ပြည့်နေ သို့မဟုတ် မမှန်ကန်ပါ။',
+        message: 'ထည့်သွင်းထားသော Key များ 401/403 Invalid, 429 Quota ပြည့်နေ သို့မဟုတ် Network Error ဖြစ်နေပါသည်။',
       });
     }
   };
