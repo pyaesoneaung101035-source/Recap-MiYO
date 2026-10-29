@@ -46,15 +46,6 @@ export function parseKeysFromInput(input: string): GeminiKeyInfo[] {
     // Skip lines with non-ASCII characters (e.g. Burmese Unicode characters)
     if (/[^\x21-\x7E]/.test(trimmed)) continue;
 
-    // If an AQ API key is found, automatically register it for AssemblyAI Whisper STT
-    if (trimmed.startsWith('AQ') || trimmed.startsWith('aq')) {
-      try {
-        const rawOther = localStorage.getItem('motion_recap_other_api_keys');
-        const other = rawOther ? JSON.parse(rawOther) : {};
-        localStorage.setItem('motion_recap_other_api_keys', JSON.stringify({ ...other, assemblyAiKey: trimmed }));
-      } catch {}
-    }
-
     if (existingMap.has(trimmed)) {
       result.push(existingMap.get(trimmed)!);
     } else {
@@ -63,7 +54,7 @@ export function parseKeysFromInput(input: string): GeminiKeyInfo[] {
         id: 'key_' + Math.random().toString(36).substring(2, 9),
         key: trimmed,
         name: isAqKey
-          ? `AQ Whisper Key #${result.length + 1} (${trimmed.substring(0, 4)}...${trimmed.substring(trimmed.length - 4)})`
+          ? `AQ Gemini Key #${result.length + 1} (${trimmed.substring(0, 4)}...${trimmed.substring(trimmed.length - 4)})`
           : `Key #${result.length + 1} (${trimmed.substring(0, 4)}...${trimmed.substring(trimmed.length - 4)})`,
         callCount: 0,
         status: 'active',
@@ -178,11 +169,11 @@ export async function callGeminiWithRotation(
         const msg = errJson.error || 'Server Gemini API call failed.';
         throw new Error(msg);
       } catch (serverErr: any) {
-        throw new Error(serverErr.message || 'ကျေးဇူးပြု၍ အဆင့် 1 (API Settings) တွင် Google Gemini API Key ("AIzaSy...") ကို ထည့်သွင်းပေးပါ (AQ Key သည် AssemblyAI Whisper STT အတွက် ဖြစ်ပါသည်)။');
+        throw new Error(serverErr.message || 'ကျေးဇူးပြု၍ အဆင့် 1 (API Settings) တွင် Google Gemini API Key ("AIzaSy..." သို့မဟုတ် "AQ...") ကို ထည့်သွင်းပေးပါ။');
       }
     } else {
       throw new Error(
-        'ကျေးဇူးပြု၍ အဆင့် 1 (API Settings) တွင် Google Gemini API Key ("AIzaSy...") ကို ထည့်သွင်းပေးပါ (AQ Key သည် AssemblyAI Whisper STT အတွက် ဖြစ်ပါသည်)။'
+        'ကျေးဇူးပြု၍ အဆင့် 1 (API Settings) တွင် Google Gemini API Key ("AIzaSy..." သို့မဟုတ် "AQ...") ကို ထည့်သွင်းပေးပါ။'
       );
     }
   }

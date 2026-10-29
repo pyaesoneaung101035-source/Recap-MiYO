@@ -211,6 +211,18 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
             </div>
           </div>
 
+          {/* Troubleshooting Help Box for 401/403/429 */}
+          <div className="p-3.5 rounded-lg bg-amber-950/30 border border-amber-800/40 text-xs text-amber-200 space-y-2">
+            <div className="flex items-center gap-2 font-semibold text-amber-300">
+              <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
+              <span>401 / 403 / 429 အမှားများ ဖြေရှင်းရန် လမ်းညွှန်</span>
+            </div>
+            <ul className="list-disc list-inside space-y-1 text-amber-200/90 text-[11px] font-myanmar">
+              <li><strong>401/403 Invalid Key:</strong> Google AI Studio (<a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="underline text-cyan-400">aistudio.google.com/app/apikey</a>) မှ <span className="font-mono text-cyan-300">AIzaSy...</span> သို့မဟုတ် <span className="font-mono text-cyan-300">AQ...</span> ဖြင့်စတင်သော API Key အမှန်ကို ထည့်သွင်းပါ။</li>
+              <li><strong>429 Quota Exceeded:</strong> မိနစ်ပိုင်းအတွင်း ခေါ်ဆိုမှုနှုန်း (RPM/TPM) ကျော်လွန်သွားခြင်းဖြစ်ပါသည်။ ခေတ္တစောင့်ပါ သို့မဟုတ် Key အသစ် ထပ်ထည့်ပါ။</li>
+            </ul>
+          </div>
+
           {/* Step 1: Gemini Keys Input */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">

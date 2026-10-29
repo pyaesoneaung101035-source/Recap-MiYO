@@ -86,8 +86,12 @@ function analyzeGeminiError(error: any) {
   };
 }
 
+function createGeminiClient(apiKey: string) {
+  return new GoogleGenAI({ apiKey });
+}
+
 async function callGeminiRest(keyToUse: string, model: string, contentsPayload: any, systemInstruction?: any) {
-  const isOAuth = keyToUse.startsWith('AQ') || keyToUse.startsWith('aq') || keyToUse.startsWith('ya29') || keyToUse.startsWith('ya29.');
+  const isOAuth = keyToUse.startsWith('ya29.') || keyToUse.startsWith('ya29') || keyToUse.startsWith('1//');
   
   const url = isOAuth
     ? `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`
@@ -100,6 +104,8 @@ async function callGeminiRest(keyToUse: string, model: string, contentsPayload: 
 
   if (isOAuth) {
     headers['Authorization'] = `Bearer ${keyToUse}`;
+  } else {
+    headers['x-goog-api-key'] = keyToUse;
   }
 
   const body: any = {
