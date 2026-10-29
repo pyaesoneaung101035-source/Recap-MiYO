@@ -44,6 +44,48 @@ function formatNetworkError(error: any, serviceName: string): string {
   return error?.message || `${serviceName} ချိတ်ဆက်မှု မအောင်မြင်ပါ`;
 }
 
+function analyzeGeminiError(error: any) {
+  const status = error?.status || error?.statusCode || 500;
+  const msg = error?.message || String(error);
+  const details = error?.details ? JSON.stringify(error.details) : (error?.error?.details ? JSON.stringify(error.error.details) : 'No error details');
+  
+  if (status === 429 || msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota')) {
+    const lower = `${msg} ${details}`.toLowerCase();
+    let quotaType = 'General Quota Exceeded';
+    let desc = 'API Quota limit reached.';
+    if (lower.includes('token') || lower.includes('tokencount')) {
+      quotaType = 'TPM (Tokens Per Minute)';
+      desc = 'Tokens Per Minute (TPM) limit exceeded. Too many tokens in 1 minute. Wait 60s or reduce prompt size.';
+    } else if (lower.includes('requestsperminute') || lower.includes('rpm') || lower.includes('minute')) {
+      quotaType = 'RPM (Requests Per Minute)';
+      desc = 'Requests Per Minute (RPM) rate limit exceeded. Too many requests per minute. Wait 30-60 seconds.';
+    } else if (lower.includes('requestsperday') || lower.includes('rpd') || lower.includes('day')) {
+      quotaType = 'RPD (Requests Per Day)';
+      desc = 'Requests Per Day (RPD) daily free quota exhausted. Add another key or upgrade.';
+    } else if (lower.includes('billing') || lower.includes('payment') || lower.includes('credit')) {
+      quotaType = 'Billing Restriction';
+      desc = 'Billing restriction. Payment account or billing required for this project.';
+    } else if (lower.includes('project') || lower.includes('consumer')) {
+      quotaType = 'Project Quota';
+      desc = 'Project-level quota exceeded across all keys in this Google Cloud project.';
+    }
+    return {
+      status: 'RESOURCE_EXHAUSTED (429)',
+      message: msg,
+      details,
+      quotaType,
+      detailedDescription: desc,
+    };
+  }
+  return {
+    status: String(status),
+    message: msg,
+    details,
+    quotaType: status === 401 || status === 403 ? 'Unauthorized' : 'Error',
+    detailedDescription: msg,
+  };
+}
+
 async function startServer() {
   const app = express();
   const PORT = process.env.PORT || 3000;
@@ -117,8 +159,10 @@ async function startServer() {
             lastError = modelErr;
             const status = modelErr?.status || modelErr?.statusCode;
             if (status === 401 || status === 403) {
+              const errorDetails = analyzeGeminiError(modelErr);
               return res.status(status).json({
                 error: 'Gemini API Key မမှန်ကန်ပါ (401/403 Unauthorized)။ Google AI Studio မှ API Key အမှန်ကို စစ်ဆေးထည့်သွင်းပါ။',
+                errorDetails,
                 status,
               });
             }
@@ -135,13 +179,16 @@ async function startServer() {
         }
       }
 
+      const errorDetails = analyzeGeminiError(lastError);
       throw lastError || new Error('All Gemini model candidates failed');
     } catch (error: any) {
       console.error('Gemini error:', error);
       const status = error?.status || error?.statusCode || 500;
+      const errorDetails = analyzeGeminiError(error);
       let errMsg = formatNetworkError(error, 'Gemini');
       return res.status(status).json({
         error: errMsg,
+        errorDetails,
         status,
       });
     }
@@ -182,8 +229,9 @@ async function startServer() {
       return res.status(500).json({ ok: false, error: 'Empty response received from Gemini API.' });
     } catch (error: any) {
       const status = error?.status || error?.statusCode || 500;
+      const errorDetails = analyzeGeminiError(error);
       const errorMsg = formatNetworkError(error, 'Gemini');
-      return res.status(status).json({ ok: false, error: errorMsg, status });
+      return res.status(status).json({ ok: false, error: errorMsg, errorDetails, status });
     }
   });
 

@@ -150,8 +150,11 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
         });
       } else {
         const status = res.status;
+        const details = data.errorDetails;
         let errMsg = data.error || `HTTP ${status} Error`;
-        if (status === 401 || status === 403) {
+        if (details) {
+          errMsg = `[${details.status}] Quota Type: ${details.quotaType} — ${details.detailedDescription} (Message: ${details.message})`;
+        } else if (status === 401 || status === 403) {
           errMsg = `API Key မမှန်ကန်ပါ (401/403 Invalid API Key)။ Google AI Studio မှ Key အမှန်ကို ထည့်သွင်းပါ။`;
         } else if (status === 404) {
           errMsg = `Model ရှာမတွေ့ပါ (404 Model Not Found)။`;

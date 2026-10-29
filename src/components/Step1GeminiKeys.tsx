@@ -157,13 +157,18 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
           isValidKey = true;
         } else {
           const status = res.status;
-          keyErrMessage = data.error || `HTTP ${status}`;
-          if (status === 401 || status === 403) {
-            keyErrMessage = '401/403 Invalid API Key';
-          } else if (status === 404) {
-            keyErrMessage = '404 Model Not Found';
-          } else if (status === 429) {
-            keyErrMessage = '429 Quota Exceeded';
+          const details = data.errorDetails;
+          if (details) {
+            keyErrMessage = `[${details.status}] ${details.quotaType}: ${details.detailedDescription} (${details.message})`;
+          } else {
+            keyErrMessage = data.error || `HTTP ${status}`;
+            if (status === 401 || status === 403) {
+              keyErrMessage = '401/403 Invalid API Key';
+            } else if (status === 404) {
+              keyErrMessage = '404 Model Not Found';
+            } else if (status === 429) {
+              keyErrMessage = '429 Quota Exceeded';
+            }
           }
         }
       } catch (err: any) {
