@@ -601,8 +601,6 @@ ${directInstruction}`;
       return `You are an accurate Myanmar subtitle translator. Provide timestamped, easy-to-read Myanmar subtitle segments (clean, max 2 lines, no Chinese characters) that convey the meaning directly. ${directInstruction}`;
     case 'Long to Short':
       return `You are a viral shorts creator. Identify high-retention clips and write a direct Burmese script for each, focusing on the hook and emotional commentary in Burmese. ${directInstruction}`;
-    case 'Original Recap':
-      return `You are a detailed movie/video explainer. Write a faithful, chronological Myanmar script describing the story, not just a list of actions. ${directInstruction}`;
     case 'Gemini TTS':
       return `You are a professional voiceover artist. Write a crisp, engaging Myanmar voiceover script ready for neural text-to-speech reading with natural rhythm. ${directInstruction}`;
     case 'Dhamma AI':
@@ -666,7 +664,6 @@ export function formatSecondsToSRT(totalSec: number): string {
 export async function generateTimestampedTranscript(
   videoTitle: string,
   durationSeconds: number,
-  aiMode: AiMode,
   customContext = '',
   videoFile?: File | null,
   videoUrl?: string | null,
@@ -674,30 +671,60 @@ export async function generateTimestampedTranscript(
   model = 'gemini-3.5-flash'
 ): Promise<TranscriptSegment[]> {
   const allSegments: TranscriptSegment[] = [];
-  const isDubbingMode = aiMode === 'Dubbing';
+  const isDubbingMode = true; // Default to true as it is the primary use case
+
+  // Strict instruction preventing hallucinated recap stories
+  const strictSystemInstruction = `You are a strict, faithful Chinese-to-Burmese video dialogue transcriber and dubbing translator.
+CRITICAL RULES FOR DUBBING:
+1. YOU MUST ONLY TRANSCRIBE THE ACTUAL SPOKEN DIALOGUE FROM THE ATTACHED VIDEO AUDIO FILE.
+2. DO NOT MAKE UP OR HALLUCINATE RECAP STORIES, MOVIE PLOT SUMMARIES, OR FICTIONAL COMMENTARY.
+3. DO NOT USE NARRATOR FRAMEWORK. Use direct, authentic Burmese spoken dialogue.
+4. STRICT TIMING: The Burmese translation MUST fit perfectly within the original audio's start and end timestamps. 
+5. CONCISENESS: Burmese spoken audio often takes longer than the original (e.g., Chinese). You MUST reduce the Burmese translation to be very concise and concise to ensure it can be spoken within the exact duration of the original dialogue (e.g., 5s of original audio = max 5s of Burmese speech).
+6. VOICE: Default to "Thiha" (Adult Male voice) for all segments. (ယောက်ျားအသံ Thiha ကိုသာ အဓိကထား အသုံးပြုပါ)
+7. TIMESTAMP: Ensure the provided start and end times in the JSON match the segment start and end points in the video exactly. (စကားစတဲ့အချိန်နှင့် စကားဆုံးတဲ့အချိန်နှစ်ခုစလုံးကို တိကျစွာ သတ်မှတ်ပေးပါ)`;
 
   if (videoFile || videoUrl) {
     try {
       const totalDuration = durationSeconds || 180;
 
+      // Extract keyframes for visual context
+      let keyframeParts: any[] = [];
+      let videoUrlToUse = videoUrl;
+      if (!videoUrlToUse && videoFile && typeof window !== 'undefined' && window.URL) {
+        videoUrlToUse = URL.createObjectURL(videoFile);
+      }
+      if (videoUrlToUse) {
+        try {
+          const kfs = await extractVideoKeyframes(videoUrlToUse, 4);
+          if (kfs && kfs.length > 0) {
+            keyframeParts = kfs.map((kf) => ({
+              mimeType: 'image/jpeg',
+              data: kf.base64Jpeg,
+            }));
+          }
+        } catch (kfErr) {
+          console.warn('Keyframe extraction skipped:', kfErr);
+        }
+      }
+
       // Fast single-chunk path if video <= 3 minutes (180s)
       if (totalDuration <= 180) {
-        if (onProgress) onProgress('🎙️ [အဆင့် ၁: Audio Extraction] - ဗီဒီယို အသံဖိုင်ကို ထုတ်ယူနေပါသည်...');
+        if (onProgress) onProgress('🎙️ [အဆင့် ၁: Audio Extraction] - ဗီဒီယို အသံဖိုင်နှင့် မူရင်း မြင်ကွင်းများကို ဖတ်ယူနေပါသည်...');
         const audioRes = await extractAudioFromVideo(videoFile || videoUrl!, 180);
 
-        if (onProgress) onProgress('🎙️ [အဆင့် ၂: Gemini Flash STT] - အသံဖိုင်ကို မြန်မာစကားပြော TTX / Dubbing Plan သို့ ဘာသာပြန်ဆိုနေပါသည်...');
+        if (onProgress) onProgress('🎙️ [အဆင့် ၂: Whisper / Gemini STT] - အသံဖိုင်မှ စကားပြောများကို တိုက်ရိုက် မြန်မာစကားပြောအဖြစ် ပြောင်းလဲပေးနေပါသည်...');
 
         const prompt = `
 YOU ARE PROCESSING THE UPLOADED CUSTOM VIDEO "${videoTitle}".
 Duration: ${audioRes.duration} seconds.
-Mode: ${aiMode}.
-Creator Context: ${customContext || 'Exact line-by-line Chinese-to-Burmese video dubbing'}.
+Creator Context: ${customContext || 'Exact line-by-line video dialogue dubbing'}.
 
-STRICT INSTRUCTIONS FOR CUSTOM VIDEO DUBBING:
-1. LISTEN TO THE AUDIO IN THIS ATTACHED VIDEO CAREFULLY.
-2. TRANSCRIBE EXACTLY WHAT IS SPOKEN IN THE VIDEO AUDIO IN ITS ORIGINAL LANGUAGE (e.g. Chinese) LINE BY LINE. DO NOT MAKE UP OR HALLUCINATE GENERIC RECAP STORIES. TRANSCRIBE THE ACTUAL SPOKEN DIALOGUE FROM THE VIDEO.
-3. BREAK DOWN THE DIALOGUE INTO MANY SHORT, CONCISE SENTENCE SEGMENTS (each segment 1.5s to 3.5s long, creating many frequent short lines that match video cut points and short Chinese speech phrases).
-4. TRANSLATE EACH SHORT LINE DIRECTLY INTO CONCISE, NATURAL BURMESE SPOKEN DIALOGUE (မြန်မာစကားပြော တိုတိုနှင့် လိုရင်း တိုက်ရိုက်ပြန်ဆိုချက်).
+STRICT INSTRUCTIONS FOR CUSTOM VIDEO TRANSCRIPTION & TRANSLATION:
+1. LISTEN TO THE AUDIO IN THIS ATTACHED FILE CAREFULLY AND OBSERVE THE VIDEO KEYFRAMES.
+2. TRANSCRIBE EXACTLY WHAT IS SPOKEN IN THE VIDEO AUDIO IN ITS ORIGINAL LANGUAGE (e.g. Chinese) LINE BY LINE. DO NOT MAKE UP OR HALLUCINATE RECAP STORIES.
+3. BREAK DOWN THE DIALOGUE INTO MANY SHORT, CONCISE SENTENCE SEGMENTS (each segment 1.5s to 3.5s long) MATCHING VIDEO CUT POINTS AND DIALOGUE PAUSES.
+4. TRANSLATE EACH SHORT LINE DIRECTLY INTO CONCISE, NATURAL BURMESE SPOKEN DIALOGUE (မြန်မာစကားပြော တိုတိုနှင့် လိုရင်း ပြန်ဆိုချက်).
 5. Clean Burmese subtitle text (max 2 lines, under 35 Burmese characters per line, NO Chinese characters).
 6. Identify speaker identity, speaking emotion & delivery, whether speaker is on screen, and lip-sync guidance.
 
@@ -709,9 +736,9 @@ Return ONLY a valid JSON array matching this exact format:
     "end": "00:00:02,500",
     "duration": 2.5,
     "speaker": "Speaker 1 (Adult Male)",
-    "originalText": "actual spoken line from video (e.g. Chinese)",
-    "text": "ဒီနေရာမှာတော့...",
-    "subtitleText": "ဒီနေရာမှာတော့...",
+    "originalText": "actual spoken line from video",
+    "text": "မြန်မာစကားပြော ပြန်ဆိုချက်...",
+    "subtitleText": "မြန်မာစာတန်းထိုး...",
     "emotion": "Conversational, calm",
     "isOnScreen": true,
     "lipSyncNote": "Synchronize final mouth closure with pause"
@@ -720,11 +747,13 @@ Return ONLY a valid JSON array matching this exact format:
 (JSON ONLY, NO MARKDOWN)
 `;
 
+        const partsPayload = [...keyframeParts, { mimeType: audioRes.mimeType, data: audioRes.base64Wav }];
+
         const { text: resText, usedKeyName } = await callGeminiWithRotation(
           prompt,
-          buildSystemPromptForMode(aiMode),
+          strictSystemInstruction,
           model,
-          [{ mimeType: audioRes.mimeType, data: audioRes.base64Wav }]
+          partsPayload
         );
 
         let parsed: any[] = [];
@@ -793,7 +822,7 @@ Return ONLY a valid JSON array matching this exact format:
           const chunkPrompt = `
 YOU ARE PROCESSING CHUNK PART ${partNum} OF ${totalParts} FROM THE ATTACHED CUSTOM VIDEO "${videoTitle}".
 Chunk Offset: ${offsetSec} seconds. Chunk Duration: ${chunk.durationSeconds} seconds.
-Mode: ${aiMode}. Context: ${customContext || 'Exact line-by-line video dubbing'}.
+Creator Context: ${customContext || 'Exact line-by-line video dubbing'}.
 
 STRICT INSTRUCTIONS:
 1. LISTEN TO THIS AUDIO CHUNK CAREFULLY.
@@ -809,9 +838,9 @@ Return ONLY a valid JSON array:
     "end": "00:00:03,500",
     "duration": 3.5,
     "speaker": "Speaker 1 (Adult Male)",
-    "originalText": "...",
-    "text": "...",
-    "subtitleText": "...",
+    "originalText": "actual spoken dialogue",
+    "text": "မြန်မာစကားပြော ပြန်ဆိုချက်...",
+    "subtitleText": "မြန်မာစာတန်းထိုး...",
     "emotion": "Conversational",
     "isOnScreen": true,
     "lipSyncNote": "Paced to match original duration"
@@ -819,6 +848,8 @@ Return ONLY a valid JSON array:
 ]
 (JSON ONLY)
 `;
+
+          const chunkPayload = [...keyframeParts, { mimeType: chunk.mimeType, data: chunk.base64Wav }];
 
           let chunkSuccess = false;
           let retries = 0;
@@ -828,9 +859,9 @@ Return ONLY a valid JSON array:
               retries++;
               const { text: chunkResText } = await callGeminiWithRotation(
                 chunkPrompt,
-                buildSystemPromptForMode(aiMode),
+                strictSystemInstruction,
                 model,
-                [{ mimeType: chunk.mimeType, data: chunk.base64Wav }]
+                chunkPayload
               );
 
               const jsonMatch = chunkResText.match(/\[[\s\S]*\]/);
@@ -894,44 +925,11 @@ Return ONLY a valid JSON array:
     }
   }
 
-  // FALLBACK GUARANTEE: Generate structured segments across entire video duration if audio extraction failed
-  if (onProgress) {
-    onProgress('✨ [Gemini API Fallback] - ဗီဒီယို ကြာချိန်တစ်ခုလုံးအတိုင်း Part လိုက် ဇာတ်လမ်းပြော စာသားများ ထုတ်လုပ်ပေးနေပါသည်...');
+  if (allSegments.length > 0) {
+    return allSegments;
   }
 
-  const fallbackParts = Math.max(1, Math.ceil((durationSeconds || 180) / 180));
-  for (let p = 0; p < fallbackParts; p++) {
-    const pStart = p * 180;
-    const pEnd = Math.min((p + 1) * 180, durationSeconds || (p + 1) * 180);
-    const numSegs = 4;
-    const segDur = (pEnd - pStart) / numSegs;
-
-    for (let s = 0; s < numSegs; s++) {
-      const sTime = parseFloat((pStart + s * segDur).toFixed(2));
-      const eTime = parseFloat((pStart + (s + 1) * segDur - 0.3).toFixed(2));
-      const dur = parseFloat((eTime - sTime).toFixed(2));
-      const myanText = p === 0 && s === 0
-        ? 'ဒီနေ့မှာတော့ ကျွန်တော်တို ရင်ခုန်စရာ ဇာတ်လမ်းလေးတစ်ပုဒ်ကို ကြည့်ကြရအောင်။'
-        : `Part ${p + 1} ၏ ဇာတ်ကွက် အခန်း #${s + 1}...`;
-
-      allSegments.push({
-        id: `p${p + 1}_seg_${s + 1}`,
-        startTime: sTime,
-        endTime: eTime,
-        duration: dur,
-        originalText: `Part ${p + 1} scene narrative`,
-        myanmarTranslation: myanText,
-        subtitleText: myanText,
-        speaker: 'Speaker 1 (Adult Male)',
-        emotion: 'Natural conversational',
-        isOnScreen: true,
-        lipSyncNote: 'Steady speech cadence',
-        voice: isDubbingMode ? 'Thiha' : ((p + s) % 2 === 0 ? 'Thiha' : 'Nilar'),
-      });
-    }
-  }
-
-  return allSegments;
+  throw new Error('ဗီဒီယိုမှ စကားပြောများကို သဲသဲကွဲကွဲ မကြားရပါ (သို့မဟုတ်) အသံဖတ်ယူမှု မအောင်မြင်ပါ။ ကျေးဇူးပြု၍ "Assembly Generator" ကို အသုံးပြုပေးပါ သို့မဟုတ် ဗီဒီယိုဖိုင် အသံပါဝင်မှုကို စစ်ဆေးပေးပါ။');
 }
 
 /**

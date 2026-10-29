@@ -39,16 +39,6 @@ interface AiRecapStudioProps {
   onNextStep?: () => void;
 }
 
-const AI_MODES: { id: AiMode; title: string; desc: string }[] = [
-  { id: 'Recap', title: 'Recap', desc: 'ဇာတ်လမ်း အနှစ်ချုပ်' },
-  { id: 'Dubbing', title: 'Dubbing', desc: 'အချိန်ကိုက် မြန်မာစကားပြော' },
-  { id: 'Subtitle', title: 'Subtitle', desc: 'Timestamp ပါ စာတန်းထိုး' },
-  { id: 'Long to Short', title: 'Long to Short', desc: '30-60s Viral Clips' },
-  { id: 'Original Recap', title: 'Original Recap', desc: 'မူရင်း အသေးစိတ်' },
-  { id: 'Gemini TTS', title: 'Gemini TTS', desc: 'အသံထွက်ဖတ်ရ လွယ်သောစာ' },
-  { id: 'Dhamma AI', title: 'Dhamma AI', desc: 'ဓမ္မအငွေ့အသက်' },
-];
-
 export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
   project,
   setProject,
@@ -170,7 +160,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
           if (!hasAssemblyAiKey) {
             throw new Error('AssemblyAI Key မတွေ့ရှိပါ။ ကျေးဇူးပြု၍ Step 1 တွင် AssemblyAI Key (32-digit Token) ထည့်သွင်းပေးပါ။');
           }
-          setStatusMessage('🎙️ [AssemblyAI Whisper Engine] အသံလှိုင်း စစ်ဆေးနေပါသည်...');
+          setStatusMessage('🎙️ [Assembly Generator] အသံလှိုင်း စစ်ဆေးနေပါသည်...');
           rawSegments = await transcribeVideoWithAssemblyAi(
             project.videoFile || project.videoUrl!,
             {
@@ -190,7 +180,6 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
         rawSegments = await generateTimestampedTranscript(
           project.videoName || 'Uploaded Video',
           project.videoDuration || 30,
-          project.selectedAiMode,
           customPrompt,
           project.videoFile,
           project.videoUrl,
@@ -306,26 +295,6 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
         </div>
       </div>
 
-      {/* AI Modes Grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        {AI_MODES.map((mode) => (
-          <button
-            key={mode.id}
-            onClick={() => setProject((prev) => ({ ...prev, selectedAiMode: mode.id }))}
-            className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
-              project.selectedAiMode === mode.id
-                ? 'bg-cyan-500/15 border-cyan-400/50 text-cyan-200 shadow-md ring-1 ring-cyan-400/30'
-                : 'bg-white/5 border-white/5 text-zinc-400 hover:text-zinc-200 hover:bg-white/10'
-            }`}
-          >
-            <span className="text-xs font-bold block">{mode.title}</span>
-            <span className="text-[10px] text-zinc-400 font-myanmar block mt-0.5 opacity-80">
-              {mode.desc}
-            </span>
-          </button>
-        ))}
-      </div>
-
       {/* 3-Minute Part Breakdown Filter Pills */}
       <div className="glass-card rounded-xl p-3.5 space-y-2.5">
         <div className="flex items-center justify-between text-xs">
@@ -389,7 +358,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
           <div className="flex items-center justify-between mb-1">
             <div className="flex items-center gap-1.5 font-bold text-xs">
               <Radio className="w-3.5 h-3.5 text-blue-400" />
-              <span>AssemblyAI Whisper STT</span>
+              <span>Assembly Generator</span>
             </div>
             {hasAssemblyAiKey && (
               <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
@@ -398,7 +367,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
             )}
           </div>
           <p className="text-[11px] text-zinc-400 font-myanmar">
-            Whisper အသံလှိုင်း တိကျသော Timestamp ဖြင့် မြန်မာစကားပြော ပြန်ဆိုချက်
+            AssemblyAI API ဖြင့် Speech-to-Text ပြုလုပ်ပြီး Gemini API မှ မြန်မာဘာသာပြန်ဆို၍ TTX ထုတ်ပေးမည်
           </p>
         </button>
 
@@ -414,14 +383,14 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
           <div className="flex items-center justify-between mb-1">
             <div className="flex items-center gap-1.5 font-bold text-xs">
               <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-              <span>Gemini Multi-Key STT</span>
+              <span>Whisper Generator</span>
             </div>
             <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
               Rotation Pool
             </span>
           </div>
           <p className="text-[11px] text-zinc-400 font-myanmar">
-            Google Gemini API Multimodal အသံလှိုင်း ခွဲခြားမှု
+            Whisper ဖြင့် Speech-to-Text ပြုလုပ်ပြီး Gemini API မှ မြန်မာဘာသာပြန်ဆို၍ TTX ထုတ်ပေးမည်
           </p>
         </button>
       </div>
@@ -514,9 +483,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
             <div className="flex items-center gap-2">
               <FileText className="w-4 h-4 text-sky-400" />
               <span className="text-xs font-bold text-white font-myanmar">
-                {project.selectedAiMode === 'Dubbing'
-                  ? 'Dubbing Plan & Subtitles (10-Point Analysis)'
-                  : 'Burmese Script & Subtitles Plan'}
+                {'Burmese Script & Subtitles Plan'}
               </span>
               <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-sky-500/20 text-sky-300 border border-sky-500/30 font-mono">
                 {project.segments.length} Segments

@@ -99,15 +99,6 @@ export interface SubtitleSettings {
   showKaraoke: boolean;
 }
 
-export type AiMode =
-  | 'Recap'
-  | 'Dubbing'
-  | 'Subtitle'
-  | 'Long to Short'
-  | 'Original Recap'
-  | 'Gemini TTS'
-  | 'Dhamma AI'
-  | 'Dhamma AI background';
 
 export interface BlurBox {
   id: string;
@@ -161,7 +152,6 @@ export interface ProjectState {
   segments: TranscriptSegment[];
   keyframes: AlightKeyframe[];
   subtitleSettings: SubtitleSettings;
-  selectedAiMode: AiMode;
   blurBoxes: BlurBox[];
   logoConfig?: LogoConfig | null;
   globalColorFilter: 'none' | 'cinematic' | 'warm' | 'vintage' | 'cyber' | 'dhamma_gold';

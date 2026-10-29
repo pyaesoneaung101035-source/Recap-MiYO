@@ -7,26 +7,12 @@ import { loadApiKeys, saveApiKeys, verifyAssemblyAiKey, verifyHuggingFaceKey, is
 interface Step1GeminiKeysProps {
   geminiKeys: GeminiKeyInfo[];
   setGeminiKeys: (keys: GeminiKeyInfo[]) => void;
-  selectedAiMode: AiMode;
-  setSelectedAiMode: (mode: AiMode) => void;
   onNextStep: () => void;
 }
-
-const AI_MODES: { id: AiMode; title: string; desc: string }[] = [
-  { id: 'Recap', title: 'Recap', desc: 'ဇာတ်လမ်း အနှစ်ချုပ်' },
-  { id: 'Dubbing', title: 'Dubbing', desc: 'အချိန်ကိုက် မြန်မာစကားပြော' },
-  { id: 'Subtitle', title: 'Subtitle', desc: 'Timestamp ပါ စာတန်းထိုး' },
-  { id: 'Long to Short', title: 'Long to Short', desc: '30-60s Viral Clips' },
-  { id: 'Original Recap', title: 'Original Recap', desc: 'မူရင်း အသေးစိတ်' },
-  { id: 'Gemini TTS', title: 'Gemini TTS', desc: 'အသံထွက်ဖတ်ရ လွယ်သောစာ' },
-  { id: 'Dhamma AI', title: 'Dhamma AI', desc: 'ဓမ္မအငွေ့အသက်' },
-];
 
 export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
   geminiKeys,
   setGeminiKeys,
-  selectedAiMode,
-  setSelectedAiMode,
   onNextStep,
 }) => {
   const [keysInput, setKeysInput] = useState('');
@@ -570,31 +556,6 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
             </div>
           </div>
         )}
-      </div>
-
-      {/* Target Modes Selection */}
-      <div className="space-y-3 pt-3 border-t border-zinc-800">
-        <label className="text-xs font-semibold text-zinc-200 block">
-          သုံးရန်နေရာ (AI Mode) ရွေးချယ်ပါ:
-        </label>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-          {AI_MODES.map((mode) => (
-            <button
-              key={mode.id}
-              onClick={() => setSelectedAiMode(mode.id)}
-              className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer ${
-                selectedAiMode === mode.id
-                  ? 'bg-cyan-950/60 border-cyan-500/70 text-cyan-200 shadow-sm'
-                  : 'bg-zinc-950/60 border-zinc-800 text-zinc-400 hover:text-zinc-200'
-              }`}
-            >
-              <span className="text-xs font-semibold block">{mode.title}</span>
-              <span className="text-[10px] text-zinc-400 font-myanmar block truncate mt-0.5">
-                {mode.desc}
-              </span>
-            </button>
-          ))}
-        </div>
       </div>
 
       {/* Bottom Navigation Card */}

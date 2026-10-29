@@ -88,7 +88,6 @@ export default function App() {
       positionY: 'bottom',
       showKaraoke: true,
     },
-    selectedAiMode: 'Recap',
     blurBoxes: [],
     globalColorFilter: 'none',
   });
@@ -225,8 +224,6 @@ export default function App() {
           <Step1GeminiKeys
             geminiKeys={geminiKeys}
             setGeminiKeys={setGeminiKeys}
-            selectedAiMode={project.selectedAiMode}
-            setSelectedAiMode={(mode) => setProject((prev) => ({ ...prev, selectedAiMode: mode }))}
             onNextStep={() => setCurrentStep(2)}
           />
         )}
