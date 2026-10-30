@@ -22,12 +22,15 @@ import {
   Check,
   ChevronRight,
   Filter,
+  ShieldCheck,
 } from 'lucide-react';
 import { ProjectState, TranscriptSegment, VoiceOption } from '../types';
 import { synthesizeMyanmarVoice, VOICE_PROFILES, VoiceStyle } from '../utils/edgeTtsClient';
 import { synthesizeHuggingFaceVoice, HF_VOICE_MODELS, HF_MULTI_SPEAKERS } from '../utils/huggingFaceClient';
 import { loadApiKeys } from '../utils/apiKeys';
+import { shortenBurmeseTextForDuration } from '../utils/geminiPool';
 import { VideoPlayerView } from './VideoPlayerView';
+import { HumanReviewDubbingStudio } from './HumanReviewDubbingStudio';
 
 interface VoiceCloneStudioProps {
   project: ProjectState;
@@ -56,6 +59,7 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
   onPrevStep,
   onNextStep,
 }) => {
+  const [studioTab, setStudioTab] = useState<'generation' | 'review'>('generation');
   const [voiceEngine, setVoiceEngine] = useState<'gemini' | 'huggingface'>('gemini');
   
   // Single vs Double Voice Mode State
@@ -296,19 +300,56 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
     setStatusText(`✓ Segment speed adjusted to ${newRate.toFixed(2)}x.`);
   };
 
+  const [shorteningSegId, setShorteningSegId] = useState<string | null>(null);
+
+  const handleShortenSegmentInVoiceStudio = async (seg: TranscriptSegment) => {
+    if (!seg.myanmarTranslation || shorteningSegId) return;
+    const slotDur = Math.max(1.0, seg.endTime - seg.startTime);
+    setShorteningSegId(seg.id);
+    setStatusText(`✂️ Segment #${seg.id} အတွက် မူရင်းအချိန် (${slotDur.toFixed(1)}s) အတွင်း ဖတ်နိုင်ရန် AI ဖြင့် စာတိုချုံ့နေပါသည်...`);
+    try {
+      const shortened = await shortenBurmeseTextForDuration(
+        seg.myanmarTranslation,
+        slotDur,
+        seg.originalText
+      );
+      if (shortened && shortened !== seg.myanmarTranslation) {
+        setProject((prev) => ({
+          ...prev,
+          segments: prev.segments.map((s) =>
+            s.id === seg.id ? { ...s, myanmarTranslation: shortened, subtitleText: shortened, audioUrl: undefined } : s
+          ),
+        }));
+        setStatusText(`✓ Segment #${seg.id} စာသားကို တိုအောင် ချုံ့ပြီးပါပြီ။ Voice ပြန်ထုတ်နိုင်ပါပြီ။`);
+      }
+    } catch (err: any) {
+      console.warn('Failed to shorten segment:', err);
+    } finally {
+      setShorteningSegId(null);
+    }
+  };
+
   const handleAutoRetimeAll = () => {
     setProject((prev) => ({
       ...prev,
       segments: prev.segments.map((s) => {
-        const slotDuration = Math.max(1.0, s.endTime - s.startTime);
+        const slotDuration = Math.max(0.5, s.endTime - s.startTime);
         if (s.audioDuration && s.audioDuration > 0) {
-          const autoRate = Math.min(2.0, Math.max(0.7, parseFloat((s.audioDuration / slotDuration).toFixed(2))));
-          return { ...s, playbackRate: autoRate };
+          // Rule 8: If narration audio duration > video segment duration:
+          // Slightly boost tempo up to 1.35x max with atempo pitch preservation
+          // Rule 9: If narration audio duration < video segment duration:
+          // Do not speed up; keep natural tempo (1.0x) with natural pause/silence padding
+          if (s.audioDuration > slotDuration) {
+            const autoRate = Math.min(1.35, Math.max(1.0, parseFloat((s.audioDuration / slotDuration).toFixed(2))));
+            return { ...s, playbackRate: autoRate };
+          } else {
+            return { ...s, playbackRate: 1.0 };
+          }
         }
         return s;
       }),
     }));
-    setStatusText('✓ Auto-Fit Retime All: Segment playback rates adjusted to match original video dialogue duration window (atempo pitch-preserved).');
+    setStatusText('✓ Auto-Fit Retime: Segment playback rates adjusted to match video timing (Audio > Slot re-timed up to 1.35x max; Audio <= Slot kept at 1.0x with silence padding).');
   };
 
   const handleGenerateSingle = async (seg: TranscriptSegment) => {
@@ -475,19 +516,87 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* Step 5 Main Content Container: Video Player Preview (Left) + Voice Controls (Right) */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* LEFT COLUMN: Custom Upload Video Player with Live Subtitles */}
-        <div className="lg:col-span-7 space-y-3 sticky top-20">
-          <div className="flex items-center justify-between px-4 py-2.5 rounded-2xl bg-black/40 border border-white/10 text-xs backdrop-blur-xl">
-            <span className="font-bold text-white flex items-center gap-2 font-display">
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
-              <span>Custom Video & Live Subtitle Preview</span>
+      {/* 7-STAGE DUBBING WORKFLOW TOP TAB SELECTOR */}
+      <div className="flex flex-wrap items-center justify-between gap-3 p-2.5 rounded-2xl bg-black/60 border border-white/10 backdrop-blur-xl shadow-xl">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setStudioTab('generation')}
+            className={`px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-2 ${
+              studioTab === 'generation'
+                ? 'bg-gradient-to-r from-emerald-400 to-teal-400 text-zinc-950 font-black shadow-lg shadow-emerald-500/20'
+                : 'text-zinc-400 hover:text-white bg-white/5'
+            }`}
+          >
+            <Mic className="w-4 h-4" />
+            <span>အသံသွင်းခြင်း (Voice Generation)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setStudioTab('review')}
+            className={`px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-2 ${
+              studioTab === 'review'
+                ? 'bg-gradient-to-r from-cyan-400 to-teal-400 text-zinc-950 font-black shadow-lg shadow-cyan-500/20'
+                : 'text-zinc-400 hover:text-white bg-white/5'
+            }`}
+          >
+            <ShieldCheck className="w-4 h-4 text-cyan-400" />
+            <span>၇ ဆင့် လူကိုယ်တိုင် စစ်ဆေးခန်း (7-Stage Review Studio)</span>
+            <span className="px-1.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 font-mono text-[10px] font-bold">
+              {project.segments.filter((s) => s.isHumanReviewed).length}/{project.segments.length}
             </span>
-            <span className="text-[10px] text-zinc-400 font-myanmar">
-              Voice Clone အသံနှင့် Subtitle အချိန်ကိုက် ကြည့်ရှုနိုင်ပါသည်
-            </span>
+          </button>
+        </div>
+
+        <div className="text-[11px] text-zinc-400 font-myanmar pr-2 hidden sm:block">
+          ✨ Single Adult Male Voice (သီဟ / Adult Male) + atempo Retiming
+        </div>
+      </div>
+
+      {studioTab === 'review' ? (
+        /* 7-STAGE HUMAN-IN-THE-LOOP REVIEW WORKBENCH WITH VIDEO SYNC */
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+            <div className="lg:col-span-6 space-y-3 sticky top-20">
+              <div className="flex items-center justify-between px-4 py-2.5 rounded-2xl bg-black/40 border border-white/10 text-xs backdrop-blur-xl">
+                <span className="font-bold text-white flex items-center gap-2 font-display">
+                  <span className="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse" />
+                  <span>Video & Voiceover Lip-Sync Sync Preview</span>
+                </span>
+                <span className="text-[10px] text-zinc-400 font-myanmar">
+                  မူရင်းအသံ 100% Mute ဖြင့် စစ်ဆေးခြင်း
+                </span>
+              </div>
+              <VideoPlayerView
+                project={project}
+                setProject={setProject}
+                activeSegment={activeSegment}
+              />
+            </div>
+            <div className="lg:col-span-6">
+              <HumanReviewDubbingStudio
+                project={project}
+                setProject={setProject}
+                onSeekTo={(t) => setProject((prev) => ({ ...prev, currentTime: t }))}
+              />
+            </div>
           </div>
+        </div>
+      ) : (
+        /* Regular generation grid */
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          {/* LEFT COLUMN: Custom Upload Video Player with Live Subtitles */}
+          <div className="lg:col-span-7 space-y-3 sticky top-20">
+            <div className="flex items-center justify-between px-4 py-2.5 rounded-2xl bg-black/40 border border-white/10 text-xs backdrop-blur-xl">
+              <span className="font-bold text-white flex items-center gap-2 font-display">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
+                <span>Custom Video & Live Subtitle Preview</span>
+              </span>
+              <span className="text-[10px] text-zinc-400 font-myanmar">
+                Voice Clone အသံနှင့် Subtitle အချိန်ကိုက် ကြည့်ရှုနိုင်ပါသည်
+              </span>
+            </div>
 
           <VideoPlayerView
             project={project}
@@ -958,21 +1067,38 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                         </span>
                       </div>
 
-                      {seg.audioDuration && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const slotDur = Math.max(1.0, seg.endTime - seg.startTime);
-                            const autoRate = Math.min(2.0, Math.max(0.7, parseFloat((seg.audioDuration! / slotDur).toFixed(2))));
-                            handleUpdateSegmentRate(seg.id, autoRate);
-                          }}
-                          className="px-2 py-0.5 bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 rounded-lg hover:bg-emerald-500/30 transition-all font-bold cursor-pointer flex items-center gap-1"
-                          title="Auto-Fit audio duration to original video dialogue duration window"
-                        >
-                          <Zap className="w-2.5 h-2.5 text-emerald-400" />
-                          <span>⚡ Auto-Fit ({(seg.audioDuration / Math.max(1.0, seg.endTime - seg.startTime)).toFixed(2)}x)</span>
-                        </button>
-                      )}
+                      <div className="flex items-center gap-1.5">
+                        {seg.audioDuration && seg.audioDuration > (seg.endTime - seg.startTime) && (
+                          <button
+                            type="button"
+                            onClick={() => handleShortenSegmentInVoiceStudio(seg)}
+                            disabled={shorteningSegId === seg.id}
+                            className="px-2 py-0.5 bg-amber-500/20 text-amber-300 border border-amber-500/40 rounded-lg hover:bg-amber-500/30 transition-all font-bold cursor-pointer flex items-center gap-1"
+                            title="စာသားကို အဓိပ္ပါယ်မပျက်ဘဲ မူရင်းစကားပြောချိန်အတွင်း ဝင်အောင် AI ဖြင့် စာတိုချုံ့မည်"
+                          >
+                            <Scissors className="w-2.5 h-2.5 text-amber-400" />
+                            <span>{shorteningSegId === seg.id ? 'ချုံ့နေသည်...' : '✂️ AI စာတိုချုံ့မည်'}</span>
+                          </button>
+                        )}
+
+                        {seg.audioDuration && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const slotDur = Math.max(0.5, seg.endTime - seg.startTime);
+                              const autoRate = seg.audioDuration! > slotDur
+                                ? Math.min(1.35, Math.max(1.0, parseFloat((seg.audioDuration! / slotDur).toFixed(2))))
+                                : 1.0;
+                              handleUpdateSegmentRate(seg.id, autoRate);
+                            }}
+                            className="px-2 py-0.5 bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 rounded-lg hover:bg-emerald-500/30 transition-all font-bold cursor-pointer flex items-center gap-1"
+                            title="Auto-Fit audio duration to video segment window"
+                          >
+                            <Zap className="w-2.5 h-2.5 text-emerald-400" />
+                            <span>⚡ Auto-Fit</span>
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 );
@@ -981,6 +1107,7 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
           </div>
         </div>
       </div>
+    )}
 
       {/* BOTTOM NAVIGATION CARD */}
       <div className="ios-card p-5 flex items-center justify-between gap-4">

@@ -431,7 +431,12 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
       const isVoiceMuted = project.isVoiceMuted ?? false;
       const effectiveVoiceGain = isVoiceMuted ? 0 : (project.voiceVolume ?? 1.0);
 
-      const audioSources: { node: AudioBufferSourceNode; startTime: number }[] = [];
+      const audioSources: {
+        node: AudioBufferSourceNode;
+        startTime: number;
+        gainNode: GainNode;
+        duration: number;
+      }[] = [];
 
       for (const seg of project.segments) {
         if (seg.audioUrl) {
@@ -442,16 +447,20 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
 
             const source = audioCtx.createBufferSource();
             source.buffer = decoded;
-            source.playbackRate.value = seg.playbackRate || project.voicePlaybackRate || 1.0;
+            const rate = seg.atempoRate || seg.playbackRate || project.voicePlaybackRate || 1.0;
+            source.playbackRate.value = rate;
 
             const gain = audioCtx.createGain();
-            gain.gain.value = effectiveVoiceGain;
+            gain.gain.value = 0; // Starts silent until scheduled envelope
             source.connect(gain);
             gain.connect(dest);
 
+            const effectiveDur = decoded.duration / rate;
             audioSources.push({
               node: source,
               startTime: Math.max(0, seg.startTime),
+              gainNode: gain,
+              duration: effectiveDur,
             });
           } catch (audioErr) {
             console.warn('Voice segment load error:', audioErr);
@@ -507,9 +516,17 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
       }
 
       const startTimeReal = audioCtx.currentTime;
-      audioSources.forEach(({ node, startTime }) => {
+      audioSources.forEach(({ node, startTime, gainNode, duration }) => {
         try {
-          node.start(startTimeReal + startTime);
+          const tStart = startTimeReal + startTime;
+          const tEnd = tStart + duration;
+          // Smooth 12ms linear attack and 15ms release envelope to eliminate pops and clicks
+          gainNode.gain.setValueAtTime(0.0001, tStart);
+          gainNode.gain.linearRampToValueAtTime(effectiveVoiceGain, Math.min(tEnd, tStart + 0.012));
+          gainNode.gain.setValueAtTime(effectiveVoiceGain, Math.max(tStart + 0.012, tEnd - 0.015));
+          gainNode.gain.linearRampToValueAtTime(0.0001, tEnd);
+
+          node.start(tStart);
         } catch (startErr) {
           console.warn('Audio node start notice:', startErr);
         }

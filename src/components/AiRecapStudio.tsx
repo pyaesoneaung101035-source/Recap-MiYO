@@ -20,16 +20,21 @@ import {
   Eye,
   X,
   Volume2,
+  Scissors,
 } from 'lucide-react';
 import { ProjectState, TranscriptSegment, AiMode } from '../types';
 import {
   generateTimestampedTranscript,
   exportToDubbingPlanJSON,
   generateBurmeseDubbingSRT,
+  shortenBurmeseTextForDuration,
+  countBurmeseSyllables,
+  calculateMaxAllowedSyllables,
 } from '../utils/geminiPool';
 import { transcribeVideoWithAssemblyAi } from '../utils/assemblyAi';
 import { loadApiKeys } from '../utils/apiKeys';
 import { downloadFile } from '../utils/alightMotionRenderer';
+import { autoGenerateAllNarratorVoices } from '../utils/edgeTtsClient';
 
 interface AiRecapStudioProps {
   project: ProjectState;
@@ -52,12 +57,36 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [editingSegId, setEditingSegId] = useState<string | null>(null);
+  const [shorteningSegId, setShorteningSegId] = useState<string | null>(null);
   const [selectedPartFilter, setSelectedPartFilter] = useState<number | 'all'>('all');
   const [selectedEngine, setSelectedEngine] = useState<'assemblyai' | 'gemini'>('assemblyai');
   const [hasAssemblyAiKey, setHasAssemblyAiKey] = useState(false);
   const [selectedGeminiModel, setSelectedGeminiModel] = useState<string>('gemini-3.5-flash');
   const [showDubbingPlanModal, setShowDubbingPlanModal] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
+
+  const handleShortenSegment = async (seg: TranscriptSegment) => {
+    if (!seg.myanmarTranslation || shorteningSegId) return;
+    const slotDur = Math.max(1.0, seg.endTime - seg.startTime);
+    setShorteningSegId(seg.id);
+    try {
+      const shortened = await shortenBurmeseTextForDuration(
+        seg.myanmarTranslation,
+        slotDur,
+        seg.originalText
+      );
+      if (shortened && shortened !== seg.myanmarTranslation) {
+        handleUpdateSegment(seg.id, {
+          myanmarTranslation: shortened,
+          subtitleText: shortened,
+        });
+      }
+    } catch (err) {
+      console.warn('Failed to shorten segment:', err);
+    } finally {
+      setShorteningSegId(null);
+    }
+  };
 
   const handleCopyDubbingPlanJson = () => {
     if (!project.segments.length) return;
@@ -188,7 +217,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
         );
       }
 
-      setProgressPercent(90);
+      setProgressPercent(70);
       const sorted = [...rawSegments].sort((a, b) => a.startTime - b.startTime);
       const segments = sorted.map((s) => {
         const start = Math.max(0, s.startTime);
@@ -202,11 +231,31 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
         };
       });
 
+      // 1-Click Auto Narrator Voice Generation (သီဟ / Adult Male Narrator)
+      setStatusMessage(`🔊 [One-Click Narrator TTS] အပိုင်း ${segments.length} ခုအတွက် ယောက်ျားအသံ (သီဟ) ကို Auto Generate စတင်ပြုလုပ်နေပါသည်...`);
+      setProgressPercent(75);
+
+      const fullyDubbedSegments = await autoGenerateAllNarratorVoices(
+        segments,
+        (msg, cur, tot) => {
+          setStatusMessage(msg);
+          const pct = Math.min(99, 75 + Math.floor((cur / tot) * 23));
+          setProgressPercent(pct);
+        },
+        'Thiha'
+      );
+
       setProgressPercent(100);
-      setProject((prev) => ({ ...prev, segments }));
-      setStatusMessage(`အောင်မြင်ပါသည်! Segment စုစုပေါင်း ${segments.length} ခု ထုတ်ယူပြီးပါပြီ။`);
+      setProject((prev) => ({
+        ...prev,
+        segments: fullyDubbedSegments,
+        isMuted: true, // 100% original video audio muted as requested
+        volume: 0,
+      }));
+
+      setStatusMessage(`🎉 [One-Click အောင်မြင်ပါသည်] Segment ${fullyDubbedSegments.length} ခုလုံးကို Speech-to-Text, Gemini Timeline Script ခွဲခြမ်းခြင်းနှင့် Narrator အသံသွင်းခြင်း အားလုံး Auto ပြီးစီးပါပြီ!`);
     } catch (err: any) {
-      console.error('Failed to generate recap:', err);
+      console.error('Failed to generate auto dubbing:', err);
       setErrorMessage(err.message || 'AI စာသားထုတ်လုပ်မှု မအောင်မြင်ပါ။ API Key ကို စစ်ဆေးပါ။');
     } finally {
       setProgressPercent(100);
@@ -422,14 +471,15 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
           <button
             onClick={handleGenerateScript}
             disabled={isGenerating}
-            className="px-5 py-2.5 bg-gradient-to-r from-cyan-400 via-teal-300 to-emerald-400 hover:opacity-90 disabled:opacity-50 text-zinc-950 font-bold text-xs rounded-xl transition-all shadow-lg shadow-cyan-500/20 flex items-center gap-2 shrink-0 cursor-pointer"
+            className="px-6 py-2.5 bg-gradient-to-r from-cyan-400 via-teal-300 to-emerald-400 hover:opacity-90 disabled:opacity-50 text-zinc-950 font-black text-xs rounded-xl transition-all shadow-xl shadow-cyan-500/25 flex items-center gap-2 shrink-0 cursor-pointer active:scale-95"
+            title="1-Click: STT + Gemini Timeline Segmentation + Auto-Shorten + Narrator Voice Generation"
           >
             {isGenerating ? (
               <RotateCw className="w-4 h-4 animate-spin" />
             ) : (
-              <Sparkles className="w-4 h-4 stroke-[2.5]" />
+              <Zap className="w-4 h-4 fill-zinc-950 stroke-[2.5]" />
             )}
-            <span>Transcribe & Translate</span>
+            <span>⚡ One Click Auto Generator (Narrator အသံပါ တစ်ခါတည်းထုတ်မည်)</span>
           </button>
         </div>
 
@@ -591,6 +641,23 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
                         {seg.isOnScreen ? '👁️ On Screen' : '🎙️ Off Screen'}
                       </span>
                     )}
+
+                    {seg.audioUrl && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const audio = new Audio(seg.audioUrl);
+                          audio.playbackRate = seg.atempoRate || seg.playbackRate || 1.0;
+                          (audio as any).preservesPitch = true;
+                          audio.play().catch(() => {});
+                        }}
+                        className="px-2 py-0.5 rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] font-bold flex items-center gap-1 cursor-pointer hover:bg-emerald-500/30 transition-all"
+                        title="ဖတ်ပြထားသော မြန်မာယောက်ျားသံ (သီဟ) ကို နားဆင်ရန်"
+                      >
+                        <Volume2 className="w-3 h-3 text-emerald-400" />
+                        <span>အသံနားဆင်မည် ({seg.audioDuration ? seg.audioDuration.toFixed(1) + 's' : 'TTS'})</span>
+                      </button>
+                    )}
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
@@ -649,24 +716,61 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
                   </div>
                 )}
 
-                {/* Natural Spoken Burmese Dialogue Input */}
-                <div className="space-y-1 mb-2">
-                  <div className="flex items-center justify-between text-[10px] text-zinc-400">
-                    <span className="font-myanmar font-semibold text-cyan-300">
-                      သဘာဝကျသော မြန်မာစကားပြော (Dubbing Dialogue):
-                    </span>
-                    {seg.emotion && (
-                      <span className="text-zinc-500 italic">Emotion: {seg.emotion}</span>
-                    )}
-                  </div>
-                  <input
-                    type="text"
-                    value={seg.myanmarTranslation}
-                    onChange={(e) => handleUpdateSegment(seg.id, { myanmarTranslation: e.target.value })}
-                    placeholder="သဘာဝကျသော လူပြောစကား မြန်မာစကားပြော..."
-                    className="w-full px-3 py-1.5 glass-input rounded-lg text-xs font-myanmar text-white focus:ring-1 focus:ring-cyan-400"
-                  />
-                </div>
+                {/* Natural Spoken Burmese Dialogue Input & 5-Second Syllable Brevity Indicator */}
+                {(() => {
+                  const slotDur = Math.max(0.5, seg.endTime - seg.startTime);
+                  const sylCount = countBurmeseSyllables(seg.myanmarTranslation || '');
+                  const maxSyl = seg.maxAllowedSyllables || calculateMaxAllowedSyllables(slotDur);
+                  const isTooLong = sylCount > maxSyl;
+
+                  return (
+                    <div className="space-y-1 mb-2">
+                      <div className="flex items-center justify-between text-[10px] text-zinc-400 flex-wrap gap-1">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-myanmar font-semibold text-cyan-300">
+                            သဘာဝကျသော မြန်မာစကားပြော (Dubbing Dialogue):
+                          </span>
+                          {seg.emotion && (
+                            <span className="text-zinc-500 italic text-[9px]">({seg.emotion})</span>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-1.5">
+                          {isTooLong ? (
+                            <span className="px-2 py-0.5 rounded-md bg-amber-500/15 border border-amber-500/30 text-amber-300 font-semibold font-myanmar text-[9px] flex items-center gap-1">
+                              ⚠️ စကားလုံးရှည်နေပါသည် ({sylCount}/{maxSyl} syllables &gt; {slotDur.toFixed(1)}s)
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-mono text-[9px]">
+                              ✓ 5s Timing Fit ({sylCount}/{maxSyl} syllables, {slotDur.toFixed(1)}s)
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => handleShortenSegment(seg)}
+                            disabled={shorteningSegId === seg.id}
+                            className="px-2 py-0.5 rounded-md bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-cyan-300 text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 disabled:opacity-50"
+                            title="မူရင်းစကားပြောချိန်အတွင်း ဖတ်နိုင်ရန် AI ဖြင့် စာတိုအောင် ပြင်မည်"
+                          >
+                            {shorteningSegId === seg.id ? (
+                              <RotateCw className="w-2.5 h-2.5 animate-spin" />
+                            ) : (
+                              <Scissors className="w-2.5 h-2.5 text-cyan-400" />
+                            )}
+                            <span>{shorteningSegId === seg.id ? 'ချုံ့နေသည်...' : 'AI စာတိုချုံ့မည်'}</span>
+                          </button>
+                        </div>
+                      </div>
+                      <input
+                        type="text"
+                        value={seg.myanmarTranslation}
+                        onChange={(e) => handleUpdateSegment(seg.id, { myanmarTranslation: e.target.value })}
+                        placeholder="သဘာဝကျသော လူပြောစကား မြန်မာစကားပြော..."
+                        className="w-full px-3 py-1.5 glass-input rounded-lg text-xs font-myanmar text-white focus:ring-1 focus:ring-cyan-400"
+                      />
+                    </div>
+                  );
+                })()}
 
                 {/* Subtitle text & lip-sync note */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[10px]">

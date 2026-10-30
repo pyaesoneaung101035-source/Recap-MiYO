@@ -535,20 +535,36 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
 
             {/* Live On-Video Myanmar Subtitle Overlay (Step 6) - DRAGGABLE */}
             {activeSegment && (
-              <InteractiveSubtitleOverlay
-                text={activeSegment.myanmarTranslation || activeSegment.originalText}
-                settings={project.subtitleSettings}
-                onUpdateOffset={(offsetX, offsetY) => {
-                  setProject((prev) => ({
-                    ...prev,
-                    subtitleSettings: {
-                      ...prev.subtitleSettings,
-                      offsetX,
-                      offsetY,
-                    },
-                  }));
-                }}
-              />
+              <>
+                {/* Lip-Sync Sync Engine HUD Badge */}
+                <div className="absolute top-3 left-3 z-30 pointer-events-none flex items-center gap-2 bg-black/70 backdrop-blur-md px-3 py-1.5 rounded-full border border-cyan-500/30 text-[10px] shadow-lg animate-fade-in">
+                  <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
+                  <span className="font-bold text-white font-mono">
+                    🎙️ {activeSegment.speaker || 'Adult Male (သီဟ)'}
+                  </span>
+                  <span className="text-zinc-400 font-mono">
+                    | {(activeSegment.atempoRate || 1.0).toFixed(2)}x atempo
+                  </span>
+                  <span className="text-cyan-300 font-mono">
+                    | Lip-Sync: Active
+                  </span>
+                </div>
+
+                <InteractiveSubtitleOverlay
+                  text={activeSegment.myanmarTranslation || activeSegment.originalText}
+                  settings={project.subtitleSettings}
+                  onUpdateOffset={(offsetX, offsetY) => {
+                    setProject((prev) => ({
+                      ...prev,
+                      subtitleSettings: {
+                        ...prev.subtitleSettings,
+                        offsetX,
+                        offsetY,
+                      },
+                    }));
+                  }}
+                />
+              </>
             )}
           </div>
         ) : (

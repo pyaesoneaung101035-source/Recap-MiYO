@@ -531,8 +531,8 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
 
         {/* Footer */}
         <div className="px-6 py-3.5 bg-zinc-950 border-t border-zinc-800 flex items-center justify-between">
-          <span className="text-[11px] text-zinc-500">
-            သုံးရန်နေရာ-: Recap, Dubbing, Subtitle, Long to Short, Gemini TTS, Dhamma AI
+          <span className="text-[11px] text-cyan-400 font-myanmar">
+            ✨ Myanmar AI Video Dubbing Studio — တိကျသော ၇ ဆင့် Dubbing Pipeline
           </span>
           <button
             onClick={onClose}

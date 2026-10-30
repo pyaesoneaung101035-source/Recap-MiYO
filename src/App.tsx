@@ -54,7 +54,8 @@ export default function App() {
     voicePlaybackRate: 1.0,
     voiceStyle: 'conversational',
     smartSyncFrameLock: true,
-    volume: 1.0,
+    volume: 0,
+    isMuted: true,
     aspectRatio: '9:16',
     frameCrop: {
       fitMode: 'contain',
@@ -124,15 +125,15 @@ export default function App() {
     {
       number: 4,
       id: 'step4',
-      title: 'အဆင့် 4: AI Transcript',
-      subtitle: project.segments.length > 0 ? `${project.segments.length} segments` : 'Speech-to-Text',
+      title: 'အဆင့် 4: AI Transcript & Diarization',
+      subtitle: project.segments.length > 0 ? `${project.segments.length} segments (5s Budgeted)` : 'Shot ခွဲခြမ်း + 5s စာတိုပြန်ဆိုချက်',
       isComplete: project.segments.length > 0,
     },
     {
       number: 5,
       id: 'step5',
-      title: 'အဆင့် 5: Voice Clone',
-      subtitle: '8 Human Voices & Hugging Face',
+      title: 'အဆင့် 5: Dubbing & 7-Stage Review',
+      subtitle: 'Adult Male Narrator + atempo + LipSync',
       isComplete: project.segments.some((s) => !!s.audioUrl),
     },
     {
@@ -316,6 +317,17 @@ export default function App() {
                     >
                       🎬 Load Sample Cinematic Video
                     </button>
+
+                    {(project.videoFile || project.videoUrl) && (
+                      <button
+                        type="button"
+                        onClick={() => setCurrentStep(4)}
+                        className="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-cyan-400 via-teal-300 to-emerald-400 hover:opacity-95 text-zinc-950 font-black text-xs transition-all flex items-center justify-center gap-2 shadow-xl shadow-cyan-500/25 cursor-pointer active:scale-95"
+                      >
+                        <Sparkles className="w-4 h-4 stroke-[2.5]" />
+                        <span>⚡ 1-Click Auto Dubbing သို့ တိုက်ရိုက်သွားမည်</span>
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>

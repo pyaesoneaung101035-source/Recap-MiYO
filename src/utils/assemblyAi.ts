@@ -1,7 +1,7 @@
 import { loadApiKeys } from './apiKeys';
 import { TranscriptSegment } from '../types';
 import { extractAudioFromVideo } from './audioExtractor';
-import { callGeminiWithRotation } from './geminiPool';
+import { callGeminiWithRotation, countBurmeseSyllables, calculateMaxAllowedSyllables } from './geminiPool';
 
 export interface AssemblyAiUtterance {
   start: number; // in milliseconds
@@ -269,63 +269,116 @@ export async function transcribeVideoWithAssemblyAi(
     });
   }
 
-  // 6. Translate directly to natural Myanmar conversation (NO narrator style)
-  onProgress('🇲🇲 [Direct Myanmar Translation] - သဘာဝကျသော လူပြောစကား မြန်မာစကားပြောအဖြစ် တိုက်ရိုက် ဘာသာပြန်ဆိုနေပါသည် (Narrator ပုံစံမသုံးပါ)...');
+  // 6. Gemini Timeline Re-segmentation & Duration-Budgeted Burmese Translation
+  onProgress('🇲🇲 [Gemini Timeline Engine] - မူရင်း video timeline အတိုင်း အပိုင်းငယ်များခွဲပြီး အချိန်ကိုက် narration script ဖန်တီးနေပါသည်...');
 
   const translationPrompt = `
-You are a professional film dubbing translator. Translate the following transcribed video speech sentences line-by-line directly into natural, conversational Burmese dialogue (မြန်မာစကားပြော).
+You are a senior film dubbing and localization director for Myanmar audience.
+You are given the raw Speech-to-Text utterances with precise timestamps from the video.
 
-CRITICAL DUBBING TRANSLATION INSTRUCTIONS:
-1. TRANSLATE EACH LINE FAITHFULLY according to the spoken meaning in the original video sentence.
-2. DO NOT WRITE IN NARRATOR STYLE (narrator ပုံစံဖြင့် လုံးဝမရေးရ). Use direct spoken dialogue or authentic movie dubbing style.
-3. Keep each Burmese line concise (<12-18 words) so the spoken TTS audio fits the exact video timestamp slot.
-4. Do NOT add extraneous summary facts or commentary. Translate line #1 to line #1, line #2 to line #2.
-5. Return ONLY a valid JSON array matching this exact format:
+CRITICAL INSTRUCTIONS (MUST FOLLOW STRICTLY):
+1. DO NOT COMBINE INTO ONE LONG CONTINUOUS AUDIO FILE.
+2. RESTRUCTURE INTO SMALL, CHRONOLOGICAL VIDEO TIMELINE NARRATION SEGMENTS matching dialogue pauses and scene cuts (each segment 1.5s to 4.5s long).
+3. EXACT TIMESTAMPS: Preserve precise "startTime" and "endTime" (in seconds, e.g. 1.25, 4.80) matching the original speech timeline.
+4. STRICT 5-SECOND DURATION SHORTENING RULE:
+   - မူရင်းလူက ၅ စက္ကန့်ပဲ ပြောထားရင် မြန်မာဘာသာပြန်ကိုလည်း ၅ စက္ကန့်အတွင်း ဖတ်လို့ရအောင် တိုတောင်းစွာရေးပါ။
+   - မြန်မာလို ပြန်ရေးတဲ့အခါ တရုတ်/အင်္ဂလိပ်စာထက် အသံထွက်အချိန် ပိုရှည်နိုင်သဖြင့် စကားလုံးနည်းနည်းလျှော့ရေးပါ။
+   - Narration အပိုင်းတစ်ခု၏ အသံကြာချိန်က သတ်မှတ်ထားသော video segment ထက် ရှည်လျှင် အဓိပ္ပါယ်မပျက်အောင် ဘာသာပြန်စာကို တိုအောင် ပြင်ပါ။
+   - A segment lasting X seconds can only hold around Math.floor(X * 3.8) Burmese syllables. Keep it concise, punchy, and conversational.
+5. ALL LINES VOICED BY A SINGLE ADULT MALE NARRATOR (Voice: "Thiha").
+6. Clean Burmese subtitles: max 2 lines, under 35 Burmese characters per line, NO Chinese or foreign characters.
+7. Return ONLY a valid JSON array matching this exact format:
 [
-  { "id": 1, "translation": "မြန်မာစကားပြောစာသား" }
+  {
+    "id": 1,
+    "startTime": 0.0,
+    "endTime": 3.2,
+    "originalText": "exact dialogue from video",
+    "myanmarTranslation": "တိုတောင်း၍ လိုရင်းရောက်သော မြန်မာစကားပြော",
+    "subtitleText": "မြန်မာစာတန်းထိုး",
+    "speaker": "Speaker 1 (Adult Male)",
+    "emotion": "Conversational"
+  }
 ]
+(JSON ONLY, NO MARKDOWN)
 
-SPOKEN LINES FROM CUSTOM VIDEO TO TRANSLATE:
-${JSON.stringify(items.map((it, idx) => ({ id: idx + 1, original_spoken_text: it.text })), null, 2)}
+RAW SPOKEN UTTERANCES TO RESTRUCTURE & TRANSLATE:
+${JSON.stringify(items.map((it, idx) => ({ id: idx + 1, start: it.start, end: it.end, text: it.text })), null, 2)}
 `;
 
-  let translationsMap: Record<number, string> = {};
+  let processedSegments: TranscriptSegment[] = [];
 
   try {
-    onProgress('✨ [Gemini AI Engine] - Google Gemini ဖြင့် သဘာဝကျသော မြန်မာစကားပြောအဖြစ် တိုက်ရိုက် ဘာသာပြန်နေပါသည်...');
+    onProgress('✨ [Gemini AI Engine] - စကားစချိန်/စကားဆုံးချိန်များနှင့် ကိုက်ညီသော စာတိုပြန်ဆိုချက်များကို Gemini မှ တည်ဆောက်နေပါသည်...');
     const { text: geminiRes } = await callGeminiWithRotation(
       translationPrompt,
-      'You are an expert bilingual subtitle translator. Translate English speech directly into authentic, conversational Burmese dialogue. Never use narrator framing.'
+      'You are a professional Myanmar film dubbing localization director. Output pure valid JSON.'
     );
-    const cleanJson = geminiRes.replace(/```json/gi, '').replace(/```/g, '').trim();
+    const jsonMatch = geminiRes.match(/\[[\s\S]*\]/);
+    const cleanJson = jsonMatch ? jsonMatch[0] : geminiRes.replace(/```json/gi, '').replace(/```/g, '').trim();
     const parsed = JSON.parse(cleanJson);
-    if (Array.isArray(parsed)) {
-      parsed.forEach((p: any) => {
-        if (p.id && (p.translation || p.text)) {
-          translationsMap[p.id] = p.translation || p.text;
-        }
+
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      processedSegments = parsed.map((item: any, idx: number) => {
+        const startSec = Math.max(0, parseFloat(item.startTime ?? item.start ?? 0));
+        const endSec = Math.max(startSec + 0.5, parseFloat(item.endTime ?? item.end ?? (startSec + 3)));
+        const dur = parseFloat((endSec - startSec).toFixed(2));
+        const burmeseText = (item.myanmarTranslation || item.translation || item.text || '').trim();
+        const sylCount = countBurmeseSyllables(burmeseText);
+        const maxSyl = calculateMaxAllowedSyllables(dur);
+
+        return {
+          id: `assembly_seg_${idx + 1}_${Date.now()}`,
+          startTime: startSec,
+          endTime: endSec,
+          duration: dur,
+          originalText: item.originalText || item.text || '',
+          myanmarTranslation: burmeseText,
+          subtitleText: (item.subtitleText || burmeseText).replace(/[\u4e00-\u9fa5]/g, '').trim(),
+          speaker: item.speaker || `Speaker ${((idx % 3) + 1)} (Adult Male)`,
+          emotion: item.emotion || 'Conversational',
+          voice: 'Thiha', // Single Adult Male Narrator
+          syllableCount: sylCount,
+          maxAllowedSyllables: maxSyl,
+          atempoRate: 1.0,
+          pauseLead: 0.1,
+          pauseTrail: 0.15,
+          sceneShotId: `shot_${Math.floor(idx / 2) + 1}`,
+          isHumanReviewed: false,
+        };
       });
     }
   } catch (geminiErr: any) {
-    console.warn('Gemini translation notice:', geminiErr);
-    if (onProgress) {
-      onProgress('💡 [AssemblyAI Whisper Completed] - Subtitle Segments များကို တိကျသော Timestamp များဖြင့် ထုတ်ယူပေးထားပါသည်။ (Gemini Key ထည့်သွင်းပါက မြန်မာစကားပြော ပိုမိုပြည့်စုံစွာ ပြန်ဆိုပေးပါမည်)');
-    }
+    console.warn('Gemini timeline refinement notice, fallback to item mapping:', geminiErr);
   }
 
-  // 7. Assemble segments
-  const segments: TranscriptSegment[] = items.map((it, idx) => {
-    const burmeseText = translationsMap[idx + 1] || it.text;
-    return {
-      id: `assembly_${idx + 1}_${Date.now()}`,
-      startTime: parseFloat(it.start.toFixed(2)),
-      endTime: parseFloat(it.end.toFixed(2)),
-      originalText: it.text,
-      myanmarTranslation: burmeseText,
-      voice: idx % 2 === 0 ? 'Thiha' : 'Nilar',
-    };
-  });
+  // Fallback if Gemini parse failed: map items directly with syllable constraints
+  if (processedSegments.length === 0) {
+    processedSegments = items.map((it, idx) => {
+      const dur = parseFloat((it.end - it.start).toFixed(2));
+      const sylCount = countBurmeseSyllables(it.text);
+      const maxSyl = calculateMaxAllowedSyllables(dur);
+      return {
+        id: `assembly_${idx + 1}_${Date.now()}`,
+        startTime: parseFloat(it.start.toFixed(2)),
+        endTime: parseFloat(it.end.toFixed(2)),
+        duration: dur,
+        originalText: it.text,
+        myanmarTranslation: it.text,
+        subtitleText: it.text,
+        speaker: `Speaker ${((idx % 3) + 1)} (Adult Male)`,
+        voice: 'Thiha',
+        syllableCount: sylCount,
+        maxAllowedSyllables: maxSyl,
+        atempoRate: 1.0,
+        pauseLead: 0.1,
+        pauseTrail: 0.15,
+        sceneShotId: `shot_${Math.floor(idx / 2) + 1}`,
+        isHumanReviewed: false,
+      };
+    });
+  }
 
-  onProgress(`✅ [ပြီးစီးပါပြီ] - AssemblyAI Whisper ဖြင့် တိကျသော Subtitle Segment စုစုပေါင်း ${segments.length} ခုကို တိုက်ရိုက် ဘာသာပြန်ပြီးပါပြီ!`);
-  return segments;
+  onProgress(`✅ [ပြီးစီးပါပြီ] - Timeline အတိုင်း အပိုင်းငယ် ${processedSegments.length} ခု ခွဲထုတ်ပြီး သဘာဝကျသော စာတိုပြန်ဆိုချက် ပြင်ဆင်ပြီးပါပြီ!`);
+  return processedSegments;
 }

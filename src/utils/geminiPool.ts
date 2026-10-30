@@ -657,6 +657,21 @@ export function formatSecondsToSRT(totalSec: number): string {
   return `${pad(hours)}:${pad(minutes)}:${pad(seconds)},${pad(ms, 3)}`;
 }
 
+export function countBurmeseSyllables(text: string): number {
+  if (!text) return 0;
+  // Match consonants not immediately followed by asat (် = \u103A)
+  const rootConsonants = text.match(/[က-အ](?![\u103A])/g);
+  const indepVowels = text.match(/[ဣဤဥဦဧဩဪ]/g);
+  const count = (rootConsonants?.length || 0) + (indepVowels?.length || 0);
+  return Math.max(1, count);
+}
+
+export function calculateMaxAllowedSyllables(durationSeconds: number): number {
+  // Conversational Burmese natural cadence is ~3.6 to 4.0 syllables per second.
+  // A 5-second slot holds ~18 to 20 syllables max.
+  return Math.max(4, Math.floor(Math.max(0.5, durationSeconds) * 3.8));
+}
+
 /**
  * Generate transcript & subtitles with timestamps from the custom uploaded video.
  * GUARANTEES ALL PARTS (Part 1, Part 2, Part 3, Part 4, Part 5...) ARE TRANSCRIBED & TRANSLATED 100%.
@@ -671,18 +686,23 @@ export async function generateTimestampedTranscript(
   model = 'gemini-3.5-flash'
 ): Promise<TranscriptSegment[]> {
   const allSegments: TranscriptSegment[] = [];
-  const isDubbingMode = true; // Default to true as it is the primary use case
+  const isDubbingMode = true; // Strict Myanmar Dubbing Pipeline
 
-  // Strict instruction preventing hallucinated recap stories
-  const strictSystemInstruction = `You are a strict, faithful Chinese-to-Burmese video dialogue transcriber and dubbing translator.
-CRITICAL RULES FOR DUBBING:
-1. YOU MUST ONLY TRANSCRIBE THE ACTUAL SPOKEN DIALOGUE FROM THE ATTACHED VIDEO AUDIO FILE.
-2. DO NOT MAKE UP OR HALLUCINATE RECAP STORIES, MOVIE PLOT SUMMARIES, OR FICTIONAL COMMENTARY.
-3. DO NOT USE NARRATOR FRAMEWORK. Use direct, authentic Burmese spoken dialogue.
-4. STRICT TIMING: The Burmese translation MUST fit perfectly within the original audio's start and end timestamps. 
-5. CONCISENESS: Burmese spoken audio often takes longer than the original (e.g., Chinese). You MUST reduce the Burmese translation to be very concise and concise to ensure it can be spoken within the exact duration of the original dialogue (e.g., 5s of original audio = max 5s of Burmese speech).
-6. VOICE: Default to "Thiha" (Adult Male voice) for all segments. (ယောက်ျားအသံ Thiha ကိုသာ အဓိကထား အသုံးပြုပါ)
-7. TIMESTAMP: Ensure the provided start and end times in the JSON match the segment start and end points in the video exactly. (စကားစတဲ့အချိန်နှင့် စကားဆုံးတဲ့အချိန်နှစ်ခုစလုံးကို တိကျစွာ သတ်မှတ်ပေးပါ)`;
+  // Strict instruction preventing hallucinated recap stories & enforcing 7-step workflow rules
+  const strictSystemInstruction = `You are a professional video dubbing and dialogue localization engineer for Myanmar language.
+CRITICAL 7-STAGE DUBBING WORKFLOW RULES:
+1. SCENE/SHOT SEGMENTATION: Segment dialogue strictly aligned with camera shots and dialogue pauses in the video.
+2. SPEAKER DIARIZATION (Gemini API): Break down spoken lines per individual speaker (e.g. Speaker 1 Adult Male, Speaker 2 Female, etc.) so dialogue timing and speaker turn-taking are explicitly captured.
+3. STRICT 5-SECOND DURATION BREVITY RULE:
+   - မူရင်းလူက ၅ စက္ကန့်ပဲ ပြောထားရင် မြန်မာဘာသာပြန်ကိုလည်း ၅ စက္ကန့်အတွင်း ဖတ်လို့ရအောင် တိုတောင်းစွာရေးပါ။
+   - မြန်မာလို ပြန်ရေးတဲ့အခါ တရုတ်စာထက် အသံထွက်အချိန် ပိုရှည်နိုင်သဖြင့် စကားလုံးနည်းနည်းလျှော့ရေးပါ။
+   - A 5-second dialogue window can comfortably fit only 18 to 20 Burmese syllables! Omit filler particles, shorten phrasing, and ensure the Burmese narration fits within the exact duration.
+4. EXACT START AND END TIMESTAMPS:
+   - Timestamp ကို စကားစတဲ့အချိန် (startTime) မှာသာမက စကားဆုံးတဲ့အချိန် (endTime) မှာပါ တိကျစွာ သတ်မှတ်ပါ။
+5. SINGLE MALE NARRATOR DUBBING:
+   - အနီးစပ်ဆုံး ယောက်ျားအသံ (Thiha / Adult Male Narrator) ဖြင့်သာ ဖတ်ပြမည်။
+6. SUBTITLES: Clean Burmese subtitles: max 2 lines, under 35 Burmese characters per line, NO Chinese characters.
+7. NO RECAP HALLUCINATIONS: Transcribe strictly the spoken dialogue from the video; do not invent fictional stories.`;
 
   if (videoFile || videoUrl) {
     try {
@@ -778,6 +798,9 @@ Return ONLY a valid JSON array matching this exact format:
             const endSec = parseTimestampToSeconds(rawEnd);
             const dur = item.duration || item.target_duration_seconds || parseFloat(Math.max(0.5, endSec - startSec).toFixed(2));
 
+            const sylCount = countBurmeseSyllables(myanmarText);
+            const maxSyl = calculateMaxAllowedSyllables(dur);
+
             allSegments.push({
               id: `seg_${item.id || idx + 1}_${Date.now()}`,
               startTime: parseFloat(startSec.toFixed(2)),
@@ -786,11 +809,18 @@ Return ONLY a valid JSON array matching this exact format:
               originalText: origText,
               myanmarTranslation: myanmarText,
               subtitleText: subText.replace(/[\u4e00-\u9fa5]/g, '').trim(),
-              speaker: item.speaker || item.speaker_identity || `Speaker 1 (Adult Male)`,
+              speaker: item.speaker || item.speaker_identity || `Speaker ${((idx % 3) + 1)} (Adult Male)`,
               emotion: item.emotion || item.speaking_emotion_and_delivery || 'Natural conversational',
               isOnScreen: item.isOnScreen !== undefined ? Boolean(item.isOnScreen) : (item.is_speaker_on_screen !== undefined ? Boolean(item.is_speaker_on_screen) : true),
-              lipSyncNote: item.lipSyncNote || item.lip_sync_note || 'Paced to match original dialogue pauses',
-              voice: isDubbingMode ? 'Thiha' : (idx % 2 === 0 ? 'Thiha' : 'Nilar'),
+              lipSyncNote: item.lipSyncNote || item.lip_sync_note || 'Paced to match original dialogue duration',
+              voice: 'Thiha', // Strictly adult male narrator (သီဟ)
+              syllableCount: sylCount,
+              maxAllowedSyllables: maxSyl,
+              atempoRate: 1.0,
+              pauseLead: 0.1,
+              pauseTrail: 0.15,
+              sceneShotId: `shot_${Math.floor(idx / 2) + 1}`,
+              isHumanReviewed: false,
             });
           });
 
@@ -889,6 +919,9 @@ Return ONLY a valid JSON array:
                   const adjustedEndSec = unadjustedEndSec + offsetSec;
                   const dur = item.duration || item.target_duration_seconds || parseFloat(Math.max(0.5, adjustedEndSec - adjustedStartSec).toFixed(2));
 
+                  const sylCount = countBurmeseSyllables(myanmarText);
+                  const maxSyl = calculateMaxAllowedSyllables(dur);
+
                   allSegments.push({
                     id: `p${partNum}_${item.id || idx + 1}_${Date.now()}`,
                     startTime: parseFloat(adjustedStartSec.toFixed(2)),
@@ -897,11 +930,18 @@ Return ONLY a valid JSON array:
                     originalText: origText,
                     myanmarTranslation: myanmarText,
                     subtitleText: subText.replace(/[\u4e00-\u9fa5]/g, '').trim(),
-                    speaker: item.speaker || item.speaker_identity || `Speaker 1 (Adult Male)`,
+                    speaker: item.speaker || item.speaker_identity || `Speaker ${((idx % 3) + 1)} (Adult Male)`,
                     emotion: item.emotion || item.speaking_emotion_and_delivery || 'Natural conversational',
                     isOnScreen: item.isOnScreen !== undefined ? Boolean(item.isOnScreen) : (item.is_speaker_on_screen !== undefined ? Boolean(item.is_speaker_on_screen) : true),
-                    lipSyncNote: item.lipSyncNote || item.lip_sync_note || 'Paced to match original dialogue pauses',
-                    voice: isDubbingMode ? 'Thiha' : ((allSegments.length + idx) % 2 === 0 ? 'Thiha' : 'Nilar'),
+                    lipSyncNote: item.lipSyncNote || item.lip_sync_note || 'Paced to match original dialogue duration',
+                    voice: 'Thiha', // Strictly adult male narrator (သီဟ)
+                    syllableCount: sylCount,
+                    maxAllowedSyllables: maxSyl,
+                    atempoRate: 1.0,
+                    pauseLead: 0.1,
+                    pauseTrail: 0.15,
+                    sceneShotId: `shot_p${partNum}_${Math.floor(idx / 2) + 1}`,
+                    isHumanReviewed: false,
                   });
                 });
                 chunkSuccess = true;
@@ -1028,3 +1068,43 @@ export function generateBurmeseDubbingSRT(segments: TranscriptSegment[]): string
     .join('\n');
 }
 
+/**
+ * Shorten Burmese translation text using Gemini AI so that it strictly fits within the target seconds.
+ * Preserves the core meaning, emotions, and natural Burmese conversational tone without fluff.
+ */
+export async function shortenBurmeseTextForDuration(
+  text: string,
+  targetDurationSeconds: number,
+  originalText = ''
+): Promise<string> {
+  if (!text || !text.trim()) return text;
+  const safeDur = Math.max(1.0, targetDurationSeconds);
+  const maxSyllables = Math.max(4, Math.floor(safeDur * 3.5));
+
+  const prompt = `
+You are an expert film dubbing director for Burmese voice-over.
+TASK: Condense and shorten this Burmese spoken dialogue so that it can be naturally and clearly spoken within ${safeDur.toFixed(1)} seconds.
+Burmese syllables take longer to pronounce than Chinese/English syllables.
+
+Current Burmese text: "${text}"
+${originalText ? `Original context/dialogue: "${originalText}"` : ''}
+
+CRITICAL RULES:
+1. Make the Burmese text concise enough to be spoken within ${safeDur.toFixed(1)} seconds (aim for maximum ~${maxSyllables} syllables or words).
+2. Retain essential meaning, punchiness, and natural spoken Burmese (မြန်မာစကားပြော).
+3. Do NOT invent new facts or characters. Soften harsh/vulgar words into natural expressive speech.
+4. Return ONLY the shortened Burmese text. No quotes, no markdown, no notes, no explanations.
+`;
+
+  try {
+    const { text: res } = await callGeminiWithRotation(
+      prompt,
+      'You are a professional film dubbing dialogue editor. Condense the Burmese text concisely so it fits within the specified time limit. Output Burmese text only.'
+    );
+    const cleaned = res.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').replace(/^["'“”‘’]+|["'“”‘’]+$/g, '').trim();
+    return cleaned || text;
+  } catch (e) {
+    console.warn('Failed to shorten text with AI:', e);
+    return text;
+  }
+}

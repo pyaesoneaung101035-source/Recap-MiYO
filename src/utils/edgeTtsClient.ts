@@ -790,3 +790,68 @@ function writeString(view: DataView, offset: number, string: string): void {
     view.setUint8(offset + i, string.charCodeAt(i));
   }
 }
+
+/**
+ * 1-Click Auto Narrator Voice Generation:
+ * Automatically synthesizes Adult Male Narrator voice ("Thiha") for all segments,
+ * and calculates pitch-preserving atempo rate so each segment matches the video timeline.
+ */
+export async function autoGenerateAllNarratorVoices(
+  segments: import('../types').TranscriptSegment[],
+  onProgress?: (message: string, current: number, total: number) => void,
+  defaultVoice: VoiceOption = 'Thiha'
+): Promise<import('../types').TranscriptSegment[]> {
+  if (!segments || segments.length === 0) return [];
+  const updated: import('../types').TranscriptSegment[] = [];
+  const total = segments.length;
+
+  for (let i = 0; i < total; i++) {
+    const seg = segments[i];
+    const textToSpeak = (seg.myanmarTranslation || seg.originalText || '').trim();
+
+    if (!textToSpeak) {
+      updated.push(seg);
+      continue;
+    }
+
+    if (onProgress) {
+      onProgress(
+        `🔊 [One-Click Narrator TTS] (${i + 1}/${total}) — ယောက်ျားအသံ (သီဟ) ထုတ်လုပ်နေပါသည်: "${textToSpeak.substring(0, 18)}..."`,
+        i + 1,
+        total
+      );
+    }
+
+    try {
+      const activeVoice = seg.voice || defaultVoice || 'Thiha';
+      const slotDur = Math.max(0.5, seg.endTime - seg.startTime);
+
+      // Synthesize audio
+      const result = await synthesizeMyanmarVoice(textToSpeak, {
+        voice: activeVoice,
+        style: 'conversational',
+      });
+
+      const audioDur = result.duration;
+      // Calculate atempo rate to fit slot duration
+      let atempo = 1.0;
+      if (audioDur > slotDur) {
+        atempo = parseFloat(Math.min(1.35, Math.max(1.0, audioDur / slotDur)).toFixed(2));
+      }
+
+      updated.push({
+        ...seg,
+        audioUrl: result.audioUrl,
+        audioDuration: audioDur,
+        atempoRate: atempo,
+        playbackRate: atempo,
+        voice: activeVoice,
+      });
+    } catch (err) {
+      console.warn(`Voice synthesis notice for segment #${i + 1}:`, err);
+      updated.push(seg);
+    }
+  }
+
+  return updated;
+}

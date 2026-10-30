@@ -19,6 +19,8 @@ export interface FalConfig {
   selectedModel: 'fal-ai/flux/schnell' | 'fal-ai/fast-sdxl';
 }
 
+export type AiMode = 'Dubbing' | 'Recap' | 'Subtitle' | 'Long to Short' | 'Gemini TTS' | 'Dhamma AI' | 'Dhamma AI background';
+
 export type VoiceOption =
   | 'Thiha'
   | 'KyawKyaw'
@@ -71,6 +73,14 @@ export interface TranscriptSegment {
   voiceProvider?: 'gemini' | 'huggingface' | 'cloudtts_gemini';
   hfModel?: string;
   hfSpeaker?: string;
+  syllableCount?: number; // Burmese syllable count
+  maxAllowedSyllables?: number; // Strict 5-second syllable budget
+  atempoRate?: number; // Pitch-preserving audio speed factor (e.g. 1.0 - 1.25)
+  isHumanReviewed?: boolean; // Verified by human reviewer
+  pauseLead?: number; // Pre-speech breathing pause in seconds (default 0.1s)
+  pauseTrail?: number; // Post-speech reaction pause in seconds
+  sceneShotId?: string; // Visual shot / scene cut reference
+  visemeData?: { time: number; mouthOpening: number }[]; // Lip-sync viseme frames
 }
 
 export interface AlightKeyframe {
