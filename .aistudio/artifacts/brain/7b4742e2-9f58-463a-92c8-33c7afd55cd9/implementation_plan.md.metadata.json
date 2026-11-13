@@ -1,6 +1,0 @@
-{
-  "summary":  "Complete implementation and verification of Burmese voice-over video dubbing with exact timeline alignment, single male narrator (Thiha), 100% muted original audio (zero leakage), lead silence, click-free audio envelope scheduling, per-segment duration match with AI text shortening and auto-fit retime, and clean MP4 export.",
-  "updatedAt":  "2026-10-30T13:46:57.682110140Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

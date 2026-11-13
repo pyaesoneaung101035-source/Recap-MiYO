@@ -2,6 +2,7 @@ import { loadApiKeys } from './apiKeys';
 import { TranscriptSegment } from '../types';
 import { extractAudioFromVideo } from './audioExtractor';
 import { callGeminiWithRotation, countBurmeseSyllables, calculateMaxAllowedSyllables } from './geminiPool';
+import { MINUTE_BLOCK_SECONDS, realignSegmentsByMinuteBlocks } from './timingSync';
 
 export interface AssemblyAiUtterance {
   start: number; // in milliseconds
@@ -273,46 +274,51 @@ export async function transcribeVideoWithAssemblyAi(
   onProgress('🇲🇲 [Gemini Timeline Engine] - မူရင်း video timeline အတိုင်း အပိုင်းငယ်များခွဲပြီး အချိန်ကိုက် narration script ဖန်တီးနေပါသည်...');
 
   const translationPrompt = `
-You are a senior film dubbing and localization director for Myanmar audience.
+You are a senior Burmese movie-recap storyteller & voice-acting director (နမူနာ TikTok/YouTube Recap ဇာတ်ကြောင်းပြောသူ).
 You are given the raw Speech-to-Text utterances with precise timestamps from the video.
 
 CRITICAL INSTRUCTIONS (MUST FOLLOW STRICTLY):
-1. DO NOT COMBINE INTO ONE LONG CONTINUOUS AUDIO FILE.
-2. RESTRUCTURE INTO SMALL, CHRONOLOGICAL VIDEO TIMELINE NARRATION SEGMENTS matching dialogue pauses and scene cuts (each segment 1.5s to 4.5s long).
-3. EXACT TIMESTAMPS: Preserve precise "startTime" and "endTime" (in seconds, e.g. 1.25, 4.80) matching the original speech timeline.
-4. STRICT 5-SECOND DURATION SHORTENING RULE:
-   - မူရင်းလူက ၅ စက္ကန့်ပဲ ပြောထားရင် မြန်မာဘာသာပြန်ကိုလည်း ၅ စက္ကန့်အတွင်း ဖတ်လို့ရအောင် တိုတောင်းစွာရေးပါ။
-   - မြန်မာလို ပြန်ရေးတဲ့အခါ တရုတ်/အင်္ဂလိပ်စာထက် အသံထွက်အချိန် ပိုရှည်နိုင်သဖြင့် စကားလုံးနည်းနည်းလျှော့ရေးပါ။
-   - Narration အပိုင်းတစ်ခု၏ အသံကြာချိန်က သတ်မှတ်ထားသော video segment ထက် ရှည်လျှင် အဓိပ္ပါယ်မပျက်အောင် ဘာသာပြန်စာကို တိုအောင် ပြင်ပါ။
-   - A segment lasting X seconds can only hold around Math.floor(X * 3.8) Burmese syllables. Keep it concise, punchy, and conversational.
-5. ALL LINES VOICED BY A SINGLE ADULT MALE NARRATOR (Voice: "Thiha").
-6. Clean Burmese subtitles: max 2 lines, under 35 Burmese characters per line, NO Chinese or foreign characters.
+1. SEQUENTIAL CHRONOLOGICAL TRANSLATION & SCENE ALIGNMENT: Follow the exact sequence of spoken lines and events at their real timestamps. Do NOT skip dialogue or invent unseen facts.
+2. BAN REPETITIVE "တယ် / ပါတယ်" ENDINGS (တယ်တယ် များမနေစေရ):
+   - NEVER end every line with textbook "...ပါတယ်။", "...နေပါတယ်။", "...ဖြစ်ပါတယ်။", "...သွားပါတယ်။".
+   - Write natural spoken Burmese storytelling mixing varied crisp endings like the sample video:
+     "...ပေါ်လာတော့ သူ အံ့ဩသွားတယ်!", "...ဒီခွက်နဲ့ ဝင်ပြိုင်နိုင်ပြီ။", "...သေချာပေါက် ဝင်ပြိုင်မယ်။", "...အလွတ်မပေးဘူး။", "...ငါ့နောက်လိုက်နေတဲ့သူပဲ။", "...တစ်ကီလို ရွှေတုံး ရှိလား?", "...သန်းနဲ့ချီ တန်မယ်နော်!", "...အောင်မြင်နေပြီပဲ။"
+   - Avoid "ပါတယ်" in narration (only use it if quoting a polite reply like "ရှိပါတယ်။ ခဏစောင့်ပါ။").
+3. EXPRESSIVE VOCAL EMOTION TAGS & PUNCTUATION:
+   - Put "!" on surprising/shocking/threatening lines and "?" on questions so Voice Clone varies vocal pitch naturally!
+   - Set specific "emotion" tag per segment: "surprised, amazed" | "curious, questioning" | "mocking, smug" | "determined, fierce" | "urgent, tense" | "sad, heartfelt" | "calm storytelling".
+4. EXACT TIMESTAMPS & CONCISE BREVITY: Preserve "startTime" and "endTime" (in seconds) and keep Burmese concise (~Math.floor(duration * 3.5) syllables).
+5. SINGLE ADULT MALE NARRATOR (speaker: "Narrator (ဇာတ်ကြောင်းပြောသူ)", voice: "Thiha").
+6. Clean Burmese subtitles: max 2 lines, <=35 Burmese characters per line, NO Chinese or foreign characters.
 7. Return ONLY a valid JSON array matching this exact format:
 [
   {
     "id": 1,
     "startTime": 0.0,
-    "endTime": 3.2,
+    "endTime": 4.2,
     "originalText": "exact dialogue from video",
-    "myanmarTranslation": "တိုတောင်း၍ လိုရင်းရောက်သော မြန်မာစကားပြော",
-    "subtitleText": "မြန်မာစာတန်းထိုး",
-    "speaker": "Speaker 1 (Adult Male)",
-    "emotion": "Conversational"
+    "myanmarTranslation": "ရေဘူးတွေ အများကြီး ပေါ်လာတော့ သူ အံ့ဩသွားတယ်!",
+    "subtitleText": "ရေဘူးတွေ အများကြီး ပေါ်လာတော့\nသူ အံ့ဩသွားတယ်!",
+    "speaker": "Narrator (ဇာတ်ကြောင်းပြောသူ)",
+    "emotion": "surprised, amazed"
   }
 ]
 (JSON ONLY, NO MARKDOWN)
 
-RAW SPOKEN UTTERANCES TO RESTRUCTURE & TRANSLATE:
+RAW SPOKEN UTTERANCES TO TRANSLATE & RETELL SEQUENTIALLY:
 ${JSON.stringify(items.map((it, idx) => ({ id: idx + 1, start: it.start, end: it.end, text: it.text })), null, 2)}
 `;
 
   let processedSegments: TranscriptSegment[] = [];
 
   try {
-    onProgress('✨ [Gemini AI Engine] - စကားစချိန်/စကားဆုံးချိန်များနှင့် ကိုက်ညီသော စာတိုပြန်ဆိုချက်များကို Gemini မှ တည်ဆောက်နေပါသည်...');
+    onProgress('✨ [Gemini AI Engine] - အချိန်မှတ်တမ်းအလိုက် ဇာတ်ကြောင်းပြော စာသားများကို Gemini မှ တည်ဆောက်နေပါသည်...');
     const { text: geminiRes } = await callGeminiWithRotation(
       translationPrompt,
-      'You are a professional Myanmar film dubbing localization director. Output pure valid JSON.'
+      'You are a professional Myanmar single-narrator storyteller. Output pure valid JSON.',
+      'gemini-3.1-flash-lite',
+      undefined,
+      { responseMimeType: 'application/json' }
     );
     const jsonMatch = geminiRes.match(/\[[\s\S]*\]/);
     const cleanJson = jsonMatch ? jsonMatch[0] : geminiRes.replace(/```json/gi, '').replace(/```/g, '').trim();
@@ -335,15 +341,17 @@ ${JSON.stringify(items.map((it, idx) => ({ id: idx + 1, start: it.start, end: it
           originalText: item.originalText || item.text || '',
           myanmarTranslation: burmeseText,
           subtitleText: (item.subtitleText || burmeseText).replace(/[\u4e00-\u9fa5]/g, '').trim(),
-          speaker: item.speaker || `Speaker ${((idx % 3) + 1)} (Adult Male)`,
-          emotion: item.emotion || 'Conversational',
+          speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
+          emotion: item.emotion || 'Storytelling narrator',
           voice: 'Thiha', // Single Adult Male Narrator
           syllableCount: sylCount,
           maxAllowedSyllables: maxSyl,
           atempoRate: 1.0,
+          playbackRate: 1.0,
           pauseLead: 0.1,
           pauseTrail: 0.15,
-          sceneShotId: `shot_${Math.floor(idx / 2) + 1}`,
+          sceneShotId: `shot_${idx + 1}`,
+          minutePartIndex: Math.floor(startSec / MINUTE_BLOCK_SECONDS) + 1,
           isHumanReviewed: false,
         };
       });
@@ -352,7 +360,7 @@ ${JSON.stringify(items.map((it, idx) => ({ id: idx + 1, start: it.start, end: it
     console.warn('Gemini timeline refinement notice, fallback to item mapping:', geminiErr);
   }
 
-  // Fallback if Gemini parse failed: map items directly with syllable constraints
+  // Fallback if Gemini parse failed: map items directly with single narrator label
   if (processedSegments.length === 0) {
     processedSegments = items.map((it, idx) => {
       const dur = parseFloat((it.end - it.start).toFixed(2));
@@ -366,19 +374,27 @@ ${JSON.stringify(items.map((it, idx) => ({ id: idx + 1, start: it.start, end: it
         originalText: it.text,
         myanmarTranslation: it.text,
         subtitleText: it.text,
-        speaker: `Speaker ${((idx % 3) + 1)} (Adult Male)`,
+        speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
         voice: 'Thiha',
         syllableCount: sylCount,
         maxAllowedSyllables: maxSyl,
         atempoRate: 1.0,
+        playbackRate: 1.0,
         pauseLead: 0.1,
         pauseTrail: 0.15,
-        sceneShotId: `shot_${Math.floor(idx / 2) + 1}`,
+        sceneShotId: `shot_${idx + 1}`,
+        minutePartIndex: Math.floor(it.start / MINUTE_BLOCK_SECONDS) + 1,
         isHumanReviewed: false,
       };
     });
   }
 
-  onProgress(`✅ [ပြီးစီးပါပြီ] - Timeline အတိုင်း အပိုင်းငယ် ${processedSegments.length} ခု ခွဲထုတ်ပြီး သဘာဝကျသော စာတိုပြန်ဆိုချက် ပြင်ဆင်ပြီးပါပြီ!`);
-  return processedSegments;
+  const maxDur = processedSegments.reduce((m, s) => Math.max(m, s.endTime), 60);
+  const aligned = realignSegmentsByMinuteBlocks(processedSegments, maxDur, {
+    enforceSingleVoice: 'Thiha',
+    enforceSingleSpeakerLabel: true,
+  });
+
+  onProgress(`✅ [ပြီးစီးပါပြီ] - 1-Minute Block Timeline အတိုင်း Narrator စာသား ${aligned.length} ခု ပြင်ဆင်ပြီးပါပြီ!`);
+  return aligned;
 }

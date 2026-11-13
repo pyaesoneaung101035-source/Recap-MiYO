@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Sparkles,
   CheckCircle2,
@@ -23,6 +23,8 @@ import {
 import { ProjectState, TranscriptSegment, VoiceOption } from '../types';
 import { countBurmeseSyllables, calculateMaxAllowedSyllables, shortenBurmeseTextForDuration } from '../utils/geminiPool';
 import { synthesizeMyanmarVoice, VOICE_PROFILES } from '../utils/edgeTtsClient';
+import { synthesizeElevenLabsVoice } from '../utils/elevenLabsHumeClient';
+import { synthesizeHuggingFaceVoice } from '../utils/huggingFaceClient';
 
 interface HumanReviewDubbingStudioProps {
   project: ProjectState;
@@ -40,6 +42,7 @@ export const HumanReviewDubbingStudio: React.FC<HumanReviewDubbingStudioProps> =
   const [isShortening, setIsShortening] = useState<boolean>(false);
   const [isSynthesizing, setIsSynthesizing] = useState<boolean>(false);
   const [audioPlayer, setAudioPlayer] = useState<HTMLAudioElement | null>(null);
+  const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
   const [visemeState, setVisemeState] = useState<'rest' | 'open' | 'half' | 'round' | 'wide'>('rest');
 
   const segments = project.segments || [];
@@ -51,19 +54,20 @@ export const HumanReviewDubbingStudio: React.FC<HumanReviewDubbingStudioProps> =
   const maxSyllables = currentSeg?.maxAllowedSyllables || calculateMaxAllowedSyllables(slotDuration);
   const isOverBudget = currentSyllables > maxSyllables;
 
-  // Auto-calculated atempo rate
+  // Gentle auto-calculated atempo rate (max 1.15x so voice cadence stays natural)
   const calculatedAtempo = currentSeg?.audioDuration
-    ? parseFloat(Math.min(1.35, Math.max(0.85, currentSeg.audioDuration / slotDuration)).toFixed(2))
+    ? parseFloat(Math.min(1.15, Math.max(0.9, currentSeg.audioDuration / slotDuration)).toFixed(2))
     : (currentSeg?.atempoRate || 1.0);
 
-  // Stop audio on unmount or segment change
+  // Stop audio on unmount
   useEffect(() => {
     return () => {
-      if (audioPlayer) {
-        audioPlayer.pause();
+      if (audioPlayerRef.current) {
+        audioPlayerRef.current.pause();
+        audioPlayerRef.current = null;
       }
     };
-  }, [audioPlayer]);
+  }, []);
 
   // Viseme mouth movement simulation during audio playback
   useEffect(() => {
@@ -133,20 +137,36 @@ export const HumanReviewDubbingStudio: React.FC<HumanReviewDubbingStudioProps> =
     }
   };
 
-  // Generate / Regenerate Single Male Narrator Audio
+  // Generate / Regenerate Single Narrator Audio (supports Gemini, ElevenLabs, Hume AI, Hugging Face)
   const handleSynthesizeCurrent = async () => {
     if (!currentSeg || isSynthesizing) return;
     setIsSynthesizing(true);
     try {
-      const voiceToUse: VoiceOption = currentSeg.voice || 'Thiha';
-      const result = await synthesizeMyanmarVoice(currentSeg.myanmarTranslation, {
-        voice: voiceToUse,
-        style: 'conversational',
-        speed: currentSeg.atempoRate || 1.0,
-      });
+      let result: { audioUrl: string; duration: number };
+
+      if (currentSeg.voiceProvider === 'elevenlabs' && currentSeg.elevenLabsVoiceId) {
+        result = await synthesizeElevenLabsVoice(currentSeg.myanmarTranslation, {
+          voiceId: currentSeg.elevenLabsVoiceId,
+          emotion: currentSeg.emotion,
+        });
+      } else if (currentSeg.voiceProvider === 'huggingface' && currentSeg.hfSpeaker) {
+        result = await synthesizeHuggingFaceVoice(currentSeg.myanmarTranslation, {
+          model: currentSeg.hfModel || 'coqui/XTTS-v2',
+          speakerId: currentSeg.hfSpeaker,
+          speed: 1.0,
+        });
+      } else {
+        const voiceToUse: VoiceOption = currentSeg.voice || 'Thiha';
+        result = await synthesizeMyanmarVoice(currentSeg.myanmarTranslation, {
+          voice: voiceToUse,
+          style: currentSeg.style || project.voiceStyle || 'recap',
+          emotion: currentSeg.emotion,
+          speed: 1.0,
+        });
+      }
 
       const audioDur = result.duration;
-      const atempo = parseFloat(Math.min(1.35, Math.max(0.85, audioDur / slotDuration)).toFixed(2));
+      const atempo = parseFloat(Math.min(1.15, Math.max(0.9, audioDur / slotDuration)).toFixed(2));
 
       handleUpdateCurrentSeg({
         audioUrl: result.audioUrl,
@@ -165,12 +185,20 @@ export const HumanReviewDubbingStudio: React.FC<HumanReviewDubbingStudioProps> =
   const handleListenAndInspect = () => {
     if (!currentSeg) return;
 
+    if (audioPlayerRef.current) {
+      audioPlayerRef.current.pause();
+      audioPlayerRef.current.currentTime = 0;
+      audioPlayerRef.current = null;
+    }
+
     if (isPlayingSegment && audioPlayer) {
       audioPlayer.pause();
       setIsPlayingSegment(false);
       return;
     }
 
+    // Pause main VideoPlayerView to ensure no double voice playback
+    setProject((prev) => (prev.isPlaying ? { ...prev, isPlaying: false } : prev));
     onSeekTo(currentSeg.startTime);
 
     if (currentSeg.audioUrl) {
@@ -183,6 +211,7 @@ export const HumanReviewDubbingStudio: React.FC<HumanReviewDubbingStudioProps> =
       audio.onended = () => setIsPlayingSegment(false);
       audio.onerror = () => setIsPlayingSegment(false);
 
+      audioPlayerRef.current = audio;
       audio.play().then(() => {
         setAudioPlayer(audio);
         setIsPlayingSegment(true);
@@ -350,7 +379,7 @@ export const HumanReviewDubbingStudio: React.FC<HumanReviewDubbingStudioProps> =
                 </span>
                 <span className="px-2.5 py-0.5 rounded-lg bg-teal-500/20 text-teal-300 border border-teal-500/30 font-semibold flex items-center gap-1">
                   <User className="w-3 h-3" />
-                  <span>{currentSeg.speaker || 'Speaker 1 (Adult Male)'}</span>
+                  <span>{currentSeg.speaker || 'Narrator (ဇာတ်ကြောင်းပြောသူ)'}</span>
                 </span>
               </div>
 
@@ -588,17 +617,17 @@ export const HumanReviewDubbingStudio: React.FC<HumanReviewDubbingStudioProps> =
                 </div>
                 <input
                   type="range"
-                  min="0.85"
-                  max="1.35"
+                  min="0.9"
+                  max="1.15"
                   step="0.01"
-                  value={currentSeg.atempoRate || calculatedAtempo}
+                  value={Math.min(1.15, Math.max(0.9, currentSeg.atempoRate || calculatedAtempo))}
                   onChange={(e) => handleUpdateCurrentSeg({ atempoRate: parseFloat(e.target.value) })}
                   className="w-full accent-cyan-400 cursor-pointer"
                 />
                 <div className="flex items-center justify-between text-[9px] text-zinc-500 font-mono">
-                  <span>0.85x (Slow)</span>
-                  <span>1.00x (Normal)</span>
-                  <span>1.35x (Snappy)</span>
+                  <span>0.90x (Calm)</span>
+                  <span>1.00x (Natural)</span>
+                  <span>1.15x (Gentle Max)</span>
                 </div>
               </div>
             </div>

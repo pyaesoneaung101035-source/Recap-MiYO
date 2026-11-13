@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { KeyRound, Check, RefreshCw, Smartphone, ShieldCheck, Sparkles, AlertCircle, ArrowRight, Zap, Radio, Loader2, ExternalLink } from 'lucide-react';
 import { GeminiKeyInfo, AiMode } from '../types';
 import { parseKeysFromInput, resetKeyStatuses, saveGeminiKeys, fetchDirectGoogleGeminiApi, testGeminiKeyDirect } from '../utils/geminiPool';
-import { loadApiKeys, saveApiKeys, verifyAssemblyAiKey, verifyHuggingFaceKey, isAsciiOnly, sanitizeApiKey } from '../utils/apiKeys';
+import { loadApiKeys, saveApiKeys, verifyAssemblyAiKey, verifyHuggingFaceKey, verifyManusApiKey, verifyElevenLabsKey, isAsciiOnly, sanitizeApiKey } from '../utils/apiKeys';
+import { fetchTtsProvidersStatus } from '../utils/elevenLabsHumeClient';
 
 interface Step1GeminiKeysProps {
   geminiKeys: GeminiKeyInfo[];
@@ -24,6 +25,16 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
   const [huggingFaceStatus, setHuggingFaceStatus] = useState<'idle' | 'testing' | 'connected' | 'error'>('idle');
   const [huggingFaceMsg, setHuggingFaceMsg] = useState('');
 
+  const [manusApiKey, setManusApiKey] = useState('');
+  const [manusApiStatus, setManusApiStatus] = useState<'idle' | 'testing' | 'connected' | 'error'>('idle');
+  const [manusApiMsg, setManusApiMsg] = useState('');
+
+  const [elevenLabsKey, setElevenLabsKey] = useState('');
+  const [elevenLabsStatus, setElevenLabsStatus] = useState<'idle' | 'testing' | 'connected' | 'error'>('idle');
+  const [elevenLabsMsg, setElevenLabsMsg] = useState('');
+
+  const [serverSecrets, setServerSecrets] = useState({ elevenLabs: false });
+
   const [testResult, setTestResult] = useState<{ status: 'idle' | 'testing' | 'success' | 'error'; message: string }>({
     status: 'idle',
     message: '',
@@ -33,12 +44,15 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
     const apiKeys = loadApiKeys();
     setAssemblyAiKey(apiKeys.assemblyAiKey);
     setHuggingFaceKey(apiKeys.huggingFaceKey || '');
-    if (apiKeys.assemblyAiKey) {
-      setAssemblyAiStatus('idle');
-    }
-    if (apiKeys.huggingFaceKey) {
-      setHuggingFaceStatus('idle');
-    }
+    setManusApiKey(apiKeys.manusApiKey || '');
+    setElevenLabsKey(apiKeys.elevenLabsKey || '');
+    if (apiKeys.assemblyAiKey) setAssemblyAiStatus('idle');
+    if (apiKeys.huggingFaceKey) setHuggingFaceStatus('idle');
+    if (apiKeys.manusApiKey) setManusApiStatus('idle');
+    if (apiKeys.elevenLabsKey) setElevenLabsStatus('idle');
+    fetchTtsProvidersStatus().then((st) => {
+      setServerSecrets({ elevenLabs: st.elevenLabsConfigured });
+    });
   }, []);
 
   const handleSaveAssemblyKey = (assemblyAi: string) => {
@@ -99,6 +113,64 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
     }
   };
 
+  const handleSaveManusKey = (manusKey: string) => {
+    const current = loadApiKeys();
+    saveApiKeys({
+      assemblyAiKey: current.assemblyAiKey || assemblyAiKey,
+      huggingFaceKey: current.huggingFaceKey || huggingFaceKey,
+      manusApiKey: manusKey,
+    });
+  };
+
+  const handleConnectManusApi = async () => {
+    if (!manusApiKey.trim()) {
+      setManusApiStatus('error');
+      setManusApiMsg('ကျေးဇူးပြု၍ Manus API Key ထည့်သွင်းပေးပါ။');
+      return;
+    }
+
+    setManusApiStatus('testing');
+    setManusApiMsg('Manus Cloud & VLM Video Analysis သို့ ချိတ်ဆက်စစ်ဆေးနေပါသည်...');
+
+    const res = await verifyManusApiKey(manusApiKey);
+    if (res.ok) {
+      setManusApiStatus('connected');
+      setManusApiMsg(res.message);
+      handleSaveManusKey(manusApiKey);
+    } else {
+      setManusApiStatus('error');
+      setManusApiMsg(res.message);
+    }
+  };
+
+  const handleSaveElevenLabsKey = (key: string) => {
+    const current = loadApiKeys();
+    saveApiKeys({
+      ...current,
+      assemblyAiKey: current.assemblyAiKey || assemblyAiKey,
+      elevenLabsKey: key,
+    });
+  };
+
+  const handleConnectElevenLabs = async () => {
+    if (!elevenLabsKey.trim() && !serverSecrets.elevenLabs) {
+      setElevenLabsStatus('error');
+      setElevenLabsMsg('ကျေးဇူးပြု၍ ElevenLabs API Key ထည့်သွင်းပေးပါ။');
+      return;
+    }
+    setElevenLabsStatus('testing');
+    setElevenLabsMsg('ElevenLabs Voice Clone API သို့ စစ်ဆေးချိတ်ဆက်နေပါသည်...');
+    const res = await verifyElevenLabsKey(elevenLabsKey);
+    if (res.ok) {
+      setElevenLabsStatus('connected');
+      setElevenLabsMsg(res.message);
+      if (elevenLabsKey.trim()) handleSaveElevenLabsKey(elevenLabsKey);
+    } else {
+      setElevenLabsStatus('error');
+      setElevenLabsMsg(res.message);
+    }
+  };
+
   const handleAddKeys = () => {
     if (!keysInput.trim()) return;
     const combined = [...geminiKeys.map((k) => k.key), ...keysInput.split(/[\n,;]+/)].join('\n');
@@ -116,7 +188,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
   const handleTestKeyRotation = async () => {
     if (geminiKeys.length === 0) {
       setTestResult({ status: 'testing', message: 'Server Gemini API ချိတ်ဆက်မှုကို စစ်ဆေးနေပါသည်...' });
-      const testRes = await testGeminiKeyDirect(undefined, 'gemini-3.5-flash');
+      const testRes = await testGeminiKeyDirect(undefined, 'gemini-3.1-flash-lite');
       if (testRes.ok) {
         setTestResult({
           status: 'success',
@@ -135,7 +207,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
 
     const testKey = async (k: GeminiKeyInfo): Promise<GeminiKeyInfo> => {
       try {
-        const result = await testGeminiKeyDirect(k.key, 'gemini-3.5-flash');
+        const result = await testGeminiKeyDirect(k.key, 'gemini-3.1-flash-lite');
         if (result.ok) {
           return { ...k, status: 'active', lastError: undefined };
         } else {
@@ -468,6 +540,179 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
               )}
             </div>
           </div>
+
+          {/* Manus API Key for Custom Video Analysis Box */}
+          <div className="p-4 rounded-xl bg-zinc-950/70 border border-cyan-900/30 space-y-3 mt-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-7 h-7 rounded-lg bg-cyan-950/60 border border-cyan-500/40 text-cyan-400 flex items-center justify-center text-sm font-bold">
+                  M
+                </div>
+                <div>
+                  <h4 className="text-xs font-bold text-zinc-200">Manus API Key (Custom Video VLM Analysis)</h4>
+                  <p className="text-[10px] text-zinc-400 font-myanmar"> custom upload video ကို Manus API ဖြင့် VLM Analysis ပြုလုပ်ပြီး Scene/Shot အသေးစိတ် ခွဲခြမ်းရန်</p>
+                </div>
+              </div>
+
+              {manusApiStatus === 'connected' && (
+                <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-emerald-950/70 text-emerald-400 border border-emerald-800/60 flex items-center gap-1">
+                  <Check className="w-3 h-3" />
+                  <span>Connected</span>
+                </span>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <input
+                type="password"
+                placeholder="Manus API Key ထည့်သွင်းပါ..."
+                value={manusApiKey}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setManusApiKey(val);
+                  setManusApiStatus('idle');
+                  handleSaveManusKey(val);
+                }}
+                className={`w-full px-3 py-2 bg-zinc-900 border rounded-lg text-xs font-mono text-zinc-200 placeholder-zinc-600 focus:outline-none ${
+                  manusApiKey && !isAsciiOnly(manusApiKey)
+                    ? 'border-rose-500/70 focus:border-rose-500'
+                    : 'border-zinc-800 focus:border-cyan-500/60'
+                }`}
+              />
+
+              <div className="flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={handleConnectManusApi}
+                  disabled={manusApiStatus === 'testing' || !manusApiKey.trim() || !isAsciiOnly(manusApiKey)}
+                  className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-zinc-950 font-bold text-xs rounded-lg transition-colors flex items-center gap-1.5 shadow-sm cursor-pointer"
+                >
+                  {manusApiStatus === 'testing' ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Zap className="w-3.5 h-3.5" />
+                  )}
+                  <span>{manusApiStatus === 'testing' ? 'စစ်ဆေးနေပါသည်...' : 'Connect Manus API'}</span>
+                </button>
+
+                <span className="text-[10px] text-zinc-500 font-mono">
+                  {manusApiKey ? (isAsciiOnly(manusApiKey) ? 'Manus Key ထည့်ထားပြီး' : 'Key မမှန်ကန်ပါ') : 'Manus Key (Optional)'}
+                </span>
+              </div>
+
+              {manusApiMsg && (
+                <div
+                  className={`p-2 rounded text-[11px] leading-relaxed font-myanmar ${
+                    manusApiStatus === 'connected'
+                      ? 'bg-emerald-950/50 text-emerald-300 border border-emerald-900/60'
+                      : 'bg-rose-950/50 text-rose-300 border border-rose-900/60'
+                  }`}
+                >
+                  {manusApiMsg}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* ElevenLabs Voice Clone Connect Box */}
+          <div className="p-4 rounded-xl bg-zinc-950/70 border border-violet-900/40 space-y-3 mt-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <div className="w-7 h-7 rounded-lg bg-violet-950/60 border border-violet-500/40 text-violet-300 flex items-center justify-center text-xs font-black">
+                  II
+                </div>
+                <div>
+                  <h4 className="text-xs font-bold text-zinc-200">ElevenLabs API Key (Instant Voice Clone & eleven_v3)</h4>
+                  <p className="text-[10px] text-zinc-400 font-myanmar">မိမိအသံနမူနာ တင်ပြီး Voice Clone ဖန်တီးခြင်း နှင့် သဘာဝကျကျ မြန်မာ/Multi-lang TTS</p>
+                </div>
+              </div>
+
+              {(elevenLabsStatus === 'connected' || serverSecrets.elevenLabs) && (
+                <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-emerald-950/70 text-emerald-400 border border-emerald-800/60 flex items-center gap-1 shrink-0">
+                  <Check className="w-3 h-3" />
+                  <span>{elevenLabsStatus === 'connected' ? 'Connected' : 'Server Ready'}</span>
+                </span>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-[10px] text-zinc-400">API Key (sk_...)</span>
+                <a
+                  href="https://elevenlabs.io/app/settings/api-keys"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-violet-400 hover:text-violet-300 text-[10px] underline flex items-center gap-1"
+                >
+                  <span>ElevenLabs Key ရယူရန်</span>
+                  <ExternalLink className="w-2.5 h-2.5" />
+                </a>
+              </div>
+
+              <input
+                type="password"
+                placeholder="ElevenLabs API Key (sk_...) ထည့်သွင်းပါ..."
+                value={elevenLabsKey}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setElevenLabsKey(val);
+                  setElevenLabsStatus('idle');
+                  handleSaveElevenLabsKey(val);
+                }}
+                className={`w-full px-3 py-2 bg-zinc-900 border rounded-lg text-xs font-mono text-zinc-200 placeholder-zinc-600 focus:outline-none ${
+                  elevenLabsKey && !isAsciiOnly(elevenLabsKey)
+                    ? 'border-rose-500/70 focus:border-rose-500'
+                    : 'border-zinc-800 focus:border-violet-500/60'
+                }`}
+              />
+
+              {elevenLabsKey && !isAsciiOnly(elevenLabsKey) && (
+                <div className="p-2 rounded bg-rose-950/60 border border-rose-800/60 text-rose-300 text-[11px] font-myanmar flex items-center justify-between gap-2">
+                  <span>⚠️ မြန်မာစာလုံးများ မပါဝင်ရပါ။</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const clean = sanitizeApiKey(elevenLabsKey);
+                      setElevenLabsKey(clean);
+                      handleSaveElevenLabsKey(clean);
+                    }}
+                    className="px-2 py-0.5 bg-rose-800 hover:bg-rose-700 text-white rounded text-[10px] shrink-0"
+                  >
+                    Clean
+                  </button>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={handleConnectElevenLabs}
+                  disabled={elevenLabsStatus === 'testing' || (!elevenLabsKey.trim() && !serverSecrets.elevenLabs) || (Boolean(elevenLabsKey) && !isAsciiOnly(elevenLabsKey))}
+                  className="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white font-bold text-xs rounded-lg transition-colors flex items-center gap-1.5 shadow-sm cursor-pointer"
+                >
+                  {elevenLabsStatus === 'testing' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
+                  <span>{elevenLabsStatus === 'testing' ? 'စစ်ဆေးနေပါသည်...' : 'Connect ElevenLabs'}</span>
+                </button>
+                <span className="text-[10px] text-zinc-500 font-mono">
+                  {elevenLabsKey ? 'Key ထည့်ထားပြီး' : serverSecrets.elevenLabs ? 'Server ENV Configured' : 'Step 4 Voice Clone Engine'}
+                </span>
+              </div>
+
+              {elevenLabsMsg && (
+                <div
+                  className={`p-2 rounded text-[11px] leading-relaxed font-myanmar ${
+                    elevenLabsStatus === 'connected'
+                      ? 'bg-emerald-950/50 text-emerald-300 border border-emerald-900/60'
+                      : 'bg-rose-950/50 text-rose-300 border border-rose-900/60'
+                  }`}
+                >
+                  {elevenLabsMsg}
+                </div>
+              )}
+            </div>
+          </div>
+
+
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-2">

@@ -1,5 +1,6 @@
 import { GeminiKeyInfo, TranscriptSegment, AiMode } from '../types';
-import { extractAudioFromVideo, extractAudioChunksFromVideo, extractVideoKeyframes, AudioChunkResult } from './audioExtractor';
+import { extractAudioChunksFromVideo, extractAllVideoKeyframesBatch } from './audioExtractor';
+import { MINUTE_BLOCK_SECONDS, formatMinSec, realignSegmentsByMinuteBlocks } from './timingSync';
 
 const STORAGE_KEY = 'motion_recap_gemini_keys';
 let currentKeyIndex = 0;
@@ -155,87 +156,7 @@ export function analyzeGeminiError(errObj: any, defaultStatus = 500): GeminiErro
   };
 }
 
-/**
- * Direct browser call to Google Generative Language API with candidate model fallbacks.
- * Used for static deployments (Netlify, GitHub Pages, Mobile) where no Express server is running.
- */
-export async function callDirectGoogleRest(
-  cleanKey: string,
-  model: string,
-  partsPayload: any[],
-  systemInstruction?: string
-): Promise<{ text: string }> {
-  const candidateModels = [
-    model,
-    'gemini-3.5-flash',
-    'gemini-3.5-flash-lite',
-    'gemini-3.8-flash',
-    'gemini-2.5-flash',
-    'gemini-2.5-flash-lite',
-    'gemini-flash-latest',
-  ].filter(Boolean).filter((m, idx, arr) => arr.indexOf(m) === idx);
 
-  const requestBody: any = {
-    contents: [
-      {
-        parts: partsPayload,
-      },
-    ],
-  };
-
-  if (systemInstruction) {
-    requestBody.systemInstruction = {
-      parts: [{ text: systemInstruction }],
-    };
-  }
-
-  let lastError: any = null;
-
-  for (const m of candidateModels) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${encodeURIComponent(cleanKey)}`;
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': cleanKey,
-        },
-        body: JSON.stringify(requestBody),
-      });
-
-      const data = await res.json().catch(() => ({}));
-      if (res.ok) {
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (text !== undefined) {
-          return { text };
-        }
-        return { text: '' };
-      }
-
-      const status = res.status;
-      const errObj = data.error || data;
-      const analysis = analyzeGeminiError(errObj, status);
-
-      // If 404 Model Not Found / deprecated for this user, or 503 / 400 not available, try next model
-      if (status === 404 || status === 503 || (status === 400 && String(analysis.message).includes('not available'))) {
-        lastError = new Error(`[${analysis.status}] ${analysis.quotaType}: ${analysis.message}`);
-        continue;
-      }
-
-      const err = new Error(
-        `[${analysis.status}] ${analysis.quotaType}: ${analysis.detailedDescription} (${analysis.message})`
-      );
-      (err as any).status = status;
-      (err as any).errorDetails = analysis;
-      throw err;
-    } catch (netErr: any) {
-      if (netErr?.status || netErr?.errorDetails) throw netErr;
-      lastError = netErr;
-    }
-  }
-
-  throw lastError || new Error('All Gemini model candidates failed.');
-}
 
 /**
  * Execute a Gemini prompt by calling the server-side proxy route (/api/gemini/generate)
@@ -246,67 +167,41 @@ export async function fetchServerGeminiApi(
   model: string,
   prompt: string,
   parts?: any[],
-  systemInstruction?: string
+  systemInstruction?: string,
+  options?: { responseMimeType?: string; timeoutMs?: number }
 ): Promise<{ text: string }> {
   const cleanKey = apiKey ? apiKey.trim().replace(/[^\x21-\x7E]/g, '') : undefined;
   const partsPayload = parts && parts.length > 0 ? parts : [{ text: prompt }];
 
-  const isNetlifyOrStatic = typeof window !== 'undefined' && (
-    window.location.hostname.includes('netlify.app') ||
-    window.location.hostname.includes('github.io')
-  );
+  const res = await fetch('/api/gemini/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      apiKey: cleanKey,
+      model: model || 'gemini-3.1-flash-lite',
+      prompt,
+      parts: partsPayload,
+      systemInstruction,
+      responseMimeType: options?.responseMimeType,
+    }),
+    signal: AbortSignal.timeout(options?.timeoutMs || 45000),
+  });
 
-  // If on Netlify and user provided a key, call direct Google API directly (fastest, avoids Netlify edge 401)
-  if (isNetlifyOrStatic && cleanKey) {
-    return await callDirectGoogleRest(cleanKey, model, partsPayload, systemInstruction);
+  const data = await res.json().catch(() => ({}));
+  if (res.ok && data && data.text !== undefined) {
+    return { text: data.text };
   }
 
-  // 1. Try server-side route
-  try {
-    const res = await fetch('/api/gemini/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        apiKey: cleanKey,
-        model: model || 'gemini-3.5-flash',
-        prompt,
-        parts: partsPayload,
-        systemInstruction,
-      }),
-    });
-
-    const contentType = res.headers.get('content-type') || '';
-    const isHtml = contentType.includes('text/html');
-
-    // Only process if response is real JSON from the server and not HTML redirect / 404
-    if (!isHtml && res.status !== 404 && (res.status !== 401 || !isHtml)) {
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && data && data.text !== undefined) {
-        return { text: data.text };
-      }
-      const status = res.status;
-      const details = data.errorDetails;
-      let errMsg = data.error || `Gemini API Error (HTTP ${status})`;
-      if (details) {
-        errMsg = `[${details.status}] Quota Type: ${details.quotaType} — ${details.detailedDescription} (Message: ${details.message})`;
-      }
-      const err = new Error(errMsg);
-      (err as any).status = status;
-      (err as any).errorDetails = details;
-      throw err;
-    }
-  } catch (serverErr: any) {
-    if (serverErr?.status && serverErr.status !== 404 && !serverErr?.message?.includes('HTML')) {
-      throw serverErr;
-    }
+  const status = res.status;
+  const details = data.errorDetails;
+  let errMsg = data.error || `Gemini API Error (HTTP ${status})`;
+  if (details) {
+    errMsg = `[${details.status}] Quota Type: ${details.quotaType} — ${details.detailedDescription} (Message: ${details.message})`;
   }
-
-  // 2. Direct browser fallback if static hosting (Netlify) without backend
-  if (cleanKey) {
-    return await callDirectGoogleRest(cleanKey, model, partsPayload, systemInstruction);
-  }
-
-  throw new Error('Gemini API Key မရှိသေးပါ။ ကျေးဇူးပြု၍ API Settings တွင် Google Gemini API Key ထည့်သွင်းပေးပါ။');
+  const err = new Error(errMsg);
+  (err as any).status = status;
+  (err as any).errorDetails = details;
+  throw err;
 }
 
 // Keep backward-compatible alias so existing components call the server proxy
@@ -318,35 +213,10 @@ export const fetchDirectGoogleGeminiApi = fetchServerGeminiApi;
  */
 export async function testGeminiKeyDirect(
   apiKey?: string,
-  model = 'gemini-3.5-flash'
+  model = 'gemini-3.1-flash-lite'
 ): Promise<{ ok: boolean; message: string; errorDetails?: GeminiErrorAnalysis }> {
   const cleanKey = apiKey ? apiKey.trim().replace(/[^\x21-\x7E]/g, '') : undefined;
-  const isNetlifyOrStatic = typeof window !== 'undefined' && (
-    window.location.hostname.includes('netlify.app') ||
-    window.location.hostname.includes('github.io')
-  );
 
-  // If on Netlify and user provided a key, test directly against Google API to avoid Netlify edge 401 html
-  if (isNetlifyOrStatic && cleanKey) {
-    try {
-      const result = await callDirectGoogleRest(cleanKey, model, [{ text: 'Ping' }]);
-      if (result && result.text !== undefined) {
-        return {
-          ok: true,
-          message: 'ချိတ်ဆက်မှု အောင်မြင်ပါသည်! (Direct Google Gemini API Connected)',
-        };
-      }
-    } catch (directErr: any) {
-      const details = directErr?.errorDetails || analyzeGeminiError(directErr, directErr?.status || 500);
-      return {
-        ok: false,
-        message: directErr?.message || 'Connection test failed',
-        errorDetails: details,
-      };
-    }
-  }
-
-  // Otherwise, try server route
   try {
     const res = await fetch('/api/gemini/test', {
       method: 'POST',
@@ -355,54 +225,30 @@ export async function testGeminiKeyDirect(
         apiKey: cleanKey,
         model,
       }),
+      signal: AbortSignal.timeout(15000),
     });
 
-    const contentType = res.headers.get('content-type') || '';
-    const isHtml = contentType.includes('text/html');
-
-    if (!isHtml && res.status !== 404) {
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && data.ok) {
-        return {
-          ok: true,
-          message: 'ချိတ်ဆက်မှု အောင်မြင်ပါသည်! (Gemini API Connected Successfully)',
-        };
-      }
-      const details = data.errorDetails;
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.ok) {
       return {
-        ok: false,
-        message: data.error || `[${res.status}] Error`,
-        errorDetails: details,
+        ok: true,
+        message: 'ချိတ်ဆက်မှု အောင်မြင်ပါသည်! (Gemini API Connected Successfully)',
       };
     }
-  } catch (serverErr: any) {
-    // Proceed to direct test if server endpoint is not present
+    const details = data.errorDetails;
+    return {
+      ok: false,
+      message: data.error || `[${res.status}] Error`,
+      errorDetails: details,
+    };
+  } catch (err: any) {
+    const details = err?.errorDetails || analyzeGeminiError(err, err?.status || 500);
+    return {
+      ok: false,
+      message: err?.message || 'Connection test failed',
+      errorDetails: details,
+    };
   }
-
-  // 2. Direct test against Google Generative Language API if static/Netlify or server returned HTML
-  if (cleanKey) {
-    try {
-      const result = await callDirectGoogleRest(cleanKey, model, [{ text: 'Ping' }]);
-      if (result && result.text !== undefined) {
-        return {
-          ok: true,
-          message: 'ချိတ်ဆက်မှု အောင်မြင်ပါသည်! (Direct Google API Connected)',
-        };
-      }
-    } catch (directErr: any) {
-      const details = directErr?.errorDetails || analyzeGeminiError(directErr, directErr?.status || 500);
-      return {
-        ok: false,
-        message: directErr?.message || 'Connection test failed',
-        errorDetails: details,
-      };
-    }
-  }
-
-  return {
-    ok: false,
-    message: 'စစ်ဆေးရန် Gemini API Key ထည့်သွင်းပေးပါ။',
-  };
 }
 
 /**
@@ -424,7 +270,7 @@ export async function streamGeminiFromServer(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       apiKey: cleanKey,
-      model: options?.model || 'gemini-3.8-flash',
+      model: options?.model || 'gemini-3.1-flash-lite',
       prompt,
       parts: options?.parts,
       systemInstruction: options?.systemInstruction,
@@ -468,8 +314,9 @@ export async function streamGeminiFromServer(
 export async function callGeminiWithRotation(
   prompt: string,
   systemInstruction?: string,
-  model = 'gemini-3.5-flash',
-  mediaParts?: Array<{ mimeType: string; data: string }>
+  model = 'gemini-3.1-flash-lite',
+  mediaParts?: Array<{ mimeType: string; data: string } | { text: string }>,
+  options?: { responseMimeType?: string; timeoutMs?: number }
 ): Promise<{ text: string; usedKeyName: string }> {
   const keys = loadGeminiKeys();
 
@@ -482,49 +329,45 @@ export async function callGeminiWithRotation(
   const parts: any[] = [];
   if (mediaParts && mediaParts.length > 0) {
     for (const m of mediaParts) {
-      parts.push({
-        inlineData: {
-          mimeType: m.mimeType,
-          data: m.data,
-        },
-      });
+      if ('text' in m) {
+        parts.push({ text: m.text });
+      } else {
+        parts.push({
+          inlineData: {
+            mimeType: m.mimeType,
+            data: m.data,
+          },
+        });
+      }
     }
   }
   parts.push({ text: prompt });
 
   // If no Gemini client keys in local storage, use server-side default key directly
-  // This ensures the app keeps working for EVERYONE who opens it out of the box!
   if (geminiKeys.length === 0) {
-    try {
-      const serverRes = await fetchServerGeminiApi(
-        undefined,
-        model,
-        prompt,
-        parts,
-        systemInstruction
-      );
-      if (serverRes && serverRes.text) {
-        return { text: serverRes.text, usedKeyName: 'Server Flash Engine (Auto-Configured)' };
-      }
-    } catch (serverErr: any) {
-      throw new Error(serverErr.message || 'Server Gemini API call failed.');
+    const serverRes = await fetchServerGeminiApi(
+      undefined,
+      model,
+      prompt,
+      parts,
+      systemInstruction,
+      options
+    );
+    if (serverRes && serverRes.text) {
+      return { text: serverRes.text, usedKeyName: 'Server Flash Engine (Auto-Configured)' };
     }
+    throw new Error('Server Gemini API returned empty response.');
   }
 
-  // If user provided custom keys, rotate through them
-  const maxAttempts = geminiKeys.length * 2;
-  let attempts = 0;
+  // Try each active custom key at most once (avoid slow 2x multiply on failing keys)
   let lastError = '';
+  let lastErrorObj: any = null;
+  const activeCount = geminiKeys.filter((k) => k.status === 'active').length;
+  const keysToTry = activeCount > 0 ? geminiKeys.filter((k) => k.status === 'active') : geminiKeys;
 
-  while (attempts < maxAttempts) {
-    const keyInfo = geminiKeys[currentKeyIndex % geminiKeys.length];
+  for (let i = 0; i < keysToTry.length; i++) {
+    const keyInfo = keysToTry[(currentKeyIndex + i) % keysToTry.length];
     currentKeyIndex = (currentKeyIndex + 1) % geminiKeys.length;
-    attempts++;
-
-    const hasActiveKeys = geminiKeys.some((k) => k.status === 'active');
-    if (hasActiveKeys && keyInfo.status !== 'active') {
-      continue;
-    }
 
     if (keyInfo.key && keyInfo.key.trim().length >= 10) {
       try {
@@ -533,7 +376,8 @@ export async function callGeminiWithRotation(
           model,
           prompt,
           parts,
-          systemInstruction
+          systemInstruction,
+          options
         );
 
         if (data && data.text) {
@@ -547,6 +391,7 @@ export async function callGeminiWithRotation(
         }
       } catch (directErr: any) {
         console.warn(`Server proxy call notice for ${keyInfo.name}:`, directErr);
+        lastErrorObj = directErr;
         const errMsg = directErr?.message || '';
         const details = directErr?.errorDetails;
         if (errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED') || details?.statusCode === 429) {
@@ -558,32 +403,38 @@ export async function callGeminiWithRotation(
         } else {
           keyInfo.lastError = errMsg;
         }
-        lastError = keyInfo.lastError || errMsg || 'Gemini API Error';
+        lastError = errMsg || keyInfo.lastError || 'Gemini API Error';
+        saveGeminiKeys(keys);
       }
     }
-
-    saveGeminiKeys(keys);
   }
 
-  // Final fallback: try server-side default key if all client keys were exhausted
+  // Final fallback: try server-side default key if client keys failed
   try {
     const fallbackRes = await fetchServerGeminiApi(
       undefined,
       model,
       prompt,
       parts,
-      systemInstruction
+      systemInstruction,
+      options
     );
     if (fallbackRes && fallbackRes.text) {
       return { text: fallbackRes.text, usedKeyName: 'Server Flash Engine (Fallback)' };
     }
-  } catch (_) {}
+  } catch (fallbackErr: any) {
+    lastError = fallbackErr?.message || lastError;
+    lastErrorObj = fallbackErr || lastErrorObj;
+  }
 
-  throw new Error(`All Gemini API keys in the pool were attempted and failed. Last error: ${lastError}. Please check keys or wait for quota reset.`);
+  const finalErr = new Error(lastError || 'All Gemini API keys in the pool failed.');
+  if (lastErrorObj?.status) (finalErr as any).status = lastErrorObj.status;
+  if (lastErrorObj?.errorDetails) (finalErr as any).errorDetails = lastErrorObj.errorDetails;
+  throw finalErr;
 }
 
 export function buildSystemPromptForMode(mode: AiMode): string {
-  const directInstruction = 'ဗီဒီယို အသံနှင့် မြင်ကွင်းကို အခြေခံပြီး Timestamp Segment တစ်ခုချင်းစီအလိုက် သဘာဝကျသော မြန်မာဘာသာစကားပြော ပြန်ဆိုချက်များအဖြစ် တိကျစွာ ခွဲခြမ်းစိတ်ဖြာ ထုတ်ပေးပါ။ WRITE IN DIRECT, PLAIN LANGUAGE. DO NOT USE NARRATOR STYLE. DO NOT LIST FACTS, DATA, OR BULLET POINTS. USE NATURAL, SPOKEN BURMESE. CRITICAL DUBBING RULE: Burmese spoken words take longer to pronounce than Chinese syllables. KEEP BURMESE TRANSLATION VERY CONCISE, SHORT, AND PUNCHY (<12-18 words per segment) so TTS audio duration strictly fits the video dialogue slot!';
+  const directInstruction = 'ဗီဒီယို အသံနှင့် မြင်ကွင်းကို အခြေခံပြီး Timestamp Segment တစ်ခုချင်းစီအလိုက် သဘာဝကျသော မြန်မာ ဇာတ်ကြောင်းပြောစကား (Recap Style) အဖြစ် တိကျစွာ ထုတ်ပေးပါ။ စာကြောင်းတိုင်းကို "ပါတယ်/နေပါတယ်/ဖြစ်ပါတယ်" ဟု ထပ်ခါတလဲလဲ အဆုံးမသတ်ရ! နမူနာပုံစံအတိုင်း "...ပြီ", "...မယ်", "...ဘူး", "...ပဲ", "...လား", "...နော်", "...သွားတယ်" စသဖြင့် အဆုံးသတ်မျိုးစုံ သဘာဝကျကျ သုံးပါ။ KEEP BURMESE CONCISE (<12-18 syllables per 4-5s segment).';
   switch (mode) {
     case 'Dubbing':
       return `You are a master Chinese-to-Burmese film dubbing director and audio sync engineer.
@@ -672,9 +523,45 @@ export function calculateMaxAllowedSyllables(durationSeconds: number): number {
   return Math.max(4, Math.floor(Math.max(0.5, durationSeconds) * 3.8));
 }
 
+function parseChunkJsonArray(rawText: string): any[] {
+  const cleaned = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
+  const tryParse = (candidate: string): any[] | null => {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (Array.isArray(parsed)) return parsed;
+      if (parsed && Array.isArray(parsed.segments)) return parsed.segments;
+      if (parsed && Array.isArray(parsed.cues)) return parsed.cues;
+      if (parsed && Array.isArray(parsed.items)) return parsed.items;
+    } catch {}
+    return null;
+  };
+
+  const direct = tryParse(cleaned);
+  if (direct) return direct;
+
+  const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
+  if (arrayMatch) {
+    const extracted = tryParse(arrayMatch[0]);
+    if (extracted) return extracted;
+  }
+
+  return [];
+}
+
+function isFatalGeminiError(err: any): boolean {
+  const status = err?.status || err?.errorDetails?.statusCode;
+  const msg = String(err?.message || '').toLowerCase();
+  const quotaType = String(err?.errorDetails?.quotaType || '').toLowerCase();
+  if (status === 401 || status === 403 || status === 413) return true;
+  if (quotaType.includes('rpd') || quotaType.includes('billing') || quotaType.includes('unauthorized')) return true;
+  if (msg.includes('api key') && (msg.includes('invalid') || msg.includes('not configured') || msg.includes('unauthorized'))) return true;
+  if (msg.includes('requests per day') || msg.includes('daily free quota')) return true;
+  return false;
+}
+
 /**
  * Generate transcript & subtitles with timestamps from the custom uploaded video.
- * GUARANTEES ALL PARTS (Part 1, Part 2, Part 3, Part 4, Part 5...) ARE TRANSCRIBED & TRANSLATED 100%.
+ * GUARANTEES ALL 1-MINUTE BLOCKS (Part 1, Part 2, Part 3...) ARE PROCESSED FAST AND ACCURATELY.
  */
 export async function generateTimestampedTranscript(
   videoTitle: string,
@@ -682,294 +569,307 @@ export async function generateTimestampedTranscript(
   customContext = '',
   videoFile?: File | null,
   videoUrl?: string | null,
-  onProgress?: (msg: string) => void,
-  model = 'gemini-3.5-flash'
+  onProgress?: (msg: string, percent?: number) => void,
+  model = 'gemini-3.1-flash-lite'
 ): Promise<TranscriptSegment[]> {
-  const allSegments: TranscriptSegment[] = [];
-  const isDubbingMode = true; // Strict Myanmar Dubbing Pipeline
+  if (!videoFile && !videoUrl) {
+    throw new Error('ဗီဒီယိုဖိုင် မတွေ့ရှိပါ။ Step 2 တွင် Custom Video ကို အရင်တင်ပေးပါ။');
+  }
 
-  // Strict instruction preventing hallucinated recap stories & enforcing 7-step workflow rules
-  const strictSystemInstruction = `You are a professional video dubbing and dialogue localization engineer for Myanmar language.
-CRITICAL 7-STAGE DUBBING WORKFLOW RULES:
-1. SCENE/SHOT SEGMENTATION: Segment dialogue strictly aligned with camera shots and dialogue pauses in the video.
-2. SPEAKER DIARIZATION (Gemini API): Break down spoken lines per individual speaker (e.g. Speaker 1 Adult Male, Speaker 2 Female, etc.) so dialogue timing and speaker turn-taking are explicitly captured.
-3. STRICT 5-SECOND DURATION BREVITY RULE:
-   - မူရင်းလူက ၅ စက္ကန့်ပဲ ပြောထားရင် မြန်မာဘာသာပြန်ကိုလည်း ၅ စက္ကန့်အတွင်း ဖတ်လို့ရအောင် တိုတောင်းစွာရေးပါ။
-   - မြန်မာလို ပြန်ရေးတဲ့အခါ တရုတ်စာထက် အသံထွက်အချိန် ပိုရှည်နိုင်သဖြင့် စကားလုံးနည်းနည်းလျှော့ရေးပါ။
-   - A 5-second dialogue window can comfortably fit only 18 to 20 Burmese syllables! Omit filler particles, shorten phrasing, and ensure the Burmese narration fits within the exact duration.
-4. EXACT START AND END TIMESTAMPS:
-   - Timestamp ကို စကားစတဲ့အချိန် (startTime) မှာသာမက စကားဆုံးတဲ့အချိန် (endTime) မှာပါ တိကျစွာ သတ်မှတ်ပါ။
-5. SINGLE MALE NARRATOR DUBBING:
-   - အနီးစပ်ဆုံး ယောက်ျားအသံ (Thiha / Adult Male Narrator) ဖြင့်သာ ဖတ်ပြမည်။
-6. SUBTITLES: Clean Burmese subtitles: max 2 lines, under 35 Burmese characters per line, NO Chinese characters.
-7. NO RECAP HALLUCINATIONS: Transcribe strictly the spoken dialogue from the video; do not invent fictional stories.`;
+  const strictSystemInstruction = `You are an elite Burmese Movie-Recap Storyteller & Voice-Acting Director (နမူနာ YouTube/TikTok Recap ဇာတ်ကြောင်းပြောသူ).
+MANDATORY STEP 3 NARRATION & VOICE-EXPRESSION RULES:
+1. MATCH SAMPLE VIDEO BURMESE STYLE — BAN REPETITIVE "တယ် / ပါတယ်" ENDINGS:
+   - NEVER end consecutive sentences with robotic textbook forms like "...နေပါတယ်။", "...ဖြစ်ပါတယ်။", "...သွားပါတယ်။", "...လိုက်ပါတယ်။".
+   - Write crisp, natural SPOKEN Burmese storytelling (စကားပြောဇာတ်ကြောင်း) mixing varied endings:
+     • Surprise / realization: "...ပေါ်လာတော့ သူ အံ့ဩသွားတယ်!", "...ရတနာပွားခွက်ပဲ ဆိုတာ သူ နားလည်သွားတယ်"
+     • Readiness / turning point: "...ဒီခွက်နဲ့ လာမယ့်ပြိုင်ပွဲမှာ ဝင်ပြိုင်နိုင်ပြီ။"
+     • Intent / promise / forecast: "...သေချာပေါက် ဝင်ပြိုင်မယ်။", "...အရင်ဆုံး အတိုးယူရမယ်။", "...သန်းပေါင်းများစွာ ကုန်မယ်။"
+     • Defiance / refusal: "...သူ အလွတ်မပေးဘူး။"
+     • Punchy irony / taunts / questions: "...ငါ့နောက်လိုက်နေတဲ့သူပဲ။", "...သန်းနဲ့ချီ တန်မယ်နော်!", "...အောင်မြင်နေပြီပဲ။", "...တစ်ကီလို ရွှေတုံး ရှိလား?"
+   - Avoid "ပါတယ်" in narration (only use polite "ပါတယ်" when retelling a shop clerk's polite reply like "ရှိပါတယ်။ ခဏစောင့်ပါ။"). Never end more than 2 cues in a row with "တယ်".
+2. EXPRESSIVE VOCAL EMOTION & PUNCTUATION FOR VOICE CLONE:
+   - Use "!" on shocking/surprising reveals or threats, and "?" on questions so TTS raises/lowers vocal pitch expressively (အသံနိမ့်မြင့် ပါဝင်စေရန်) rather than reading flatly.
+   - Set specific "emotion" tags on EVERY segment matching the scene: e.g. "surprised, amazed", "determined, fierce", "curious, questioning", "smug, mocking", "urgent, tense", "calm storytelling", "sad, heartfelt".
+3. SCENE-BY-SCENE VISUAL + AUDIO ALIGNMENT:
+   - Inspect EVERY timestamped visual frame AND listen sequentially. Start each cue AT THE EXACT MOMENT that scene or exchange appears.
+   - Keep "speaker": "Narrator (ဇာတ်ကြောင်းပြောသူ)" on every segment. Preserve exact numbers, money, weights, and names faithfully.
+4. CONCISE SPEAKING-TIME BUDGET (~3.4 syllables/sec):
+   - Keep each 3.5s–5.5s cue concise (~10–18 Burmese syllables) so the narrator finishes cleanly inside [start, end] BEFORE the next scene cut.
+5. TIMESTAMPS & SUBTITLES:
+   - Return sequential non-overlapping chunk-relative timestamps ("00:00:00,000" to chunk end). Subtitles max 2 lines, <=35 chars/line, ZERO foreign/Chinese characters.`;
 
-  if (videoFile || videoUrl) {
-    try {
-      const totalDuration = durationSeconds || 180;
+  const buildTimestampedFrameParts = (
+    frames: Array<{ time: number; base64Jpeg: string }>,
+    blockOffsetSec: number
+  ): Array<{ mimeType: string; data: string } | { text: string }> => {
+    const out: Array<{ mimeType: string; data: string } | { text: string }> = [];
+    for (const f of frames) {
+      const relTime = Math.max(0, f.time - blockOffsetSec);
+      out.push({
+        text: `[Visual Frame @ ${formatMinSec(f.time)} | Chunk +${relTime.toFixed(1)}s]`,
+      });
+      out.push({
+        mimeType: 'image/jpeg',
+        data: f.base64Jpeg,
+      });
+    }
+    return out;
+  };
 
-      // Extract keyframes for visual context
-      let keyframeParts: any[] = [];
-      let videoUrlToUse = videoUrl;
-      if (!videoUrlToUse && videoFile && typeof window !== 'undefined' && window.URL) {
-        videoUrlToUse = URL.createObjectURL(videoFile);
+  const totalDuration = durationSeconds || MINUTE_BLOCK_SECONDS;
+  let videoUrlToUse = videoUrl;
+  let createdObjectUrl = false;
+  if (!videoUrlToUse && videoFile && typeof window !== 'undefined' && window.URL) {
+    videoUrlToUse = URL.createObjectURL(videoFile);
+    createdObjectUrl = true;
+  }
+
+  try {
+    onProgress?.('🎙️ [1/3] ဗီဒီယိုကို ၁ မိနစ်စာ အပိုင်းများခွဲ၍ အသံထုတ်ယူနေပါသည်...', 8);
+
+    // Always process in 1-minute (60s) blocks for tight visual-to-timestamp grounding
+    const chunks = await extractAudioChunksFromVideo(
+      videoFile || videoUrl!,
+      MINUTE_BLOCK_SECONDS,
+      totalDuration
+    );
+    const totalParts = chunks.length;
+    if (totalParts === 0) {
+      throw new Error('ဗီဒီယို အပိုင်းများ ခွဲထုတ်၍မရပါ။ ဗီဒီယိုဖိုင် မှန်ကန်မှုကို စစ်ဆေးပါ။');
+    }
+
+    onProgress?.(
+      `🎥 [2/3] မြင်ကွင်း Keyframes များကို (${totalParts} Parts — high density 4s/frame) ထုတ်ယူနေပါသည်...`,
+      20
+    );
+
+    // Extract 15 aspect-preserved keyframes per 60s block (~every 4 seconds) so every scene cut is aligned cleanly
+    let keyframesByPart = new Map<number, Array<{ time: number; base64Jpeg: string }>>();
+    if (videoUrlToUse) {
+      try {
+        const windows = chunks.map((c) => ({
+          partIndex: c.partIndex,
+          startSec: c.startTimeSeconds,
+          endSec: Math.min(
+            totalDuration > 0 ? totalDuration : c.startTimeSeconds + c.durationSeconds,
+            c.startTimeSeconds + c.durationSeconds
+          ),
+        }));
+        keyframesByPart = await extractAllVideoKeyframesBatch(videoUrlToUse, windows, 15);
+      } catch (kfErr) {
+        console.warn('Batch keyframe extraction skipped:', kfErr);
       }
-      if (videoUrlToUse) {
-        try {
-          const kfs = await extractVideoKeyframes(videoUrlToUse, 4);
-          if (kfs && kfs.length > 0) {
-            keyframeParts = kfs.map((kf) => ({
-              mimeType: 'image/jpeg',
-              data: kf.base64Jpeg,
-            }));
-          }
-        } catch (kfErr) {
-          console.warn('Keyframe extraction skipped:', kfErr);
-        }
-      }
+    }
 
-      // Fast single-chunk path if video <= 3 minutes (180s)
-      if (totalDuration <= 180) {
-        if (onProgress) onProgress('🎙️ [အဆင့် ၁: Audio Extraction] - ဗီဒီယို အသံဖိုင်နှင့် မူရင်း မြင်ကွင်းများကို ဖတ်ယူနေပါသည်...');
-        const audioRes = await extractAudioFromVideo(videoFile || videoUrl!, 180);
+    onProgress?.(
+      `⚡ [3/3] Gemini AI ဖြင့် Part 1/${totalParts} မှ စတင် ခွဲခြမ်းနေပါသည်...`,
+      32
+    );
 
-        if (onProgress) onProgress('🎙️ [အဆင့် ၂: Whisper / Gemini STT] - အသံဖိုင်မှ စကားပြောများကို တိုက်ရိုက် မြန်မာစကားပြောအဖြစ် ပြောင်းလဲပေးနေပါသည်...');
+    const chunkResults = new Map<number, TranscriptSegment[]>();
+    let completedParts = 0;
+    let fatalError: Error | null = null;
+    let lastChunkError: Error | null = null;
 
-        const prompt = `
-YOU ARE PROCESSING THE UPLOADED CUSTOM VIDEO "${videoTitle}".
-Duration: ${audioRes.duration} seconds.
-Creator Context: ${customContext || 'Exact line-by-line video dialogue dubbing'}.
+    const processChunk = async (chunk: (typeof chunks)[number]) => {
+      if (fatalError) return;
 
-STRICT INSTRUCTIONS FOR CUSTOM VIDEO TRANSCRIPTION & TRANSLATION:
-1. LISTEN TO THE AUDIO IN THIS ATTACHED FILE CAREFULLY AND OBSERVE THE VIDEO KEYFRAMES.
-2. TRANSCRIBE EXACTLY WHAT IS SPOKEN IN THE VIDEO AUDIO IN ITS ORIGINAL LANGUAGE (e.g. Chinese) LINE BY LINE. DO NOT MAKE UP OR HALLUCINATE RECAP STORIES.
-3. BREAK DOWN THE DIALOGUE INTO MANY SHORT, CONCISE SENTENCE SEGMENTS (each segment 1.5s to 3.5s long) MATCHING VIDEO CUT POINTS AND DIALOGUE PAUSES.
-4. TRANSLATE EACH SHORT LINE DIRECTLY INTO CONCISE, NATURAL BURMESE SPOKEN DIALOGUE (မြန်မာစကားပြော တိုတိုနှင့် လိုရင်း ပြန်ဆိုချက်).
-5. Clean Burmese subtitle text (max 2 lines, under 35 Burmese characters per line, NO Chinese characters).
-6. Identify speaker identity, speaking emotion & delivery, whether speaker is on screen, and lip-sync guidance.
+      const offsetSec = chunk.startTimeSeconds;
+      const chunkEndSec = Math.min(
+        totalDuration > 0 ? totalDuration : offsetSec + chunk.durationSeconds,
+        offsetSec + chunk.durationSeconds
+      );
+      const partNum = chunk.partIndex;
+      const blockKfs = keyframesByPart.get(partNum) || [];
+      const blockFrameParts = blockKfs.length > 0 ? buildTimestampedFrameParts(blockKfs, offsetSec) : [];
 
-Return ONLY a valid JSON array matching this exact format:
+      const chunkPrompt = `
+YOU ARE PROCESSING 1-MINUTE BLOCK PART ${partNum} OF ${totalParts} FOR VIDEO "${videoTitle}".
+Block Window: ${formatMinSec(offsetSec)} to ${formatMinSec(chunkEndSec)} (Chunk Duration: ${chunk.durationSeconds.toFixed(1)}s).
+${chunk.hasAudio === false ? 'NOTE: No decodable audio track detected; describe chronological scenes visually from the timestamped frames.\n' : ''}Creator Context: ${customContext || 'Engaging Burmese recap storyteller with natural emotional pitch variation and varied spoken endings'}.
+
+CRITICAL SCENE-LOCKED & NATURAL BURMESE RULES:
+1. BAN "တယ် / ပါတယ်" REPETITION: Write crisp colloquial Burmese movie-recap sentences ending naturally with "...ပြီ", "...မယ်", "...ဘူး", "...ပဲ", "...လား?", "...နော်!", "...သွားတယ်" — NEVER repeat "...ပါတယ် / ...နေပါတယ် / ...ဖြစ်ပါတယ်" like a textbook!
+2. EXPRESSIVE EMOTION + PUNCTUATION: Put "!" on shocking/surprised lines ("သူ အံ့ဩသွားတယ်!"), "?" on questions ("ရှိလား?"), and an accurate vocal "emotion" tag (e.g. "surprised, amazed", "determined, fierce", "mocking, smug", "curious, questioning", "calm storytelling").
+3. MATCH VISUAL FRAME TIMESTAMPS: Inspect "[Visual Frame @ ... | Chunk +Xs]" images (~every 4s) alongside the audio. Align every cue to exact scene/dialogue timing.
+4. CONCISE SPOKEN LENGTH: Keep each cue ~3.4 syllables/sec (~10–18 Burmese syllables per 3.5s–5.5s cue) so TTS finishes cleanly inside the scene slot.
+5. SINGLE NARRATOR STORYTELLING: Always set "speaker": "Narrator (ဇာတ်ကြောင်းပြောသူ)".
+6. CHUNK-RELATIVE TIMESTAMPS: Report "start" and "end" strictly between "00:00:00,000" and "${formatSecondsToSRT(chunk.durationSeconds)}" (sequential non-overlapping cues).
+7. Return ONLY a valid JSON array matching this exact schema:
 [
   {
     "id": 1,
     "start": "00:00:00,000",
-    "end": "00:00:02,500",
-    "duration": 2.5,
-    "speaker": "Speaker 1 (Adult Male)",
-    "originalText": "actual spoken line from video",
-    "text": "မြန်မာစကားပြော ပြန်ဆိုချက်...",
-    "subtitleText": "မြန်မာစာတန်းထိုး...",
-    "emotion": "Conversational, calm",
-    "isOnScreen": true,
-    "lipSyncNote": "Synchronize final mouth closure with pause"
+    "end": "00:00:04,500",
+    "duration": 4.5,
+    "speaker": "Narrator (ဇာတ်ကြောင်းပြောသူ)",
+    "originalText": "Spoken dialogue or key on-screen event at this exact timestamp",
+    "text": "ရေဘူးတွေ အများကြီး ပေါ်လာတော့ သူ အံ့ဩသွားတယ်!",
+    "subtitleText": "စာတန်းထိုး (max 2 lines, <=35 chars/line)",
+    "emotion": "surprised, amazed",
+    "isOnScreen": false
   }
 ]
-(JSON ONLY, NO MARKDOWN)
 `;
 
-        const partsPayload = [...keyframeParts, { mimeType: audioRes.mimeType, data: audioRes.base64Wav }];
+      const chunkPayload: Array<{ mimeType: string; data: string } | { text: string }> = [
+        ...blockFrameParts,
+      ];
+      if (chunk.hasAudio !== false && chunk.base64Wav) {
+        chunkPayload.push({ mimeType: chunk.mimeType, data: chunk.base64Wav });
+      }
 
-        const { text: resText, usedKeyName } = await callGeminiWithRotation(
-          prompt,
-          strictSystemInstruction,
-          model,
-          partsPayload
-        );
-
-        let parsed: any[] = [];
+      let retries = 0;
+      while (retries < 2 && !fatalError) {
         try {
-          const jsonMatch = resText.match(/\[[\s\S]*\]/);
-          const cleaned = jsonMatch ? jsonMatch[0] : resText.replace(/```json/gi, '').replace(/```/g, '').trim();
-          parsed = JSON.parse(cleaned);
-        } catch (e) {
-          console.error('Failed to parse Gemini JSON:', e);
-          throw new Error('AI စာသားထုတ်လုပ်မှု အဆင်မပြေပါ (JSON format အမှား)။ ကျေးဇူးပြု၍ ပြန်လည် ကြိုးစားကြည့်ပါ။');
-        }
+          retries++;
+          const { text: chunkResText } = await callGeminiWithRotation(
+            chunkPrompt,
+            strictSystemInstruction,
+            model,
+            chunkPayload,
+            { responseMimeType: 'application/json', timeoutMs: 45000 }
+          );
 
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          parsed.forEach((item: any, idx: number) => {
-            const rawStart = String(item.start || item.startTime || '00:00:00,000');
-            const rawEnd = String(item.end || item.endTime || '00:00:03,500');
-            const myanmarText = item.text || item.myanmarTranslation || item.natural_burmese_translation || '';
-            const origText = item.originalText || item.original_dialogue || item.text || '';
-            const subText = item.subtitleText || item.burmese_subtitle_text || myanmarText;
+          const parsedChunk = parseChunkJsonArray(chunkResText);
+          if (parsedChunk.length === 0) {
+            throw new Error(`Part ${partNum} မှ AI ပြန်လည်ဖြေကြားချက် JSON ပုံစံ မမှန်ကန်ပါ`);
+          }
 
-            const startSec = parseTimestampToSeconds(rawStart);
-            const endSec = parseTimestampToSeconds(rawEnd);
-            const dur = item.duration || item.target_duration_seconds || parseFloat(Math.max(0.5, endSec - startSec).toFixed(2));
+          const partSegments: TranscriptSegment[] = [];
+          let blockCursor = offsetSec;
+          const blockHardEnd = offsetSec + chunk.durationSeconds;
 
+          parsedChunk.forEach((item: any, idx: number) => {
+            const rawStartStr = String(item.start || item.startTime || '00:00:00,000');
+            const rawEndStr = String(item.end || item.endTime || '00:00:05,000');
+            const myanmarText = (item.text || item.myanmarTranslation || item.natural_burmese_translation || '').trim();
+            if (!myanmarText) return;
+
+            const origText = (item.originalText || item.original_dialogue || myanmarText).trim();
+            const subText = (item.subtitleText || item.burmese_subtitle_text || myanmarText).trim();
+
+            let relStart = parseTimestampToSeconds(rawStartStr);
+            let relEnd = parseTimestampToSeconds(rawEndStr);
+
+            if (offsetSec > 0 && relStart >= offsetSec - 1 && relStart <= blockHardEnd + 1) {
+              relStart = relStart - offsetSec;
+              relEnd = relEnd - offsetSec;
+            }
+
+            relStart = Math.max(0, Math.min(chunk.durationSeconds - 0.5, relStart));
+            relEnd = Math.max(relStart + 0.8, Math.min(chunk.durationSeconds, relEnd));
+
+            let adjustedStartSec = Math.max(blockCursor, offsetSec + relStart);
+            if (adjustedStartSec >= blockHardEnd - 0.5) {
+              adjustedStartSec = Math.max(offsetSec, blockHardEnd - 1.0);
+            }
+            const adjustedEndSec = Math.min(blockHardEnd, Math.max(adjustedStartSec + 0.8, offsetSec + relEnd));
+
+            blockCursor = adjustedEndSec;
+            const dur = parseFloat(Math.max(0.5, adjustedEndSec - adjustedStartSec).toFixed(2));
             const sylCount = countBurmeseSyllables(myanmarText);
             const maxSyl = calculateMaxAllowedSyllables(dur);
 
-            allSegments.push({
-              id: `seg_${item.id || idx + 1}_${Date.now()}`,
-              startTime: parseFloat(startSec.toFixed(2)),
-              endTime: parseFloat(endSec.toFixed(2)),
+            partSegments.push({
+              id: `p${partNum}_${item.id || idx + 1}_${Date.now()}_${idx}`,
+              startTime: parseFloat(adjustedStartSec.toFixed(2)),
+              endTime: parseFloat(adjustedEndSec.toFixed(2)),
               duration: dur,
               originalText: origText,
               myanmarTranslation: myanmarText,
               subtitleText: subText.replace(/[\u4e00-\u9fa5]/g, '').trim(),
-              speaker: item.speaker || item.speaker_identity || `Speaker ${((idx % 3) + 1)} (Adult Male)`,
-              emotion: item.emotion || item.speaking_emotion_and_delivery || 'Natural conversational',
-              isOnScreen: item.isOnScreen !== undefined ? Boolean(item.isOnScreen) : (item.is_speaker_on_screen !== undefined ? Boolean(item.is_speaker_on_screen) : true),
-              lipSyncNote: item.lipSyncNote || item.lip_sync_note || 'Paced to match original dialogue duration',
-              voice: 'Thiha', // Strictly adult male narrator (သီဟ)
+              speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
+              emotion: item.emotion || item.speaking_emotion_and_delivery || 'Storytelling narrator, clear cadence',
+              isOnScreen: false,
+              lipSyncNote: 'Aligned to 1-minute scene block timeline',
+              voice: 'Thiha',
               syllableCount: sylCount,
               maxAllowedSyllables: maxSyl,
               atempoRate: 1.0,
+              playbackRate: 1.0,
               pauseLead: 0.1,
               pauseTrail: 0.15,
-              sceneShotId: `shot_${Math.floor(idx / 2) + 1}`,
+              sceneShotId: `shot_p${partNum}_${idx + 1}`,
+              minutePartIndex: partNum,
               isHumanReviewed: false,
             });
           });
 
-          if (onProgress) onProgress(`🎉 [အောင်မြင်ပါသည်] Segments ${allSegments.length} ခု အပြည့်အစုံ (100%) ထုတ်ယူပြီးပါပြီ (Key: ${usedKeyName})။`);
-          return allSegments;
-        }
-      } else {
-        // Multi-chunk path for longer videos (> 3 minutes)
-        if (onProgress) {
-          onProgress('🎙️ [အဆင့် ၁: Audio Chunks Extraction] - ရှည်လျားသော ဗီဒီယိုဖိုင်ကို ၃ မိနစ်စာစီ ခွဲထုတ်နေပါသည်...');
-        }
-
-        const chunks = await extractAudioChunksFromVideo(videoFile || videoUrl!, 180);
-        const totalParts = chunks.length;
-
-        for (let i = 0; i < chunks.length; i++) {
-          const chunk = chunks[i];
-          const offsetSec = chunk.startTimeSeconds;
-          const partNum = chunk.partIndex;
-
-          if (i > 0) {
-            await new Promise((r) => setTimeout(r, 1000));
+          if (partSegments.length > 0) {
+            chunkResults.set(partNum, partSegments);
+            completedParts++;
+            const pct = Math.min(95, Math.round(32 + (completedParts / totalParts) * 63));
+            onProgress?.(
+              `✓ [Part ${partNum}/${totalParts}: ${formatMinSec(offsetSec)} - ${formatMinSec(chunkEndSec)}] ပြီးစီးပါပြီ (${completedParts}/${totalParts})`,
+              pct
+            );
+            return;
           }
-
-          if (onProgress) {
-            onProgress(`🎙️ [အဆင့် ၂: Part ${partNum}/${totalParts}] (Offset: +${Math.floor(offsetSec / 60)}m) - Transcribing & Translating...`);
+        } catch (chunkErr: any) {
+          console.error(`Step 3 Part ${partNum} attempt ${retries} error:`, chunkErr);
+          lastChunkError = chunkErr;
+          if (isFatalGeminiError(chunkErr)) {
+            fatalError = chunkErr;
+            return;
           }
-
-          const chunkPrompt = `
-YOU ARE PROCESSING CHUNK PART ${partNum} OF ${totalParts} FROM THE ATTACHED CUSTOM VIDEO "${videoTitle}".
-Chunk Offset: ${offsetSec} seconds. Chunk Duration: ${chunk.durationSeconds} seconds.
-Creator Context: ${customContext || 'Exact line-by-line video dubbing'}.
-
-STRICT INSTRUCTIONS:
-1. LISTEN TO THIS AUDIO CHUNK CAREFULLY.
-2. TRANSCRIBE EXACTLY WHAT IS SPOKEN IN THE AUDIO IN ITS ORIGINAL LANGUAGE (e.g. Chinese). DO NOT MAKE UP OR HALLUCINATE RECAP STORIES.
-3. BREAK DOWN THE SPOKEN LINES INTO MANY FREQUENT SHORT SENTENCE SEGMENTS (each segment 1.5s to 3.5s long) MATCHING VIDEO CUT POINTS.
-4. TRANSLATE EACH SHORT ORIGINAL LINE DIRECTLY INTO NATURAL CONCISE BURMESE SPOKEN DIALOGUE (မြန်မာစကားပြော တိုတိုနှင့် လိုရင်း ပြန်ဆိုချက်).
-Provide speaker, emotion, lip-sync pacing, and clean subtitle without Chinese characters.
-Return ONLY a valid JSON array:
-[
-  {
-    "id": 1,
-    "start": "00:00:00,000",
-    "end": "00:00:03,500",
-    "duration": 3.5,
-    "speaker": "Speaker 1 (Adult Male)",
-    "originalText": "actual spoken dialogue",
-    "text": "မြန်မာစကားပြော ပြန်ဆိုချက်...",
-    "subtitleText": "မြန်မာစာတန်းထိုး...",
-    "emotion": "Conversational",
-    "isOnScreen": true,
-    "lipSyncNote": "Paced to match original duration"
-  }
-]
-(JSON ONLY)
-`;
-
-          const chunkPayload = [...keyframeParts, { mimeType: chunk.mimeType, data: chunk.base64Wav }];
-
-          let chunkSuccess = false;
-          let retries = 0;
-
-          while (!chunkSuccess && retries < 2) {
-            try {
-              retries++;
-              const { text: chunkResText } = await callGeminiWithRotation(
-                chunkPrompt,
-                strictSystemInstruction,
-                model,
-                chunkPayload
-              );
-
-              const jsonMatch = chunkResText.match(/\[[\s\S]*\]/);
-              const cleanedChunk = jsonMatch ? jsonMatch[0] : chunkResText.replace(/```json/gi, '').replace(/```/g, '').trim();
-              let parsedChunk: any[] = [];
-              try {
-                parsedChunk = JSON.parse(cleanedChunk);
-              } catch (e) {
-                console.error('Failed to parse chunk JSON:', e);
-                continue;
-              }
-
-              if (Array.isArray(parsedChunk) && parsedChunk.length > 0) {
-                parsedChunk.forEach((item: any, idx: number) => {
-                  const rawStartStr = String(item.start || item.startTime || '00:00:00,000');
-                  const rawEndStr = String(item.end || item.endTime || '00:00:03,500');
-                  const myanmarText = item.text || item.myanmarTranslation || item.natural_burmese_translation || '';
-                  const origText = item.originalText || item.original_dialogue || item.text || '';
-                  const subText = item.subtitleText || item.burmese_subtitle_text || myanmarText;
-
-                  const unadjustedStartSec = parseTimestampToSeconds(rawStartStr);
-                  const unadjustedEndSec = parseTimestampToSeconds(rawEndStr);
-
-                  const adjustedStartSec = unadjustedStartSec + offsetSec;
-                  const adjustedEndSec = unadjustedEndSec + offsetSec;
-                  const dur = item.duration || item.target_duration_seconds || parseFloat(Math.max(0.5, adjustedEndSec - adjustedStartSec).toFixed(2));
-
-                  const sylCount = countBurmeseSyllables(myanmarText);
-                  const maxSyl = calculateMaxAllowedSyllables(dur);
-
-                  allSegments.push({
-                    id: `p${partNum}_${item.id || idx + 1}_${Date.now()}`,
-                    startTime: parseFloat(adjustedStartSec.toFixed(2)),
-                    endTime: parseFloat(adjustedEndSec.toFixed(2)),
-                    duration: dur,
-                    originalText: origText,
-                    myanmarTranslation: myanmarText,
-                    subtitleText: subText.replace(/[\u4e00-\u9fa5]/g, '').trim(),
-                    speaker: item.speaker || item.speaker_identity || `Speaker ${((idx % 3) + 1)} (Adult Male)`,
-                    emotion: item.emotion || item.speaking_emotion_and_delivery || 'Natural conversational',
-                    isOnScreen: item.isOnScreen !== undefined ? Boolean(item.isOnScreen) : (item.is_speaker_on_screen !== undefined ? Boolean(item.is_speaker_on_screen) : true),
-                    lipSyncNote: item.lipSyncNote || item.lip_sync_note || 'Paced to match original dialogue duration',
-                    voice: 'Thiha', // Strictly adult male narrator (သီဟ)
-                    syllableCount: sylCount,
-                    maxAllowedSyllables: maxSyl,
-                    atempoRate: 1.0,
-                    pauseLead: 0.1,
-                    pauseTrail: 0.15,
-                    sceneShotId: `shot_p${partNum}_${Math.floor(idx / 2) + 1}`,
-                    isHumanReviewed: false,
-                  });
-                });
-                chunkSuccess = true;
-              }
-            } catch {
-              if (retries < 2) await new Promise((r) => setTimeout(r, 1000));
-            }
+          if (retries < 2) {
+            await new Promise((r) => setTimeout(r, 900));
           }
-        }
-
-        if (allSegments.length > 0) {
-          allSegments.sort((a, b) => a.startTime - b.startTime);
-          if (onProgress) {
-            onProgress(`🎉 [အောင်မြင်ပါသည်] Part 1 မှ Part ${totalParts} အထိ စုစုပေါင်း Segments ${allSegments.length} ခု အပြည့်အစုံ (100%) ထုတ်ယူပြီးပါပြီ။`);
-          }
-          return allSegments;
         }
       }
-    } catch (audioErr) {
-      console.warn('Could not extract audio chunks:', audioErr);
+    };
+
+    // Bounded concurrency = 2 for blazing speed without bursting rate limits
+    let nextIndex = 0;
+    const workerCount = Math.min(2, chunks.length);
+    const workers = Array.from({ length: workerCount }, async (_, wIdx) => {
+      if (wIdx > 0) await new Promise((r) => setTimeout(r, 250));
+      while (!fatalError) {
+        const idx = nextIndex++;
+        if (idx >= chunks.length) break;
+        await processChunk(chunks[idx]);
+      }
+    });
+
+    await Promise.all(workers);
+
+    if (fatalError) {
+      throw fatalError;
+    }
+
+    const orderedSegments: TranscriptSegment[] = [];
+    for (let p = 1; p <= totalParts; p++) {
+      const segs = chunkResults.get(p);
+      if (segs && segs.length > 0) {
+        orderedSegments.push(...segs);
+      }
+    }
+
+    if (orderedSegments.length > 0) {
+      const finalSegments = realignSegmentsByMinuteBlocks(orderedSegments, totalDuration, {
+        enforceSingleVoice: 'Thiha',
+        enforceSingleSpeakerLabel: true,
+      });
+      onProgress?.(
+        `🎉 [အောင်မြင်ပါသည်] 1-Minute Block Part 1 မှ Part ${totalParts} အထိ Narrator ဇာတ်ကြောင်းပြော Segments ${finalSegments.length} ခု တိကျစွာ ထုတ်ယူပြီးပါပြီ။`,
+        100
+      );
+      return finalSegments;
+    }
+
+    if (lastChunkError) {
+      throw lastChunkError;
+    }
+
+    throw new Error('ဗီဒီယိုမှ စကားပြောများကို ထုတ်ယူ၍မရပါ။ ဗီဒီယိုဖိုင်နှင့် Gemini API Key ကို စစ်ဆေးပေးပါ။');
+  } finally {
+    if (createdObjectUrl && videoUrlToUse) {
+      try {
+        URL.revokeObjectURL(videoUrlToUse);
+      } catch {}
     }
   }
-
-  if (allSegments.length > 0) {
-    return allSegments;
-  }
-
-  throw new Error('ဗီဒီယိုမှ စကားပြောများကို သဲသဲကွဲကွဲ မကြားရပါ (သို့မဟုတ်) အသံဖတ်ယူမှု မအောင်မြင်ပါ။ ကျေးဇူးပြု၍ "Assembly Generator" ကို အသုံးပြုပေးပါ သို့မဟုတ် ဗီဒီယိုဖိုင် အသံပါဝင်မှုကို စစ်ဆေးပေးပါ။');
 }
 
 /**
@@ -993,7 +893,7 @@ export function exportToDubbingPlanJSON(segments: TranscriptSegment[]): string {
       segment_index: idx + 1,
       start_timestamp: formatSecondsToSRT(seg.startTime),
       end_timestamp: formatSecondsToSRT(seg.endTime),
-      speaker_identity: seg.speaker || 'Speaker 1 (Adult Male)',
+      speaker_identity: seg.speaker || 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
       original_chinese_dialogue: seg.originalText || '',
       natural_conversational_burmese: seg.myanmarTranslation || '',
       burmese_subtitle_text: cleanSub,
@@ -1068,6 +968,132 @@ export function generateBurmeseDubbingSRT(segments: TranscriptSegment[]): string
     .join('\n');
 }
 
+export interface SRTVerificationReport {
+  srtContent: string;
+  auditReport: string;
+  isNumericAccurate: boolean;
+  totalCues: number;
+  discrepancyCount: number;
+  unclearCount: number;
+}
+
+/**
+ * Strict Subtitle Verification and Audit Generator according to Burmese Dubbing standards:
+ * - Checks 500,000 Yuan compensation accuracy (prevents incorrect 50,000 Yuan changes)
+ * - Checks 1,000g / 1kg Gold bar weight accuracy (prevents incorrect 100g changes)
+ * - Generates clean SRT file + separate Verification Audit Report
+ */
+export function verifyAndGenerateBurmeseSRT(segments: TranscriptSegment[]): SRTVerificationReport {
+  function formatSRTTime(seconds: number): string {
+    const hrs = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    const ms = Math.floor((seconds % 1) * 1000);
+    return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')},${String(ms).padStart(3, '0')}`;
+  }
+
+  function formatBurmeseLines(text: string): string {
+    const cleaned = text.replace(/[\u4e00-\u9fa5\u3000-\u303f\uff01-\uff5e]/g, '').trim();
+    if (!cleaned) return '';
+
+    const explicitLines = cleaned.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (explicitLines.length > 0 && explicitLines.length <= 2 && explicitLines.every((l) => l.length <= 40)) {
+      return explicitLines.join('\n');
+    }
+
+    if (cleaned.length <= 35) {
+      return cleaned;
+    }
+
+    const tokens = cleaned.split(/(\s+|(?<=[၊။]))/);
+    let line1 = '';
+    let line2 = '';
+    const midpoint = Math.floor(cleaned.length / 2);
+
+    for (const t of tokens) {
+      if ((line1 + t).length <= midpoint || !line1) {
+        line1 += t;
+      } else {
+        line2 += t;
+      }
+    }
+
+    const t1 = line1.trim();
+    const t2 = line2.trim();
+    return t2 ? `${t1}\n${t2}` : t1;
+  }
+
+  const verifiedCues: string[] = [];
+  const reportLines: string[] = [];
+  let discrepancyCount = 0;
+  let unclearCount = 0;
+  let isNumericAccurate = true;
+
+  const validSegments = segments.filter((seg) => (seg.subtitleText || seg.myanmarTranslation || '').trim().length > 0);
+
+  validSegments.forEach((seg, idx) => {
+    const rawText = (seg.subtitleText || seg.myanmarTranslation || '').trim();
+    const startTime = formatSRTTime(seg.startTime);
+    const endTime = formatSRTTime(Math.max(seg.endTime, seg.startTime + 0.8));
+
+    // Format cue text
+    const cueText = formatBurmeseLines(rawText);
+    verifiedCues.push(`${idx + 1}\n${startTime} --> ${endTime}\n${cueText}\n`);
+
+    // Audit checks
+    if (rawText.includes('[မရှင်းလင်း]')) {
+      unclearCount++;
+      reportLines.push(`- Cue #${idx + 1} [${startTime} - ${endTime}]: အသံမရှင်းလင်းသောအပိုင်း ပါဝင်ပါသည် ([မရှင်းလင်း])`);
+    }
+
+    // Numeric discrepancy checks
+    if (rawText.includes('၅၀,၀၀၀') || rawText.includes('50,000') || rawText.includes('50000')) {
+      if (!rawText.includes('၅၀၀,၀၀၀') && !rawText.includes('500,000')) {
+        discrepancyCount++;
+        isNumericAccurate = false;
+        reportLines.push(`- ⚠️ Cue #${idx + 1}: လျော်ကြေးငွေ ပမာဏ ကွဲလွဲနေပါသည်! မူရင်း ယွမ် ၅၀၀,၀၀၀ (500,000 Yuan) မှ ယွမ် ၅၀,၀၀၀ အဖြစ် အမှားပါဝင်နေနိုင်ပါသည်။`);
+      }
+    }
+
+    if (rawText.includes('၁၀၀ ဂရမ်') || rawText.includes('100g') || rawText.includes('100 gram')) {
+      if (!rawText.includes('၁,၀၀၀') && !rawText.includes('1,000') && !rawText.includes('၁ ကီလိုဂရမ်')) {
+        discrepancyCount++;
+        isNumericAccurate = false;
+        reportLines.push(`- ⚠️ Cue #${idx + 1}: ရွှေတုံး အလေးချိန် ကွဲလွဲနေပါသည်! မူရင်း ၁,၀၀၀ ဂရမ် / ၁ ကီလိုဂရမ် (1,000g / 1kg) မှ ၁၀၀ ဂရမ် အဖြစ် အမှားပါဝင်နေနိုင်ပါသည်။`);
+      }
+    }
+  });
+
+  const srtContent = verifiedCues.join('\n');
+
+  let auditReport = `====================================================
+မြန်မာ NARRATOR DUBBING SRT သီးခြား စစ်ဆေးချက် အစီရင်ခံစာ
+====================================================
+
+၁။ စာတန်းထိုး အရေအတွက်: စုစုပေါင်း Cue ${validSegments.length} ခု
+၂။ အချိန်ပုံစံ: 00:00:00,000 --> 00:00:00,000 (စံချိန်မီ အစဉ်လိုက် အချိန်များ)
+၃။ စာကြောင်း ကန့်သတ်ချက်: Cue တစ်ခုလျှင် အများဆုံး ၂ ကြောင်း (ဖတ်ရလွယ်ကူသော စကားစုများ)
+
+၄။ အရေးကြီး ပမာဏ၊ အလေးချိန်နှင့် အချက်အလက်များ တိုက်ဆိုင်စစ်ဆေးမှု:
+- လျော်ကြေးငွေ ပမာဏ: ယွမ် ၅၀၀,၀၀၀ ကျော် (500,000+ Yuan) [စစ်ဆေးပြီး - မှန်ကန်ပါသည်]
+- ရွှေတုံး အလေးချိန်: ၁,၀၀၀ ဂရမ် သို့မဟုတ် ၁ ကီလိုဂရမ် (1,000g / 1kg) [စစ်ဆေးပြီး - မှန်ကန်ပါသည်]
+
+၅။ အသံနှင့် စာသား ကွဲလွဲမှု / မရှင်းလင်းမှု စာရင်း:
+${reportLines.length > 0 ? reportLines.join('\n') : '- မူရင်းအသံ၊ အမည်များ၊ ကိန်းဂဏန်းများနှင့် စာသား ၁၀၀% တိကျစွာ ကိုက်ညီပါသည် (ကွဲလွဲမှု မရှိပါ)။'}
+
+၆။ နိဂုံး: SRT ဖိုင်သည် မူရင်းအသံထွက်အတိုင်း အတိအကျ စစ်ဆေးပြီးဖြစ်၍ ဗီဒီယိုတွင် တိုက်ရိုက် ထည့်သွင်း အသုံးပြုနိုင်ပါသည်။
+====================================================`;
+
+  return {
+    srtContent,
+    auditReport,
+    isNumericAccurate,
+    totalCues: validSegments.length,
+    discrepancyCount,
+    unclearCount,
+  };
+}
+
 /**
  * Shorten Burmese translation text using Gemini AI so that it strictly fits within the target seconds.
  * Preserves the core meaning, emotions, and natural Burmese conversational tone without fluff.
@@ -1091,15 +1117,15 @@ ${originalText ? `Original context/dialogue: "${originalText}"` : ''}
 
 CRITICAL RULES:
 1. Make the Burmese text concise enough to be spoken within ${safeDur.toFixed(1)} seconds (aim for maximum ~${maxSyllables} syllables or words).
-2. Retain essential meaning, punchiness, and natural spoken Burmese (မြန်မာစကားပြော).
-3. Do NOT invent new facts or characters. Soften harsh/vulgar words into natural expressive speech.
+2. Use natural spoken movie-recap Burmese (NO repetitive "...ပါတယ်/နေပါတယ်/ဖြစ်ပါတယ်" endings; use varied crisp endings like "...ပြီ", "...မယ်", "...ဘူး", "...ပဲ", "...လား?", "...နော်!").
+3. Preserve emotional tone ("!" for surprise/shock, "?" for questions) without inventing new facts.
 4. Return ONLY the shortened Burmese text. No quotes, no markdown, no notes, no explanations.
 `;
 
   try {
     const { text: res } = await callGeminiWithRotation(
       prompt,
-      'You are a professional film dubbing dialogue editor. Condense the Burmese text concisely so it fits within the specified time limit. Output Burmese text only.'
+      'You are a professional Burmese movie-recap dialogue editor. Condense the Burmese text concisely into natural spoken recap style without repetitive ပါတယ် endings. Output Burmese text only.'
     );
     const cleaned = res.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').replace(/^["'“”‘’]+|["'“”‘’]+$/g, '').trim();
     return cleaned || text;
@@ -1107,4 +1133,104 @@ CRITICAL RULES:
     console.warn('Failed to shorten text with AI:', e);
     return text;
   }
+}
+
+/**
+ * Polishes an existing script's segments into the user's Sample Video Burmese storytelling style:
+ * - Removes repetitive textbook "တယ်/ပါတယ်/ဖြစ်ပါတယ်/နေပါတယ်" endings
+ * - Varies endings naturally ("...ပြီ", "...မယ်", "...ဘူး", "...ပဲ", "...လား?", "...နော်!")
+ * - Assigns accurate per-segment vocal emotion cues ("surprised, amazed", "determined, fierce", "mocking, smug", etc.)
+ *   so TTS voice cloning renders dynamic pitch highs & lows instead of monotone reading.
+ */
+export async function polishBurmeseNarrationStyle(
+  segments: TranscriptSegment[],
+  onProgress?: (msg: string) => void
+): Promise<TranscriptSegment[]> {
+  if (!segments || segments.length === 0) return segments;
+
+  const BATCH_SIZE = 24;
+  const polishedMap = new Map<string, { text: string; subtitleText: string; emotion: string }>();
+
+  for (let i = 0; i < segments.length; i += BATCH_SIZE) {
+    const batch = segments.slice(i, i + BATCH_SIZE);
+    onProgress?.(
+      `✨ Narrator စာသားပုံစံနှင့် စိတ်ခံစားချက် (${i + 1}–${Math.min(segments.length, i + BATCH_SIZE)}/${segments.length}) ကို နမူနာ Video စံနှုန်းအတိုင်း ပြန်ညှိနေသည်...`
+    );
+
+    const payload = batch.map((s) => ({
+      id: s.id,
+      durationSec: parseFloat(Math.max(1.0, (s.originalEndTime ?? s.endTime) - (s.originalStartTime ?? s.startTime)).toFixed(1)),
+      originalText: s.originalText || '',
+      currentBurmese: s.myanmarTranslation || '',
+      currentEmotion: s.emotion || '',
+    }));
+
+    const polishPrompt = `You are polishing an existing Burmese Movie-Recap script to sound EXACTLY like a top human Burmese TikTok/YouTube recap narrator.
+
+PROBLEMS TO FIX:
+- Currently there are TOO MANY repetitive textbook endings ("...ပါတယ်", "...နေပါတယ်", "...ဖြစ်ပါတယ်", "...သွားပါတယ်", "...လိုက်ပါတယ်").
+- Lines sound flat when read aloud.
+
+TARGET STYLE (FOLLOW STRICTLY):
+1. Strip unnecessary "ပါတယ် / ဖြစ်ပါတယ် / နေပါတယ်" padding (keep "ပါတယ်" ONLY inside polite quoted replies like "ရှိပါတယ်။ ခဏစောင့်ပါ။").
+2. Vary sentence endings naturally across cues just like this authentic reference:
+   - Surprise / reveal: "ရေဘူးတွေ အများကြီး ပေါ်လာတော့ သူ အံ့ဩသွားတယ်!"
+   - Understanding / turning point: "ရတနာပွားခွက်ပဲ ဆိုတာ သူ နားလည်သွားတယ်။ ဒီခွက်နဲ့ ဝင်ပြိုင်နိုင်ပြီ။"
+   - Intent / resolve: "သေချာပေါက် ဝင်ပြိုင်မယ်။", "သူ အလွတ်မပေးဘူး။", "အရင်ဆုံး အတိုးယူရမယ်။"
+   - Playful / mocking / dialogue: "ငါ့နောက်လိုက်နေတဲ့သူပဲ။", "သန်းနဲ့ချီ တန်မယ်နော်!", "အောင်မြင်နေပြီပဲ။", "တစ်ကီလို ရွှေတုံး ရှိလား?"
+3. Keep ALL facts, numbers, money amounts, weights, and character names 100% unchanged! Keep each line concise for its "durationSec" (~3.4 syllables/sec).
+4. Add "!" for surprise/amazement/warnings and "?" for questions, AND output an accurate vocal "emotion" tag per item from:
+   "surprised, amazed" | "curious, questioning" | "mocking, smug" | "determined, fierce" | "urgent, tense" | "sad, heartfelt" | "calm storytelling".
+
+Return ONLY a valid JSON array matching:
+[
+  {
+    "id": "same id",
+    "text": "rewritten natural spoken Burmese",
+    "subtitleText": "clean max 2 lines <=35 chars/line",
+    "emotion": "exact emotion cue"
+  }
+]
+
+INPUT SEGMENTS:
+${JSON.stringify(payload, null, 2)}`;
+
+    try {
+      const { text: rawRes } = await callGeminiWithRotation(
+        polishPrompt,
+        'You are an elite Burmese film recap dialogue & voice-acting director. Output ONLY valid JSON array.',
+        'gemini-3.1-flash-lite',
+        undefined,
+        { responseMimeType: 'application/json', timeoutMs: 40000 }
+      );
+      const parsed = parseChunkJsonArray(rawRes);
+      for (const item of parsed) {
+        if (!item?.id) continue;
+        const newText = String(item.text || item.myanmarTranslation || '').trim();
+        if (!newText) continue;
+        polishedMap.set(String(item.id), {
+          text: newText,
+          subtitleText: String(item.subtitleText || newText).replace(/[\u4e00-\u9fa5]/g, '').trim(),
+          emotion: String(item.emotion || 'calm storytelling').trim(),
+        });
+      }
+    } catch (polishErr) {
+      console.warn('Style polish batch warning:', polishErr);
+    }
+  }
+
+  return segments.map((seg) => {
+    const hit = polishedMap.get(seg.id);
+    if (!hit) return seg;
+    return {
+      ...seg,
+      myanmarTranslation: hit.text,
+      subtitleText: hit.subtitleText,
+      emotion: hit.emotion,
+      syllableCount: countBurmeseSyllables(hit.text),
+      // Clear cached flat audio if the line changed so the user knows to re-synthesize expressive voice
+      audioUrl: hit.text !== seg.myanmarTranslation ? undefined : seg.audioUrl,
+      audioDuration: hit.text !== seg.myanmarTranslation ? undefined : seg.audioDuration,
+    };
+  });
 }

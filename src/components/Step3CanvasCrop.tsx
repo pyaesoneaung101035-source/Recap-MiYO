@@ -150,14 +150,14 @@ export const Step3CanvasCrop: React.FC<Step3CanvasCropProps> = ({
             className="px-4 py-2.5 bg-white/10 hover:bg-white/20 text-white font-bold text-xs rounded-xl transition-all border border-white/15 flex items-center gap-2 cursor-pointer active:scale-95 shadow-md"
           >
             <ArrowLeft className="w-4 h-4 stroke-[2.5]" />
-            <span>အဆင့် 2 သို့</span>
+            <span>ရှေ့အဆင့်</span>
           </button>
 
           <button
             onClick={onNextStep}
             className="px-5 py-2.5 bg-gradient-to-r from-sky-400 to-teal-400 hover:opacity-90 text-zinc-950 font-black text-xs rounded-xl transition-all flex items-center gap-2 shadow-lg shadow-sky-500/20 cursor-pointer active:scale-95"
           >
-            <span>အဆင့် 4 သို့</span>
+            <span>အဆင့် ၇ (Alight Motion) သို့</span>
             <ArrowRight className="w-4 h-4 stroke-[2.5]" />
           </button>
         </div>
@@ -380,18 +380,18 @@ export const Step3CanvasCrop: React.FC<Step3CanvasCropProps> = ({
           className="px-5 py-2.5 bg-white/10 hover:bg-white/20 text-white font-bold text-xs rounded-xl transition-all border border-white/15 flex items-center gap-2 cursor-pointer active:scale-95 shadow-md"
         >
           <ArrowLeft className="w-4 h-4 stroke-[2.5]" />
-          <span>အဆင့် 2 သို့</span>
+          <span>ရှေ့အဆင့် သို့</span>
         </button>
 
         <span className="text-xs text-zinc-400 font-myanmar hidden sm:inline">
-          Canvas Size ချိန်ညှိပြီးပါက အဆင့် 4 (AI Transcript) သို့ သွားပါ
+          Canvas Size ချိန်ညှိပြီးပါက အဆင့် ၇ (Alight Motion Studio) သို့ သွားပါ
         </span>
 
         <button
           onClick={onNextStep}
           className="px-6 py-3 bg-gradient-to-r from-sky-400 to-teal-400 hover:opacity-90 text-zinc-950 font-black text-xs rounded-xl transition-all flex items-center gap-2.5 shadow-xl shadow-sky-500/25 cursor-pointer active:scale-95"
         >
-          <span>အဆင့် 4 သို့</span>
+          <span>အဆင့် ၇ (Alight Motion) သို့</span>
           <ArrowRight className="w-4 h-4 stroke-[2.5]" />
         </button>
       </div>

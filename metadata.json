@@ -1,6 +1,6 @@
 {
   "name": "Myanmar AI Video Recap & Motion Studio",
-  "description": "Myanmar AI Video Recap with Gemini Flagship Neural Reality Engine (24kHz Studio Neural Model, 8 Human Reality Voices), 5 Vocal Emotion Styles, Subtitle Sync, and Alight Motion video editor.",
+  "description": "MotionRecap Ultimate Studio Pro — Myanmar AI Video Recap, Voice Clone, Dubbing, and Alight Motion Production Studio.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

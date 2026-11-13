@@ -41,21 +41,21 @@ export const EdgePanel: React.FC<EdgePanelProps> = ({
       </button>
 
       <button
-        onClick={() => setCurrentStep(4)}
+        onClick={() => setCurrentStep(3)}
         className={`p-3 rounded-full transition-all shadow-lg cursor-pointer ${
-          currentStep === 4 ? 'bg-teal-400 text-zinc-950 font-black' : 'bg-white/5 hover:bg-white/15 text-zinc-300'
+          currentStep === 3 ? 'bg-teal-400 text-zinc-950 font-black' : 'bg-white/5 hover:bg-white/15 text-zinc-300'
         }`}
-        title="Step 4: AI Transcript"
+        title="Step 3: AI Narrator Script (Gemini)"
       >
         <Sparkles className="w-4 h-4" />
       </button>
 
       <button
-        onClick={() => setCurrentStep(5)}
+        onClick={() => setCurrentStep(4)}
         className={`p-3 rounded-full transition-all shadow-lg cursor-pointer ${
-          currentStep === 5 ? 'bg-emerald-400 text-zinc-950 font-black' : 'bg-white/5 hover:bg-white/15 text-zinc-300'
+          currentStep === 4 ? 'bg-emerald-400 text-zinc-950 font-black' : 'bg-white/5 hover:bg-white/15 text-zinc-300'
         }`}
-        title="Step 5: Voice Clone Studio"
+        title="Step 4: TTS Voice Studio"
       >
         <Layers className="w-4 h-4" />
       </button>

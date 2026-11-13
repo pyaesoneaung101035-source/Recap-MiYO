@@ -13,6 +13,7 @@ export type VoiceStyle = 'conversational' | 'recap' | 'broadcast' | 'energetic' 
 export interface TtsOptions {
   voice: VoiceOption;
   style?: VoiceStyle;
+  emotion?: string; // Expressive vocal emotion cue (e.g. 'surprised, amazed', 'mocking', 'determined')
   rate?: string; // e.g. '+0%', '+10%'
   speed?: number; // e.g. 0.5 to 2.0
   pitch?: string; // e.g. '+0Hz', '-5Hz'
@@ -285,97 +286,20 @@ function getAudioContext(): AudioContext {
 export async function fetchDirectGeminiTtsRest(
   text: string,
   voice: VoiceOption,
-  apiKey?: string
+  apiKey?: string,
+  style: VoiceStyle = 'recap',
+  emotion?: string
 ): Promise<ArrayBuffer> {
-  const profile = VOICE_PROFILES[voice] || VOICE_PROFILES.Thiha;
-  const rawGeminiVoice = profile.geminiVoice || 'Puck';
-
-  const keys = loadGeminiKeys();
-  const cleanUserKey = apiKey ? apiKey.trim().replace(/[^\x21-\x7E]/g, '') : undefined;
-  const poolKeys = keys
-    .map((k) => (k && k.key ? k.key.trim().replace(/[^\x21-\x7E]/g, '') : ''))
-    .filter((k) => k.length >= 10);
-
-  const candidateKeys = [cleanUserKey, ...poolKeys].filter(Boolean) as string[];
-
-  if (candidateKeys.length === 0) {
-    throw new Error('Gemini API Key မရှိသေးပါ။ ကျေးဇူးပြု၍ API Settings တွင် Google Gemini API Key ထည့်သွင်းပေးပါ။');
+  const res = await fetch('/api/tts/gemini', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, voice, style, emotion, apiKey }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Server TTS error (HTTP ${res.status})`);
   }
-
-  const candidateModels = [
-    'gemini-3.1-flash-tts-preview',
-    'gemini-3.8-flash-tts',
-    'gemini-3.8-flash-lite-tts',
-  ];
-
-  // Primary voice and fallback voice if model doesn't support specific voice name
-  const fallbackVoice = profile.gender === 'female' ? 'Kore' : 'Charon';
-  const voiceCandidates = [rawGeminiVoice, fallbackVoice, 'Puck'].filter(
-    (v, i, arr) => arr.indexOf(v) === i
-  );
-
-  let lastErrMessage = '';
-
-  for (const keyToUse of candidateKeys) {
-    for (const model of candidateModels) {
-      for (const voiceToTry of voiceCandidates) {
-        try {
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(keyToUse)}`;
-          const res = await fetch(url, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-goog-api-key': keyToUse,
-            },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text }] }],
-              generationConfig: {
-                responseModalities: ['AUDIO'],
-                speechConfig: {
-                  voiceConfig: {
-                    prebuiltVoiceConfig: {
-                      voiceName: voiceToTry,
-                    },
-                  },
-                },
-              },
-            }),
-          });
-
-          if (res.ok) {
-            const data = await res.json().catch(() => ({}));
-            const inlineData = data.candidates?.[0]?.content?.parts?.[0]?.inlineData;
-            if (inlineData && inlineData.data) {
-              const base64Str = inlineData.data;
-              const binaryStr = atob(base64Str);
-              const bytes = new Uint8Array(binaryStr.length);
-              for (let i = 0; i < binaryStr.length; i++) {
-                bytes[i] = binaryStr.charCodeAt(i);
-              }
-              if (bytes.buffer && bytes.buffer.byteLength > 100) {
-                return bytes.buffer;
-              }
-            }
-          } else {
-            const errData = await res.json().catch(() => ({}));
-            lastErrMessage = errData.error?.message || `HTTP ${res.status}`;
-            // If voice name error (400), continue to try fallbackVoice on same model
-            if (res.status === 400 && lastErrMessage.includes('speaker voice')) {
-              continue;
-            }
-            // If quota error (429), break voice loop to try next model/key
-            if (res.status === 429 || lastErrMessage.includes('quota') || lastErrMessage.includes('RESOURCE_EXHAUSTED')) {
-              break;
-            }
-          }
-        } catch (netErr: any) {
-          lastErrMessage = netErr?.message || 'Network error';
-        }
-      }
-    }
-  }
-
-  throw new Error(`Gemini TTS Direct Call Error: ${lastErrMessage || 'Failed to generate audio'}`);
+  return await res.arrayBuffer();
 }
 
 /**
@@ -384,14 +308,15 @@ export async function fetchDirectGeminiTtsRest(
  */
 export async function synthesizeMyanmarVoice(
   text: string,
-  options: TtsOptions = { voice: 'Thiha', style: 'conversational', trimSilence: false }
+  options: TtsOptions = { voice: 'Thiha', style: 'recap', trimSilence: false }
 ): Promise<{ audioUrl: string; duration: number; isRealityGemini: boolean }> {
   let arrayBuffer: ArrayBuffer | null = null;
   let lastErrorMsg = '';
   let isRealityGemini = false;
 
   const profile = VOICE_PROFILES[options.voice] || VOICE_PROFILES.Thiha;
-  const style = options.style || 'conversational';
+  const style = options.style || 'recap';
+  const emotion = options.emotion || '';
 
   const isNetlifyOrStatic = typeof window !== 'undefined' && (
     window.location.hostname.includes('netlify.app') ||
@@ -405,7 +330,7 @@ export async function synthesizeMyanmarVoice(
       if (options.onStatusUpdate) {
         options.onStatusUpdate(`✨ Reality Human Voice (${profile.name} - ${profile.myanmarName}) ဖြင့် သဘာဝကျကျ အသံထုတ်လုပ်နေပါသည်...`);
       }
-      const directBuf = await fetchDirectGeminiTtsRest(text, options.voice);
+      const directBuf = await fetchDirectGeminiTtsRest(text, options.voice, undefined, style, emotion);
       if (directBuf && directBuf.byteLength > 100) {
         arrayBuffer = directBuf;
         isRealityGemini = true;
@@ -445,6 +370,7 @@ export async function synthesizeMyanmarVoice(
             text,
             voice: options.voice,
             style,
+            emotion,
             speed: options.speed,
             apiKey: currentKey ? currentKey.key : undefined,
           }),
@@ -493,6 +419,7 @@ export async function synthesizeMyanmarVoice(
             text,
             voice: options.voice,
             style,
+            emotion,
             speed: options.speed,
           }),
         });
@@ -511,19 +438,32 @@ export async function synthesizeMyanmarVoice(
     }
   }
 
-  // 3. TERTIARY DIRECT FALLBACK: If arrayBuffer is still empty, call Direct Gemini REST TTS
+  // 3. TERTIARY FALLBACK: Call /api/tts/free directly (bypasses any Gemini route issue & always uses Azure 24kHz Myanmar Neural)
   if (!arrayBuffer) {
     try {
       if (options.onStatusUpdate) {
-        options.onStatusUpdate(`✨ Direct Gemini Studio TTS (${profile.name}) ဖြင့် အသံထုတ်လုပ်နေပါသည်...`);
+        options.onStatusUpdate(`✨ Neural Reality Studio (${profile.name}) ဖြင့် အသံထုတ်လုပ်နေပါသည်...`);
       }
-      const directBuf = await fetchDirectGeminiTtsRest(text, options.voice);
-      if (directBuf && directBuf.byteLength > 100) {
-        arrayBuffer = directBuf;
-        isRealityGemini = true;
+      const freeRes = await fetch('/api/tts/free', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text,
+          voice: options.voice,
+          style,
+          emotion,
+          speed: options.speed || 1.0,
+        }),
+      });
+      if (freeRes.ok && !(freeRes.headers.get('content-type') || '').includes('text/html')) {
+        const freeBuf = await freeRes.arrayBuffer();
+        if (freeBuf && freeBuf.byteLength > 200) {
+          arrayBuffer = freeBuf;
+          isRealityGemini = true;
+        }
       }
-    } catch (directErr: any) {
-      lastErrorMsg = directErr.message || lastErrorMsg;
+    } catch (freeErr: any) {
+      lastErrorMsg = freeErr.message || lastErrorMsg;
     }
   }
 
@@ -547,18 +487,23 @@ export async function synthesizeMyanmarVoice(
   try {
     const ctx = getAudioContext();
     let decodedBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
-    duration = decodedBuffer.duration;
+
+    // Strip excessive pure digital silence at head/tail while keeping 140ms safety tail
+    decodedBuffer = trimEdgeDeadSilence(decodedBuffer, ctx, 0.0012, 0.03, 0.14);
 
     if (options.trimSilence === true) {
       decodedBuffer = trimAudioSilence(decodedBuffer, ctx, 0.85, 0.002);
     }
-    decodedBuffer = cleanAndFadeAudioBuffer(decodedBuffer, ctx, 0.25);
+    decodedBuffer = cleanAndFadeAudioBuffer(decodedBuffer, ctx, 0.12);
+    duration = decodedBuffer.duration;
 
     const wavBlob = audioBufferToWav(decodedBuffer);
     audioUrl = URL.createObjectURL(wavBlob);
   } catch (decodeErr) {
-    console.warn('Web Audio decodeAudioData notice, fallback to direct WAV Blob URL:', decodeErr);
-    const rawBlob = new Blob([arrayBuffer], { type: 'audio/wav' });
+    console.warn('Web Audio decodeAudioData notice, fallback to direct Blob URL:', decodeErr);
+    const header = new Uint8Array(arrayBuffer.slice(0, 4));
+    const isRiff = header[0] === 0x52 && header[1] === 0x49 && header[2] === 0x46 && header[3] === 0x46;
+    const rawBlob = new Blob([arrayBuffer], { type: isRiff ? 'audio/wav' : 'audio/mpeg' });
     audioUrl = URL.createObjectURL(rawBlob);
   }
 
@@ -567,6 +512,51 @@ export async function synthesizeMyanmarVoice(
     duration,
     isRealityGemini,
   };
+}
+
+/**
+ * Safely trims ONLY pure dead silence before the first spoken sample and after the last spoken sample.
+ * Preserves 100% of spoken syllables with zero mid-speech cuts and keeps keepTailSec after last sound.
+ */
+function trimEdgeDeadSilence(
+  sourceBuffer: AudioBuffer,
+  ctx: AudioContext,
+  threshold = 0.0012,
+  keepLeadSec = 0.03,
+  keepTailSec = 0.14
+): AudioBuffer {
+  const sampleRate = sourceBuffer.sampleRate;
+  const numChannels = sourceBuffer.numberOfChannels;
+  const totalLength = sourceBuffer.length;
+  if (totalLength <= 0) return sourceBuffer;
+
+  const ch0 = sourceBuffer.getChannelData(0);
+  let firstAudible = 0;
+  while (firstAudible < totalLength && Math.abs(ch0[firstAudible]) < threshold) {
+    firstAudible++;
+  }
+  if (firstAudible >= totalLength) {
+    return sourceBuffer;
+  }
+
+  let lastAudible = totalLength - 1;
+  while (lastAudible > firstAudible && Math.abs(ch0[lastAudible]) < threshold) {
+    lastAudible--;
+  }
+
+  const startIdx = Math.max(0, firstAudible - Math.floor(keepLeadSec * sampleRate));
+  const endIdx = Math.min(totalLength, lastAudible + Math.floor(keepTailSec * sampleRate));
+  const newLength = endIdx - startIdx;
+  if (newLength <= 0 || (startIdx === 0 && endIdx === totalLength)) {
+    return sourceBuffer;
+  }
+
+  const output = ctx.createBuffer(numChannels, newLength, sampleRate);
+  for (let c = 0; c < numChannels; c++) {
+    const src = sourceBuffer.getChannelData(c);
+    output.getChannelData(c).set(src.subarray(startIdx, endIdx));
+  }
+  return output;
 }
 
 /**
@@ -598,53 +588,45 @@ function applyAcousticSoftFilter(sourceBuffer: AudioBuffer, ctx: AudioContext): 
 }
 
 /**
- * Completely eliminates ending buzz ("jee-jee"), clicks, DC offset pops, and vocoder static:
- * 1. 60ms silent lead-in pre-padding so initial consonants/vowels ("မ", "သ", "ကျွန်") are NEVER clipped by browser Web Audio DAC initialization.
- * 2. Soft 8ms cosine fade-in on speech start to avoid pop clicks.
- * 3. Soft 50ms cosine S-curve fade-out at the tail down to exact 0.0 amplitude.
- * 4. Appends 250ms of pristine silence so browser decoders/timeline seek never clip the final syllable.
+ * Adds short pre-padding and gentle 12ms fade-out at the end of the silence tail
+ * so initial & final spoken consonants/vowels are 100% untouched.
  */
-function cleanAndFadeAudioBuffer(sourceBuffer: AudioBuffer, ctx: AudioContext, tailPadSeconds = 0.25): AudioBuffer {
+function cleanAndFadeAudioBuffer(sourceBuffer: AudioBuffer, ctx: AudioContext, tailPadSeconds = 0.12): AudioBuffer {
   const sampleRate = sourceBuffer.sampleRate;
   const numChannels = sourceBuffer.numberOfChannels;
   const totalLength = sourceBuffer.length;
   if (totalLength <= 0) return sourceBuffer;
 
-  const startPadSamples = Math.floor(0.06 * sampleRate); // 60ms lead-in pre-padding
-  const tailPadSamples = Math.floor(tailPadSeconds * sampleRate); // 250ms tail silence
+  const startPadSamples = Math.floor(0.03 * sampleRate); // 30ms lead-in pre-padding
+  const tailPadSamples = Math.floor(tailPadSeconds * sampleRate); // 120ms tail silence
   const newLength = startPadSamples + totalLength + tailPadSamples;
   const output = ctx.createBuffer(numChannels, newLength, sampleRate);
 
-  const fadeInSamples = Math.min(Math.floor(0.008 * sampleRate), Math.floor(totalLength / 4));
-  const fadeOutSamples = Math.min(Math.floor(0.050 * sampleRate), Math.floor(totalLength / 2)); // 50ms smooth fade-out
+  const fadeInSamples = Math.min(Math.floor(0.006 * sampleRate), Math.floor(totalLength / 4));
+  const fadeOutSamples = Math.min(Math.floor(0.015 * sampleRate), Math.floor(totalLength / 4)); // 15ms ultra-short tail smooth
 
   for (let c = 0; c < numChannels; c++) {
     const src = sourceBuffer.getChannelData(c);
     const dest = output.getChannelData(c);
 
-    // Copy voice samples starting at 60ms offset
     dest.set(src, startPadSamples);
 
     const speechStart = startPadSamples;
     const speechEnd = startPadSamples + totalLength;
 
-    // 1. Smooth Cosine Fade-in (8ms) on speech start
     for (let i = 0; i < fadeInSamples; i++) {
       const gain = 0.5 * (1 - Math.cos((Math.PI * i) / fadeInSamples));
       dest[speechStart + i] *= gain;
     }
 
-    // 2. Smooth Cosine Fade-out (50ms) to eliminate trailing buzz / "jee-jee" / vocoder cutoff clicks
     const fadeOutStart = speechEnd - fadeOutSamples;
     for (let i = 0; i < fadeOutSamples; i++) {
       const idx = fadeOutStart + i;
       const progress = i / fadeOutSamples;
-      // Cosine S-curve from 1.0 down to 0.0
       const gain = 0.5 * (1 + Math.cos(Math.PI * progress));
       dest[idx] *= gain;
     }
 
-    // 3. Ensure exact zero at voice end
     dest[speechEnd - 1] = 0;
   }
 
@@ -823,21 +805,26 @@ export async function autoGenerateAllNarratorVoices(
     }
 
     try {
-      const activeVoice = seg.voice || defaultVoice || 'Thiha';
-      const slotDur = Math.max(0.5, seg.endTime - seg.startTime);
-
-      // Synthesize audio
+      const activeVoice = defaultVoice || seg.voice || 'Thiha';
       const result = await synthesizeMyanmarVoice(textToSpeak, {
         voice: activeVoice,
-        style: 'conversational',
+        style: seg.style || 'recap',
+        emotion: seg.emotion,
       });
 
+      // Keep audio inside its 1-minute block and before the next segment with gentle speed tuning (max 1.15x)
+      const blockEnd = (Math.floor(Math.max(0, seg.startTime) / 60) + 1) * 60;
+      const nextStartTime = (i < total - 1 && segments[i + 1])
+        ? Math.min(blockEnd, segments[i + 1].startTime)
+        : blockEnd;
+      const availableTime = Math.max(0.5, nextStartTime - seg.startTime - 0.08);
       const audioDur = result.duration;
-      // Calculate atempo rate to fit slot duration
-      let atempo = 1.0;
-      if (audioDur > slotDur) {
-        atempo = parseFloat(Math.min(1.35, Math.max(1.0, audioDur / slotDur)).toFixed(2));
+
+      let rate = 1.0;
+      if (audioDur > availableTime) {
+        rate = Math.min(audioDur / availableTime, 1.15); // Gentle narrator speed adjustment max 1.15x
       }
+      const atempo = parseFloat(Math.max(0.9, rate).toFixed(2));
 
       updated.push({
         ...seg,
@@ -846,6 +833,8 @@ export async function autoGenerateAllNarratorVoices(
         atempoRate: atempo,
         playbackRate: atempo,
         voice: activeVoice,
+        speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
+        minutePartIndex: Math.floor(Math.max(0, seg.startTime) / 60) + 1,
       });
     } catch (err) {
       console.warn(`Voice synthesis notice for segment #${i + 1}:`, err);

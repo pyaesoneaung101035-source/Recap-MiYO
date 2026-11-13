@@ -18,9 +18,14 @@ import {
   Volume1,
   Trash2,
   Zap,
+  Music,
+  Loader2,
+  Download,
 } from 'lucide-react';
 import { ProjectState, SubtitleSettings, TranscriptSegment, AlightKeyframe, BlurBox, AspectRatioType } from '../types';
 import { getInterpolatedKeyframe, getFilterCss } from '../utils/alightMotionRenderer';
+import { findActiveSegmentForTime } from '../utils/timingSync';
+import { extractBackgroundMusicFromVideo } from '../utils/bgmExtractorClient';
 
 interface VideoPlayerViewProps {
   project: ProjectState;
@@ -41,12 +46,17 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const clonedAudioRef = useRef<HTMLAudioElement>(null);
+  const bgmAudioRef = useRef<HTMLAudioElement>(null);
+  const activeAudioUrlRef = useRef<string>('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isMuted = project.isMuted ?? false;
   const videoVolume = project.volume !== undefined ? project.volume : 0.8;
   const clonedVolume = project.voiceVolume !== undefined ? project.voiceVolume : 1.0;
+  const bgmVolume = project.bgmVolume !== undefined ? project.bgmVolume : 0.35;
   const [isDragging, setIsDragging] = useState(false);
   const [editingText, setEditingText] = useState('');
+  const [isExtractingBgm, setIsExtractingBgm] = useState(false);
+  const [bgmError, setBgmError] = useState<string | null>(null);
 
   // Update inline editing text when active segment changes
   useEffect(() => {
@@ -81,53 +91,56 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
     }
   }, [project.isPlaying, project.playbackRate, project.currentTime, project.segments]);
 
-  // Synchronize cloned voice audio with active segment and apply ONLY to Voice Clone Speed (independent of video speed)
+  // Synchronize cloned voice audio with active segment (NEVER blocks new segments with stale audio.ended)
   useEffect(() => {
     if (!clonedAudioRef.current) return;
     const audio = clonedAudioRef.current;
-    // Cap HTMLMediaElement volume safely between 0.0 and 1.0
     audio.volume = Math.max(0, Math.min(1.0, project.isVoiceMuted ? 0 : clonedVolume));
 
-    // Apply global voice clone speed (independent of video speed)
     const voiceSpeed = project.voicePlaybackRate || 1.0;
+    const activeMatch = findActiveSegmentForTime(project.segments, project.currentTime, voiceSpeed, true);
+    const playingSegment = activeMatch?.segment || null;
 
-    // Strict alignment: Find segment covering current playhead with cloned voice
-    const playingSegment = project.segments.find((s) => {
-      const segSpeed = s.playbackRate || voiceSpeed;
-      const effectiveAudioDuration = (s.audioDuration || (s.endTime - s.startTime)) / segSpeed;
-      const effectiveEnd = Math.max(s.endTime, s.startTime + effectiveAudioDuration);
-      return project.currentTime >= s.startTime && project.currentTime <= effectiveEnd && !!s.audioUrl;
-    });
+    if (playingSegment && playingSegment.audioUrl && activeMatch && project.isPlaying) {
+      const expectedOffset = Math.max(0, project.currentTime - activeMatch.window.startTime);
+      const segSpeed = activeMatch.window.speed;
+      const isSameClip = activeAudioUrlRef.current === playingSegment.audioUrl;
 
-    if (playingSegment && playingSegment.audioUrl && project.isPlaying) {
-      const expectedOffset = Math.max(0, project.currentTime - playingSegment.startTime);
-      const segSpeed = playingSegment.playbackRate || voiceSpeed;
-      if (audio.playbackRate !== segSpeed) {
+      if (!isSameClip) {
+        // Brand new segment clip: ALWAYS load and start cleanly before checking audio.ended or old audio.duration!
+        activeAudioUrlRef.current = playingSegment.audioUrl;
+        audio.src = playingSegment.audioUrl;
+        audio.playbackRate = segSpeed;
+        (audio as any).preservesPitch = true;
+        (audio as any).webkitPreservesPitch = true;
+
+        const knownDur = playingSegment.audioDuration || 4;
+        const expectedSourceTime = expectedOffset * segSpeed;
+        audio.currentTime = expectedSourceTime < 0.35 ? 0 : Math.min(expectedSourceTime, Math.max(0, knownDur - 0.1));
+        audio.play().catch(() => {});
+        return;
+      }
+
+      if (Math.abs(audio.playbackRate - segSpeed) > 0.01) {
         audio.playbackRate = segSpeed;
         (audio as any).preservesPitch = true;
         (audio as any).webkitPreservesPitch = true;
       }
 
-      if (audio.src !== playingSegment.audioUrl) {
-        audio.src = playingSegment.audioUrl;
-        // CRITICAL FIX: If near the start of the segment (within 350ms), start at exact 0 to ensure the initial letter/word is 100% complete
-        audio.currentTime = expectedOffset < 0.35 ? 0 : expectedOffset;
-        audio.play().catch(() => {});
-      } else {
-        const clipDuration = audio.duration || playingSegment.audioDuration || 0;
-        if (audio.ended || (clipDuration > 0 && expectedOffset >= clipDuration - 0.05)) {
-          if (!audio.paused) {
-            audio.pause();
-          }
-          return;
-        }
+      const clipDuration = (isFinite(audio.duration) && audio.duration > 0 ? audio.duration : playingSegment.audioDuration) || 0;
+      const expectedSourceTime = expectedOffset * segSpeed;
 
-        if (audio.paused) {
-          audio.currentTime = expectedOffset < 0.35 ? 0 : expectedOffset;
-          audio.play().catch(() => {});
-        } else if (Math.abs(audio.currentTime - expectedOffset) > 0.35) {
-          audio.currentTime = expectedOffset;
-        }
+      // For the CURRENT loaded clip, stop once naturally finished
+      if (audio.ended || (clipDuration > 0 && expectedSourceTime >= clipDuration + 0.08)) {
+        if (!audio.paused) audio.pause();
+        return;
+      }
+
+      if (audio.paused) {
+        audio.currentTime = expectedSourceTime < 0.35 ? 0 : Math.min(expectedSourceTime, Math.max(0, clipDuration - 0.1));
+        audio.play().catch(() => {});
+      } else if (clipDuration > 0 && Math.abs(audio.currentTime - expectedSourceTime) > 0.45 && expectedSourceTime < clipDuration - 0.1) {
+        audio.currentTime = expectedSourceTime;
       }
     } else {
       if (!audio.paused) {
@@ -136,12 +149,68 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
     }
   }, [project.currentTime, project.isPlaying, project.segments, project.voicePlaybackRate, clonedVolume, project.isVoiceMuted]);
 
-  // Sync video element volume
+  // Sync raw video audio vs. Extracted Vocal-Removed BGM audio track
+  const hasClonedVoices = project.segments.some((s) => Boolean(s.audioUrl));
+  const shouldMuteOriginalVocals = Boolean(
+    isMuted || (project.useExtractedBgm && project.extractedBgmUrl) || (hasClonedVoices && !project.isVoiceMuted)
+  );
+
   useEffect(() => {
+    const useBgm = Boolean(project.useExtractedBgm && project.extractedBgmUrl);
     if (videoRef.current) {
-      videoRef.current.volume = isMuted ? 0 : videoVolume;
+      // Mute original human dialogue track whenever Extracted BGM-Only mode, Voice Clone active, OR user mute is enabled
+      videoRef.current.volume = shouldMuteOriginalVocals ? 0 : videoVolume;
     }
-  }, [videoVolume, isMuted]);
+
+    const bgmAudio = bgmAudioRef.current;
+    if (!bgmAudio) return;
+
+    if (!useBgm || !project.extractedBgmUrl) {
+      if (!bgmAudio.paused) bgmAudio.pause();
+      return;
+    }
+
+    if (bgmAudio.getAttribute('data-url') !== project.extractedBgmUrl) {
+      bgmAudio.setAttribute('data-url', project.extractedBgmUrl);
+      bgmAudio.src = project.extractedBgmUrl;
+    }
+
+    // Automatically duck BGM gently when Burmese narrator is speaking
+    const isNarratorActive = Boolean(
+      findActiveSegmentForTime(project.segments, project.currentTime, project.voicePlaybackRate || 1.0, true)
+    );
+    const duckFactor = isNarratorActive && !project.isVoiceMuted ? 0.38 : 1.0;
+    bgmAudio.volume = Math.max(0, Math.min(1.0, (isMuted ? 0 : bgmVolume) * duckFactor));
+
+    const targetRate = videoRef.current?.playbackRate || project.playbackRate || 1.0;
+    if (Math.abs(bgmAudio.playbackRate - targetRate) > 0.02) {
+      bgmAudio.playbackRate = targetRate;
+    }
+
+    if (project.isPlaying && !isMuted) {
+      if (Math.abs(bgmAudio.currentTime - project.currentTime) > 0.38) {
+        bgmAudio.currentTime = Math.max(0, project.currentTime);
+      }
+      if (bgmAudio.paused) {
+        bgmAudio.play().catch(() => {});
+      }
+    } else {
+      if (!bgmAudio.paused) bgmAudio.pause();
+    }
+  }, [
+    project.useExtractedBgm,
+    project.extractedBgmUrl,
+    project.currentTime,
+    project.isPlaying,
+    project.playbackRate,
+    project.segments,
+    project.voicePlaybackRate,
+    project.isVoiceMuted,
+    videoVolume,
+    bgmVolume,
+    isMuted,
+    shouldMuteOriginalVocals,
+  ]);
 
   // Handle video seek with immediate audio alignment
   const handleSeek = (newTime: number) => {
@@ -149,17 +218,25 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
     videoRef.current.currentTime = newTime;
     setProject((prev) => ({ ...prev, currentTime: newTime }));
 
+    if (bgmAudioRef.current && project.useExtractedBgm && project.extractedBgmUrl) {
+      bgmAudioRef.current.currentTime = Math.max(0, newTime);
+    }
+
     if (clonedAudioRef.current) {
-      const segAtTime = project.segments.find((s) => {
-        const effectiveEnd = Math.max(s.endTime, s.startTime + (s.audioDuration || 0));
-        return newTime >= s.startTime && newTime <= effectiveEnd && !!s.audioUrl;
-      });
-      if (segAtTime && segAtTime.audioUrl) {
-        if (clonedAudioRef.current.src !== segAtTime.audioUrl) {
-          clonedAudioRef.current.src = segAtTime.audioUrl;
+      const seekMatch = findActiveSegmentForTime(
+        project.segments,
+        newTime,
+        project.voicePlaybackRate || 1.0,
+        true
+      );
+      if (seekMatch && seekMatch.segment.audioUrl) {
+        if (activeAudioUrlRef.current !== seekMatch.segment.audioUrl) {
+          activeAudioUrlRef.current = seekMatch.segment.audioUrl;
+          clonedAudioRef.current.src = seekMatch.segment.audioUrl;
         }
-        const offset = Math.max(0, newTime - segAtTime.startTime);
+        const offset = Math.max(0, newTime - seekMatch.window.startTime) * seekMatch.window.speed;
         clonedAudioRef.current.currentTime = offset;
+        clonedAudioRef.current.playbackRate = seekMatch.window.speed;
         if (project.isPlaying) {
           clonedAudioRef.current.play().catch(() => {});
         }
@@ -188,6 +265,8 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
   const handleFileUpload = (file: File) => {
     if (!file || !file.type.startsWith('video/')) return;
     const url = URL.createObjectURL(file);
+    activeAudioUrlRef.current = '';
+    setBgmError(null);
     setProject((prev) => ({
       ...prev,
       videoFile: file,
@@ -195,6 +274,9 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
       videoName: file.name,
       currentTime: 0,
       isPlaying: false,
+      extractedBgmUrl: null,
+      useExtractedBgm: false,
+      bgmEngineUsed: null,
     }));
   };
 
@@ -209,6 +291,8 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
   // Load sample demo video for instant testing
   const handleLoadDemo = () => {
     const demoUrl = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4';
+    activeAudioUrlRef.current = '';
+    setBgmError(null);
     setProject((prev) => ({
       ...prev,
       videoFile: null,
@@ -217,7 +301,35 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
       videoDuration: 15,
       currentTime: 0,
       isPlaying: false,
+      extractedBgmUrl: null,
+      useExtractedBgm: false,
+      bgmEngineUsed: null,
     }));
+  };
+
+  // Extract Background Music / SFX Only (removing original human vocals)
+  const handleExtractBgmOnly = async () => {
+    if ((!project.videoFile && !project.videoUrl) || isExtractingBgm) return;
+    setIsExtractingBgm(true);
+    setBgmError(null);
+    try {
+      const res = await extractBackgroundMusicFromVideo(
+        project.videoFile,
+        project.videoUrl,
+        project.videoName
+      );
+      setProject((prev) => ({
+        ...prev,
+        extractedBgmUrl: res.bgmUrl,
+        useExtractedBgm: true,
+        bgmVolume: prev.bgmVolume ?? 0.35,
+        bgmEngineUsed: res.engineUsed,
+      }));
+    } catch (err: any) {
+      setBgmError(err.message || 'နောက်ခံတီးလုံး ထုတ်ယူမှု မအောင်မြင်ပါ');
+    } finally {
+      setIsExtractingBgm(false);
+    }
   };
 
   const formatSeconds = (sec: number): string => {
@@ -329,8 +441,9 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
 
   return (
     <div className="glass-panel rounded-2xl overflow-hidden flex flex-col shadow-2xl relative z-10">
-      {/* Hidden audio element for synchronized cloned voice playback */}
+      {/* Hidden audio elements for synchronized cloned voice & vocal-removed BGM playback */}
       <audio ref={clonedAudioRef} />
+      <audio ref={bgmAudioRef} preload="auto" />
 
       {/* Viewport Top Bar */}
       <div className="px-4 py-3 bg-white/5 backdrop-blur-md border-b border-white/10 flex items-center justify-between text-xs">
@@ -709,30 +822,96 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
         </div>
 
 
-        {/* Dual Audio Volume Mix (Video Sound vs. Cloned Voice) */}
-        <div className="flex items-center gap-4 bg-zinc-900 px-3 py-1.5 rounded-lg border border-zinc-800 text-xs">
-          {/* Video Audio Volume */}
+        {/* Dual Audio Volume Mix & Vocal-Removed BGM Extractor */}
+        <div className="flex flex-wrap items-center gap-3 bg-zinc-900 px-3 py-1.5 rounded-lg border border-zinc-800 text-xs">
+          {/* Original / BGM Audio Toggle */}
+          <button
+            type="button"
+            onClick={handleExtractBgmOnly}
+            disabled={isExtractingBgm || !project.videoUrl}
+            className={`px-2.5 py-1 rounded-md border text-[11px] font-bold flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50 ${
+              project.useExtractedBgm && project.extractedBgmUrl
+                ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
+                : 'bg-cyan-500/15 hover:bg-cyan-500/25 border-cyan-500/40 text-cyan-300'
+            }`}
+            title="Custom Video ထဲမှ လူစကားပြောသံများ ဖယ်ရှားပြီး နောက်ခံတီးလုံး/SFX သီးသန့် ပြန်ထုတ်သုံးမည်"
+          >
+            {isExtractingBgm ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-cyan-400" />
+            ) : (
+              <Music className="w-3.5 h-3.5" />
+            )}
+            <span>
+              {isExtractingBgm
+                ? 'တီးလုံးခွဲထုတ်နေသည်...'
+                : project.extractedBgmUrl
+                ? '🔄 BGM ပြန်ထုတ်မည်'
+                : '🎵 BGM Only ထုတ်သုံးမည်'}
+            </span>
+          </button>
+
+          {project.extractedBgmUrl && (
+            <>
+              <button
+                type="button"
+                onClick={() =>
+                  setProject((prev) => ({
+                    ...prev,
+                    useExtractedBgm: !prev.useExtractedBgm,
+                  }))
+                }
+                className={`px-2 py-1 rounded-md text-[10px] font-bold border transition-all cursor-pointer ${
+                  project.useExtractedBgm
+                    ? 'bg-emerald-500 text-zinc-950 border-emerald-400'
+                    : 'bg-zinc-800 text-zinc-300 border-zinc-700'
+                }`}
+              >
+                {project.useExtractedBgm ? '✓ BGM Only (No Vocals)' : 'Original Audio'}
+              </button>
+
+              <a
+                href={project.extractedBgmUrl}
+                download={`${(project.videoName || 'video').replace(/\.[^/.]+$/, '')}_bgm_only.mp3`}
+                className="p-1 text-cyan-300 hover:text-cyan-200 bg-zinc-800 hover:bg-zinc-700 rounded border border-zinc-700"
+                title="Extracted BGM (.mp3) Download"
+              >
+                <Download className="w-3.5 h-3.5" />
+              </a>
+            </>
+          )}
+
+          {/* Video or BGM Volume */}
           <div className="flex items-center gap-1.5">
             <button
               type="button"
               onClick={() => setProject((prev) => ({ ...prev, isMuted: !isMuted }))}
               className="text-zinc-400 hover:text-zinc-200 cursor-pointer"
-              title={isMuted ? 'မူရင်းအသံ ပြန်ဖွင့်မည် (Unmute)' : 'မူရင်းအသံ ပိတ်မည် (Mute)'}
+              title={isMuted ? 'အသံ ပြန်ဖွင့်မည် (Unmute)' : 'အသံ ပိတ်မည် (Mute)'}
             >
               {isMuted ? <VolumeX className="w-3.5 h-3.5 text-rose-400" /> : <Volume2 className="w-3.5 h-3.5" />}
             </button>
-            <span className="text-[11px] text-zinc-400">Video Vol:</span>
+            <span className="text-[11px] text-zinc-400">
+              {project.useExtractedBgm && project.extractedBgmUrl ? 'BGM Vol:' : 'Video Vol:'}
+            </span>
+            {hasClonedVoices && !project.useExtractedBgm && !project.isVoiceMuted && (
+              <span
+                className="px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-[9px] text-emerald-300 font-myanmar"
+                title="Voice Clone အသံနှင့် မထပ်စေရန် မူရင်း Video လူအသံကို အလိုအလျောက် ပိတ်ထားပါသည်"
+              >
+                🔇 Original Muted
+              </span>
+            )}
             <input
               type="range"
               min={0}
               max={1}
               step={0.05}
-              value={isMuted ? 0 : videoVolume}
+              value={isMuted ? 0 : (project.useExtractedBgm && project.extractedBgmUrl ? bgmVolume : videoVolume)}
               onChange={(e) => {
                 const val = parseFloat(e.target.value);
                 setProject((prev) => ({
                   ...prev,
-                  volume: val,
+                  ...(prev.useExtractedBgm && prev.extractedBgmUrl ? { bgmVolume: val } : { volume: val }),
                   isMuted: val === 0,
                 }));
               }}
@@ -761,6 +940,12 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
           </div>
         </div>
       </div>
+
+      {bgmError && (
+        <div className="px-4 py-1.5 bg-rose-950/60 border-b border-rose-500/30 text-[11px] text-rose-300 font-myanmar">
+          ⚠️ {bgmError}
+        </div>
+      )}
 
       {/* Inline Subtitle Quick Editor Bar */}
       {activeSegment && (

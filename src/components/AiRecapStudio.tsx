@@ -30,11 +30,12 @@ import {
   shortenBurmeseTextForDuration,
   countBurmeseSyllables,
   calculateMaxAllowedSyllables,
+  polishBurmeseNarrationStyle,
 } from '../utils/geminiPool';
 import { transcribeVideoWithAssemblyAi } from '../utils/assemblyAi';
 import { loadApiKeys } from '../utils/apiKeys';
 import { downloadFile } from '../utils/alightMotionRenderer';
-import { autoGenerateAllNarratorVoices } from '../utils/edgeTtsClient';
+import { getMinuteBlocks, formatMinSec, realignSegmentsByMinuteBlocks } from '../utils/timingSync';
 
 interface AiRecapStudioProps {
   project: ProjectState;
@@ -42,6 +43,7 @@ interface AiRecapStudioProps {
   onSeekTo: (time: number) => void;
   onPrevStep?: () => void;
   onNextStep?: () => void;
+  stepNumber?: number;
 }
 
 export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
@@ -50,6 +52,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
   onSeekTo,
   onPrevStep,
   onNextStep,
+  stepNumber = 3,
 }) => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [progressPercent, setProgressPercent] = useState(0);
@@ -58,12 +61,36 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [editingSegId, setEditingSegId] = useState<string | null>(null);
   const [shorteningSegId, setShorteningSegId] = useState<string | null>(null);
+  const [isPolishing, setIsPolishing] = useState(false);
   const [selectedPartFilter, setSelectedPartFilter] = useState<number | 'all'>('all');
-  const [selectedEngine, setSelectedEngine] = useState<'assemblyai' | 'gemini'>('assemblyai');
+  const [selectedEngine, setSelectedEngine] = useState<'assemblyai' | 'gemini' | 'faster_whisper'>('gemini');
   const [hasAssemblyAiKey, setHasAssemblyAiKey] = useState(false);
-  const [selectedGeminiModel, setSelectedGeminiModel] = useState<string>('gemini-3.5-flash');
+  const [selectedGeminiModel, setSelectedGeminiModel] = useState<string>('gemini-3.1-flash-lite');
+  const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
   const [showDubbingPlanModal, setShowDubbingPlanModal] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
+
+  const handlePolishNarrationStyle = async () => {
+    if (!project.segments.length || isPolishing || isGenerating) return;
+    setIsPolishing(true);
+    setErrorMessage(null);
+    try {
+      const polished = await polishBurmeseNarrationStyle(project.segments, (msg) =>
+        setStatusMessage(msg)
+      );
+      setProject((prev) => ({
+        ...prev,
+        segments: polished,
+      }));
+      setStatusMessage(
+        '✓ နမူနာ Video ပုံစံအတိုင်း "တယ်/ပါတယ်" ထပ်နေမှုများ လျှော့ချပြီး စိတ်ခံစားချက် (အံ့ဩ/မာန်ပါ/မေးခွန်း) Tag များ ညှိပြီးပါပြီ! အဆင့် ၄ တွင် Voice Clone ပြန်ထုတ်နိုင်ပါသည်။'
+      );
+    } catch (err: any) {
+      setErrorMessage(`Style Polish error: ${err?.message || 'Failed to polish narration style'}`);
+    } finally {
+      setIsPolishing(false);
+    }
+  };
 
   const handleShortenSegment = async (seg: TranscriptSegment) => {
     if (!seg.myanmarTranslation || shorteningSegId) return;
@@ -108,23 +135,17 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
     downloadFile(srtStr, `${project.videoName || 'video'}_burmese_subtitles.srt`, 'text/plain;charset=utf-8');
   };
 
-  // Live progress simulation timer when generating
+  // Track live elapsed seconds while Step 3 pipeline is running
   useEffect(() => {
-    let timer: NodeJS.Timeout;
-    if (isGenerating) {
-      setProgressPercent(10);
-      timer = setInterval(() => {
-        setProgressPercent((prev) => {
-          if (prev >= 98) return 98;
-          return prev + 2;
-        });
-      }, 300);
-    } else {
-      setProgressPercent(100);
+    if (!isGenerating) {
+      setElapsedSeconds(0);
+      return;
     }
-    return () => {
-      if (timer) clearInterval(timer);
-    };
+    const startAt = Date.now();
+    const timer = setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - startAt) / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
   }, [isGenerating]);
 
   useEffect(() => {
@@ -137,30 +158,17 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
     }
   }, []);
 
-  const totalParts = Math.max(1, Math.ceil((project.videoDuration || 180) / 180));
-
-  const formatMinSec = (s: number) => {
-    const m = Math.floor(s / 60);
-    const sec = Math.floor(s % 60);
-    return `${m}:${sec < 10 ? '0' : ''}${sec}`;
-  };
-
-  const videoParts = Array.from({ length: totalParts }, (_, i) => {
-    const startSec = i * 180;
-    const endSec = Math.min((i + 1) * 180, project.videoDuration || (i + 1) * 180);
-    return {
-      partNumber: i + 1,
-      startSec,
-      endSec,
-      label: `Part ${i + 1} (${formatMinSec(startSec)} - ${formatMinSec(endSec)})`,
-    };
-  });
+  const videoParts = getMinuteBlocks(project.videoDuration || 60);
+  const totalParts = videoParts.length;
 
   const displayedSegments = project.segments.filter((s) => {
     if (selectedPartFilter === 'all') return true;
     const part = videoParts[selectedPartFilter - 1];
     if (!part) return true;
-    return s.startTime >= part.startSec && s.startTime < part.endSec;
+    const isLastPart = part.partNumber === totalParts;
+    return isLastPart
+      ? s.startTime >= part.startSec && s.startTime <= part.endSec + 0.5
+      : s.startTime >= part.startSec && s.startTime < part.endSec;
   });
 
   const handleGenerateScript = async () => {
@@ -171,14 +179,13 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
 
     if (selectedEngine === 'assemblyai' && !hasAssemblyAiKey) {
       const msg = 'AssemblyAI API Key မတွေ့ရှိပါ။ ကျေးဇူးပြု၍ Step 1 တွင် AssemblyAI Key (32-digit Token) ကို ထည့်သွင်းပေးပါ။';
-      alert(msg);
       setErrorMessage(msg);
       return;
     }
 
     setIsGenerating(true);
-    setProgressPercent(15);
-    setStatusMessage('အသံလှိုင်း စစ်ဆေးနေပါသည်...');
+    setProgressPercent(5);
+    setStatusMessage('အသံလှိုင်းနှင့် မြင်ကွင်းများ စစ်ဆေးနေပါသည်...');
     setErrorMessage(null);
 
     try {
@@ -190,6 +197,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
             throw new Error('AssemblyAI Key မတွေ့ရှိပါ။ ကျေးဇူးပြု၍ Step 1 တွင် AssemblyAI Key (32-digit Token) ထည့်သွင်းပေးပါ။');
           }
           setStatusMessage('🎙️ [Assembly Generator] အသံလှိုင်း စစ်ဆေးနေပါသည်...');
+          setProgressPercent(25);
           rawSegments = await transcribeVideoWithAssemblyAi(
             project.videoFile || project.videoUrl!,
             {
@@ -198,26 +206,29 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
           );
         } catch (assemblyErr: any) {
           console.warn('AssemblyAI fallback notice:', assemblyErr);
-          const alertMsg = `AssemblyAI Error: ${assemblyErr.message || 'AssemblyAI ချိတ်ဆက်မှု အဆင်မပြေပါ'}။`;
-          alert(alertMsg);
-          setErrorMessage(alertMsg);
+          const errMsg = `AssemblyAI Error: ${assemblyErr.message || 'AssemblyAI ချိတ်ဆက်မှု အဆင်မပြေပါ'}။`;
+          setErrorMessage(errMsg);
           setIsGenerating(false);
           return;
         }
       } else {
-        setProgressPercent(35);
         rawSegments = await generateTimestampedTranscript(
           project.videoName || 'Uploaded Video',
           project.videoDuration || 30,
           customPrompt,
           project.videoFile,
           project.videoUrl,
-          (msg) => setStatusMessage(msg),
+          (msg, pct) => {
+            setStatusMessage(msg);
+            if (typeof pct === 'number') {
+              setProgressPercent(pct);
+            }
+          },
           selectedGeminiModel
         );
       }
 
-      setProgressPercent(70);
+      setProgressPercent(96);
       const sorted = [...rawSegments].sort((a, b) => a.startTime - b.startTime);
       const segments = sorted.map((s) => {
         const start = Math.max(0, s.startTime);
@@ -231,29 +242,22 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
         };
       });
 
-      // 1-Click Auto Narrator Voice Generation (သီဟ / Adult Male Narrator)
-      setStatusMessage(`🔊 [One-Click Narrator TTS] အပိုင်း ${segments.length} ခုအတွက် ယောက်ျားအသံ (သီဟ) ကို Auto Generate စတင်ပြုလုပ်နေပါသည်...`);
-      setProgressPercent(75);
-
-      const fullyDubbedSegments = await autoGenerateAllNarratorVoices(
-        segments,
-        (msg, cur, tot) => {
-          setStatusMessage(msg);
-          const pct = Math.min(99, 75 + Math.floor((cur / tot) * 23));
-          setProgressPercent(pct);
-        },
-        'Thiha'
+      const alignedSegments = realignSegmentsByMinuteBlocks(
+        segments.map((seg) => ({
+          ...seg,
+          syllableCount: countBurmeseSyllables(seg.myanmarTranslation || ''),
+        })),
+        project.videoDuration || 60,
+        { enforceSingleVoice: 'Thiha', enforceSingleSpeakerLabel: true }
       );
 
       setProgressPercent(100);
       setProject((prev) => ({
         ...prev,
-        segments: fullyDubbedSegments,
-        isMuted: true, // 100% original video audio muted as requested
-        volume: 0,
+        segments: alignedSegments,
       }));
 
-      setStatusMessage(`🎉 [One-Click အောင်မြင်ပါသည်] Segment ${fullyDubbedSegments.length} ခုလုံးကို Speech-to-Text, Gemini Timeline Script ခွဲခြမ်းခြင်းနှင့် Narrator အသံသွင်းခြင်း အားလုံး Auto ပြီးစီးပါပြီ!`);
+      setStatusMessage(`🎉 [အောင်မြင်ပါသည်] ၁ မိနစ်စာ အပိုင်း (${totalParts} Parts) အလိုက် မြင်ကွင်းနှင့် စကားပြော တိုက်ဆိုင်စစ်ဆေးပြီး Single-Narrator ဇာတ်ကြောင်းပြော စာသား (${alignedSegments.length} Segments) ထုတ်ယူပြီးပါပြီ။ အဆင့် ၄ သို့သွား၍ Narrator အသံသွင်းနိုင်ပါသည်။`);
     } catch (err: any) {
       console.error('Failed to generate auto dubbing:', err);
       setErrorMessage(err.message || 'AI စာသားထုတ်လုပ်မှု မအောင်မြင်ပါ။ API Key ကို စစ်ဆေးပါ။');
@@ -304,20 +308,20 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-white/10">
         <div className="flex items-center gap-3">
           <span className="w-8 h-8 rounded-full bg-gradient-to-tr from-cyan-400 to-teal-400 text-zinc-950 font-black flex items-center justify-center text-xs shadow-lg">
-            4
+            {stepNumber}
           </span>
           <div>
             <div className="flex items-center gap-2">
               <h2 className="text-base font-bold text-white font-display tracking-tight flex items-center gap-2">
                 <Sparkles className="w-4 h-4 text-cyan-400" />
-                <span>အဆင့် 4 — AI Speech-to-Text & Script Engine</span>
+                <span>အဆင့် {stepNumber} — AI Narrator Script & Dubbing Engine (Gemini API)</span>
               </h2>
               <span className="px-2.5 py-0.5 rounded-full bg-cyan-500/10 border border-cyan-500/20 text-cyan-300 font-mono text-[10px] font-bold">
-                Whisper + Gemini
+                Gemini API Natural Localization
               </span>
             </div>
             <p className="text-xs text-zinc-400 font-myanmar mt-0.5">
-              ဗီဒီယိုမှ စကားပြောများကို Whisper / Gemini ဖြင့် မြန်မာစာတန်းထိုး Timestamp ထုတ်ယူပါ။
+              ဗီဒီယိုမှ စကားပြောများကို Gemini API ဖြင့် သဘာဝကျပြီး တိကျမှန်ကန်သော မြန်မာ ဇာတ်ကြောင်းပြော (Narrator Voiceover) စာသားအဖြစ် ထုတ်ယူပါ (Auto Voice Clone မပါဘဲ စာသားကို သီးသန့်ထုတ်ပေးပါသည်)။
             </p>
           </div>
         </div>
@@ -329,7 +333,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
               className="px-3.5 py-2 bg-white/5 hover:bg-white/10 text-zinc-300 text-xs font-semibold rounded-xl transition-all border border-white/10 flex items-center gap-1.5 cursor-pointer"
             >
               <ArrowLeft className="w-3.5 h-3.5" />
-              <span>အဆင့် 3</span>
+              <span>ရှေ့အဆင့်</span>
             </button>
           )}
           {onNextStep && (
@@ -337,19 +341,19 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
               onClick={onNextStep}
               className="px-5 py-2.5 bg-gradient-to-r from-sky-400 to-teal-400 hover:opacity-90 text-zinc-950 font-black text-xs rounded-xl transition-all flex items-center gap-2 shadow-lg shadow-sky-500/20 cursor-pointer active:scale-95"
             >
-              <span>အဆင့် 5 သို့</span>
+              <span>နောက်အဆင့် (TTS Studio)</span>
               <ArrowRight className="w-4 h-4 stroke-[2.5]" />
             </button>
           )}
         </div>
       </div>
 
-      {/* 3-Minute Part Breakdown Filter Pills */}
+      {/* 1-Minute Part Breakdown Filter Buttons */}
       <div className="glass-card rounded-xl p-3.5 space-y-2.5">
         <div className="flex items-center justify-between text-xs">
           <span className="font-bold text-white flex items-center gap-1.5">
             <Zap className="w-3.5 h-3.5 text-cyan-400" />
-            <span>Video 3-Min Parts ({totalParts} Chunks)</span>
+            <span>Video 1-Min Parts ({totalParts} Blocks — Single Narrator Storytelling)</span>
           </span>
           <span className="text-[11px] font-mono text-cyan-300">
             {Math.floor((project.videoDuration || 0) / 60)}m {Math.floor((project.videoDuration || 0) % 60)}s
@@ -369,14 +373,20 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
           </button>
 
           {videoParts.map((part) => {
-            const segCount = project.segments.filter(
-              (s) => s.startTime >= part.startSec && s.startTime < part.endSec
+            const isLastPart = part.partNumber === totalParts;
+            const segCount = project.segments.filter((s) =>
+              isLastPart
+                ? s.startTime >= part.startSec && s.startTime <= part.endSec + 0.5
+                : s.startTime >= part.startSec && s.startTime < part.endSec
             ).length;
 
             return (
               <button
                 key={part.partNumber}
-                onClick={() => setSelectedPartFilter(part.partNumber)}
+                onClick={() => {
+                  setSelectedPartFilter(part.partNumber);
+                  onSeekTo(part.startSec);
+                }}
                 className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
                   selectedPartFilter === part.partNumber
                     ? 'bg-cyan-400 text-zinc-950 font-bold shadow-md shadow-cyan-400/20'
@@ -394,7 +404,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
       </div>
 
       {/* AI STT Engine Selector */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <button
           type="button"
           onClick={() => setSelectedEngine('assemblyai')}
@@ -442,6 +452,29 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
             Whisper ဖြင့် Speech-to-Text ပြုလုပ်ပြီး Gemini API မှ မြန်မာဘာသာပြန်ဆို၍ TTX ထုတ်ပေးမည်
           </p>
         </button>
+
+        <button
+          type="button"
+          onClick={() => setSelectedEngine('faster_whisper')}
+          className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
+            selectedEngine === 'faster_whisper'
+              ? 'bg-emerald-500/15 border-emerald-400/50 text-emerald-200 shadow-lg ring-1 ring-emerald-400/30'
+              : 'bg-white/5 border-white/5 text-zinc-400 hover:text-zinc-200'
+          }`}
+        >
+          <div className="flex items-center justify-between mb-1">
+            <div className="flex items-center gap-1.5 font-bold text-xs">
+              <Zap className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Faster-Whisper (CPU int8)</span>
+            </div>
+            <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+              High-Speed CPU
+            </span>
+          </div>
+          <p className="text-[11px] text-zinc-400 font-myanmar">
+            Faster-whisper (CPU mode int8) ဖြင့် အမြန်ဆုံး Speech-to-Text ပြုလုပ်ပြီး Gemini ဖြင့် မြန်မာဘာသာပြန်မည်
+          </p>
+        </button>
       </div>
 
       {/* Prompt input & Action button */}
@@ -460,39 +493,81 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
             className="px-3 py-2.5 bg-zinc-900 border border-cyan-500/30 rounded-xl text-xs text-cyan-300 font-mono font-semibold focus:outline-none cursor-pointer shrink-0"
             title="Gemini Model Selection"
           >
-            <option value="gemini-3.5-flash">⚡ Gemini 3.5 Flash (Super Fast & Stable - Active)</option>
-            <option value="gemini-3.5-flash-lite">⚡ Gemini 3.5 Flash Lite (Ultra Fast)</option>
-            <option value="gemini-3.8-flash">⚡ Gemini 3.8 Flash (Latest Multi-modal)</option>
-            <option value="gemini-2.5-flash">⚡ Gemini 2.5 Flash (Legacy Accounts)</option>
-            <option value="gemini-2.5-flash-lite">⚡ Gemini 2.5 Flash Lite (Legacy Accounts)</option>
-            <option value="gemini-flash-latest">⚡ Gemini Flash Latest</option>
+            <option value="gemini-3.1-flash-lite">⚡ Gemini 3.1 Flash Lite (Ultra Fast &amp; Recommended)</option>
+            <option value="gemini-3.5-flash-lite">⚡ Gemini 3.5 Flash Lite (Fast &amp; Low Latency)</option>
+            <option value="gemini-4-hydrogen">🧠 Gemini 4 Hydrogen (High Accuracy Reasoning)</option>
           </select>
 
-          <button
-            onClick={handleGenerateScript}
-            disabled={isGenerating}
-            className="px-6 py-2.5 bg-gradient-to-r from-cyan-400 via-teal-300 to-emerald-400 hover:opacity-90 disabled:opacity-50 text-zinc-950 font-black text-xs rounded-xl transition-all shadow-xl shadow-cyan-500/25 flex items-center gap-2 shrink-0 cursor-pointer active:scale-95"
-            title="1-Click: STT + Gemini Timeline Segmentation + Auto-Shorten + Narrator Voice Generation"
-          >
-            {isGenerating ? (
-              <RotateCw className="w-4 h-4 animate-spin" />
-            ) : (
-              <Zap className="w-4 h-4 fill-zinc-950 stroke-[2.5]" />
-            )}
-            <span>⚡ One Click Auto Generator (Narrator အသံပါ တစ်ခါတည်းထုတ်မည်)</span>
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={handleGenerateScript}
+              disabled={isGenerating}
+              className="px-5 py-2.5 bg-gradient-to-r from-sky-400 via-cyan-400 to-teal-400 hover:opacity-90 disabled:opacity-50 text-zinc-950 font-black text-xs rounded-xl transition-all shadow-xl shadow-cyan-500/25 flex items-center gap-2 cursor-pointer active:scale-95"
+              title="ဗီဒီယိုကို Analysis လုပ်ပြီး မြန်မာ Narrator TTX စာသားများကို အလိုအလျောက် ထုတ်ယူမည်"
+            >
+              {isGenerating ? (
+                <RotateCw className="w-4 h-4 animate-spin" />
+              ) : (
+                <Sparkles className="w-4 h-4 text-zinc-950 stroke-[2.5]" />
+              )}
+              <span>✨ TTX Generator (Narrator စာသားထုတ်မည်)</span>
+            </button>
+
+            <button
+              onClick={handleGenerateScript}
+              disabled={isGenerating}
+              className="px-5 py-2.5 bg-gradient-to-r from-emerald-400 via-teal-300 to-cyan-400 hover:opacity-90 disabled:opacity-50 text-zinc-950 font-black text-xs rounded-xl transition-all shadow-xl shadow-emerald-500/25 flex items-center gap-2 cursor-pointer active:scale-95"
+              title="Video Analyzing ဖြင့် Narrator TTX စာသား သီးသန့် ထုတ်ယူမည်"
+            >
+              {isGenerating ? (
+                <RotateCw className="w-4 h-4 animate-spin" />
+              ) : (
+                <FileText className="w-4 h-4 text-zinc-950 stroke-[2.5]" />
+              )}
+              <span>🎬 Video Analyzing TTX</span>
+            </button>
+          </div>
         </div>
 
-        {/* Live Percentage Progress Bar & Speed Status (User Requested Feature) */}
+        {/* TTX Success & Proceed to Step 4 Voice Clone Card */}
+        {project.segments.length > 0 && !isGenerating && (
+          <div className="flex flex-wrap items-center justify-between gap-3 p-4 rounded-2xl bg-gradient-to-r from-emerald-950/40 via-zinc-900/60 to-cyan-950/40 border border-emerald-500/30 text-xs">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center justify-center shrink-0">
+                <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+              </div>
+              <div>
+                <span className="font-bold text-white font-myanmar text-sm block">
+                  ✓ Narrator TTX စာသား ({project.segments.length} Segments) အောင်မြင်စွာ ထွက်ရှိပါပြီ
+                </span>
+                <span className="text-[11px] text-zinc-300 font-myanmar">
+                  (အဆင့် ၃ တွင် Voice Clone မပါပါ။) အောက်ပါ Narrator TTX စာသားများအား အသံသွင်းရန်အတွက် "အဆင့် ၄ (Voice Clone)" သို့ ဆက်သွားပါ
+                </span>
+              </div>
+            </div>
+
+            {onNextStep && (
+              <button
+                onClick={onNextStep}
+                className="px-6 py-2.5 bg-gradient-to-r from-emerald-400 via-teal-300 to-cyan-400 hover:opacity-90 text-zinc-950 font-black rounded-xl transition-all flex items-center gap-2 cursor-pointer shadow-lg shadow-emerald-500/25 active:scale-95 shrink-0"
+              >
+                <span>အဆင့် ၄ (Voice Clone ပြုလုပ်မည်) သို့</span>
+                <ArrowRight className="w-4 h-4 stroke-[2.5]" />
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Live Percentage Progress Bar & Speed Status */}
         {isGenerating && (
-          <div className="space-y-2 p-3.5 rounded-xl bg-cyan-950/40 border border-cyan-500/30 backdrop-blur-md animate-pulse">
-            <div className="flex items-center justify-between text-xs font-mono font-bold">
+          <div className="space-y-2 p-3.5 rounded-xl bg-cyan-950/40 border border-cyan-500/30 backdrop-blur-md">
+            <div className="flex items-center justify-between text-xs font-mono font-bold gap-2">
               <span className="text-cyan-300 flex items-center gap-1.5 font-myanmar">
-                <RotateCw className="w-3.5 h-3.5 animate-spin text-cyan-400" />
+                <RotateCw className="w-3.5 h-3.5 animate-spin text-cyan-400 shrink-0" />
                 <span>{statusMessage || 'AI Processing Video Chunks...'}</span>
               </span>
-              <span className="text-cyan-400">
-                {Math.round(progressPercent)}% TTX
+              <span className="text-cyan-400 shrink-0">
+                {Math.round(progressPercent)}% ({elapsedSeconds}s)
               </span>
             </div>
 
@@ -505,7 +580,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
             </div>
 
             <div className="flex items-center justify-between text-[10px] text-zinc-400 font-mono">
-              <span>⚡ Flash Model Optimized (Fast 3-min Chunk Pipeline)</span>
+              <span>⚡ {selectedGeminiModel} (Parallel 1-Min Visual + Dialogue Alignment)</span>
               <span>100% ရောက်ရှိလျှင် ပြီးဆုံးပါမည်</span>
             </div>
           </div>
@@ -548,7 +623,17 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
             )}
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+            <button
+              onClick={handlePolishNarrationStyle}
+              disabled={isPolishing || isGenerating}
+              className="px-3 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 disabled:opacity-50 text-amber-200 text-xs font-bold flex items-center justify-center gap-1.5 border border-amber-400/40 transition-colors cursor-pointer active:scale-95"
+              title="နမူနာ Video စံနှုန်းအတိုင်း တယ်/ပါတယ် ထပ်နေမှုလျှော့ပြီး အသံနိမ့်မြင့် စိတ်ခံစားချက် Tag များ ထည့်သွင်းပြင်ဆင်မည်"
+            >
+              <Sparkles className={`w-3.5 h-3.5 text-amber-300 ${isPolishing ? 'animate-spin' : ''}`} />
+              <span>{isPolishing ? 'ညှိနေသည်...' : '✨ Style Polish (တယ်လျှော့)'}</span>
+            </button>
+
             <button
               onClick={handleCopyDubbingPlanJson}
               className="px-3 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-sky-300 text-xs font-semibold flex items-center justify-center gap-1.5 border border-white/10 transition-colors cursor-pointer active:scale-95"
@@ -634,7 +719,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
                       {(seg.duration || seg.endTime - seg.startTime).toFixed(2)}s
                     </span>
                     <span className="px-2 py-0.5 rounded-md bg-sky-500/10 text-sky-300 text-[10px] font-semibold border border-sky-500/20">
-                      {seg.speaker || 'Speaker 1 (Adult Male)'}
+                      {seg.speaker || 'Narrator (ဇာတ်ကြောင်းပြောသူ)'}
                     </span>
                     {seg.isOnScreen !== undefined && (
                       <span className="px-1.5 py-0.5 rounded text-[9px] bg-zinc-800 text-zinc-400">
@@ -872,7 +957,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
                         </div>
                       </td>
                       <td className="p-2.5 whitespace-nowrap">
-                        <span className="font-semibold text-white">{s.speaker || 'Speaker 1 (Adult Male)'}</span>
+                        <span className="font-semibold text-white">{s.speaker || 'Narrator (ဇာတ်ကြောင်းပြောသူ)'}</span>
                         <div className="text-[10px] text-zinc-400">{s.isOnScreen ? 'On-Screen' : 'Off-Screen'}</div>
                       </td>
                       <td className="p-2.5 text-zinc-300 font-sans max-w-xs">{s.originalText || '-'}</td>
@@ -904,14 +989,14 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
             className="px-4 py-2 bg-white/5 hover:bg-white/10 text-zinc-300 text-xs font-semibold rounded-xl transition-all border border-white/10 flex items-center gap-1.5 cursor-pointer"
           >
             <ArrowLeft className="w-3.5 h-3.5" />
-            <span>အဆင့် 3 သို့</span>
+            <span>ရှေ့အဆင့်</span>
           </button>
         ) : (
           <div />
         )}
 
         <span className="text-xs text-zinc-400 font-myanmar hidden sm:inline">
-          Script & Subtitle ထုတ်ယူပြီးပါက အဆင့် 5 (Voice Clone Studio) သို့ သွားပါ
+          သဘာဝကျသော Narrator Script ထုတ်ယူပြီးပါက နောက်အဆင့် (TTS Studio) သို့ သွားပါ
         </span>
 
         {onNextStep && (
@@ -919,7 +1004,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
             onClick={onNextStep}
             className="px-6 py-3 bg-gradient-to-r from-sky-400 to-teal-400 hover:opacity-90 text-zinc-950 font-black text-xs rounded-xl transition-all flex items-center gap-2.5 shadow-xl shadow-sky-500/25 cursor-pointer active:scale-95 shrink-0"
           >
-            <span>အဆင့် 5 သို့</span>
+            <span>နောက်အဆင့် (TTS Studio) သို့</span>
             <ArrowRight className="w-4 h-4 stroke-[2.5]" />
           </button>
         )}

@@ -1,7 +1,12 @@
-import { execSync } from 'child_process';
+import { execFile, execSync } from 'child_process';
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { promisify } from 'util';
 import WebSocket from 'ws';
+
+const execFileAsync = promisify(execFile);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -37,102 +42,100 @@ export interface CharacterVoiceProfile {
   name: string;
   myanmarName: string;
   azureVoice: string; // 'my-MM-ThihaNeural' or 'my-MM-NilarNeural'
-  basePitch: string;
-  baseRate: string;
+  basePitchPct: number;
+  baseRatePct: number;
   description: string;
 }
 
 export const REALITY_VOICE_CONFIGS: Record<string, CharacterVoiceProfile> = {
-  // 4 Male Voices (ကျား ၄ ဦး - Authentic Human 24kHz Studio Neural)
+  // 4 Male Voices
   Thiha: {
     name: 'Thiha',
     myanmarName: 'သီဟ',
     azureVoice: 'my-MM-ThihaNeural',
-    basePitch: '+0Hz',
-    baseRate: '+0%',
+    basePitchPct: 0,
+    baseRatePct: 0,
     description: 'နွေးထွေးခန့်ညားသော နေ့စဉ်စကားပြော သဘာဝအသံ (Conversational Native Male)',
   },
   KyawKyaw: {
     name: 'Kyaw Kyaw',
     myanmarName: 'ကျော်ကျော်',
     azureVoice: 'my-MM-ThihaNeural',
-    basePitch: '-14Hz',
-    baseRate: '-5%',
+    basePitchPct: -7,
+    baseRatePct: -3,
     description: 'သြဇာကြီးမား နက်နဲသော Deep Bass အသံ (Movie Recap Specialist Male)',
   },
   AungAung: {
     name: 'Aung Aung',
     myanmarName: 'အောင်အောင်',
     azureVoice: 'my-MM-ThihaNeural',
-    basePitch: '+14Hz',
-    baseRate: '+8%',
+    basePitchPct: 7,
+    baseRatePct: 5,
     description: 'တက်ကြွသွက်လက်သော လူငယ်သံ (Dynamic Youth Male)',
   },
   MinThway: {
     name: 'Min Thway',
     myanmarName: 'မင်းသွေး',
     azureVoice: 'my-MM-ThihaNeural',
-    basePitch: '-6Hz',
-    baseRate: '-4%',
+    basePitchPct: -4,
+    baseRatePct: -2,
     description: 'အေးချမ်းတည်ကြည်သော ဇာတ်လမ်းပြောသံ (Calm Narrative Male)',
   },
 
-  // 4 Female Voices (မ ၄ ဦး - Authentic Human 24kHz Studio Neural)
+  // 4 Female Voices
   Nilar: {
     name: 'Nilar',
     myanmarName: 'နီလာ',
     azureVoice: 'my-MM-NilarNeural',
-    basePitch: '+0Hz',
-    baseRate: '+0%',
+    basePitchPct: 0,
+    baseRatePct: 0,
     description: 'သဘာဝကျနူးညံ့ ကြည်လင်ပြတ်သားသော အသံ (Natural Clear Female)',
   },
   MayThu: {
     name: 'May Thu',
     myanmarName: 'မေသူ',
     azureVoice: 'my-MM-NilarNeural',
-    basePitch: '-4Hz',
-    baseRate: '-5%',
+    basePitchPct: -3,
+    baseRatePct: -3,
     description: 'ချိုသာနူးညံ့သော ဇာတ်လမ်းပြောသံ (Sweet Storytelling Female)',
   },
   Thiri: {
     name: 'Thiri',
     myanmarName: 'သီရိ',
     azureVoice: 'my-MM-NilarNeural',
-    basePitch: '+8Hz',
-    baseRate: '+6%',
+    basePitchPct: 5,
+    baseRatePct: 4,
     description: 'တောက်ပသွက်လက်သော သတင်းနှင့် ရုပ်သံတင်ဆက်သံ (Broadcast Presenter Female)',
   },
   SuSu: {
     name: 'Su Su',
     myanmarName: 'စုစု',
     azureVoice: 'my-MM-NilarNeural',
-    basePitch: '+16Hz',
-    baseRate: '+10%',
+    basePitchPct: 9,
+    baseRatePct: 7,
     description: 'ချစ်စဖွယ် လန်းဆန်းပျော်ရွှင်သော အသံ (Cheerful Sweet Female)',
   },
 };
 
 export interface SynthesizeOptions {
   voice?: string;
-  style?: string; // 'conversational' | 'recap' | 'broadcast' | 'energetic' | 'soothing'
-  speed?: number; // e.g. 1.25 (125% speed) or 0.85 (85% speed)
+  style?: string;
+  emotion?: string;
+  speed?: number;
   rateOffset?: string;
   pitchOffset?: string;
 }
 
-/**
- * Clean and format Myanmar text for natural human pronunciation and breathing
- */
 export function formatMyanmarSpeechText(rawText: string): string {
   let clean = rawText
     .replace(/<[^>]+>/g, ' ')
     .replace(/\r\n/g, '\n')
     .replace(/\t/g, ' ')
     .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/[\[\]*#_`~]/g, ' ')
+    .replace(/\s+/g, ' ')
     .trim();
 
-  // Ensure sentence punctuation (။, ., !, ?) has slight natural breathing pauses
-  // In SSML, a comma or period creates a natural cadence pause
   clean = clean
     .replace(/([။.!?])(?!\s*($|\n))/g, '$1 ')
     .replace(/([၊,])(?!\s)/g, '$1 ')
@@ -141,9 +144,196 @@ export function formatMyanmarSpeechText(rawText: string): string {
   return clean;
 }
 
+function escapeXml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
 /**
- * Synthesizes 100% human-reality Myanmar speech using Microsoft Azure 24kHz Studio Neural models
- * with custom persona pitch/cadence modulation and anti-artifact audio streaming.
+ * Splits a Burmese line into AT MOST 2 cohesive halves so Edge WS runs in ONE single stream
+ * with consistent vocal identity (zero mid-sentence voice switching or double-voice artifacts).
+ */
+function splitIntoTwoBalancedClauses(text: string): string[] {
+  if (text.length < 30) return [text];
+
+  // Prefer natural punctuation midpoint
+  const punctMatches = [...text.matchAll(/[။.!?\n၊,]\s+/g)];
+  if (punctMatches.length > 0) {
+    const mid = text.length / 2;
+    let bestIdx = -1;
+    let bestDist = Infinity;
+    for (const m of punctMatches) {
+      if (m.index !== undefined) {
+        const splitPos = m.index + m[0].length;
+        if (splitPos > 8 && splitPos < text.length - 8) {
+          const dist = Math.abs(splitPos - mid);
+          if (dist < bestDist) {
+            bestDist = dist;
+            bestIdx = splitPos;
+          }
+        }
+      }
+    }
+    if (bestIdx !== -1) {
+      return [text.slice(0, bestIdx).trim(), text.slice(bestIdx).trim()].filter(Boolean);
+    }
+  }
+
+  // Otherwise try natural Burmese clause particles near midpoint
+  const words = text.split(/\s+/);
+  if (words.length >= 4) {
+    const midWord = Math.ceil(words.length / 2);
+    return [words.slice(0, midWord).join(' '), words.slice(midWord).join(' ')];
+  }
+
+  return [text];
+}
+
+function computeNaturalSingleVoiceProsody(
+  clause: string,
+  emotionHint: string,
+  idx: number,
+  total: number,
+  basePitchPct: number,
+  baseRatePct: number
+): { pitchStr: string; rateStr: string; volStr: string } {
+  const hint = (emotionHint || '').toLowerCase();
+  const isLast = idx === total - 1;
+  const combined = `${hint} ${clause}`.toLowerCase();
+
+  let pitchDelta = 0;
+  let rateDelta = 0;
+  let volDelta = 0;
+
+  const isQuestion =
+    /question|curious|wonder|ask|မေး|စူးစမ်း/.test(hint) ||
+    /[?？]|(?:လား|လဲ|မလား|ပြီလား|ရှိလား)[။.!?]?$/.test(clause);
+
+  const isSurprise =
+    /surpris|shock|amaze|astonish|wow|gasp|discover|အံ့ဩ|မထင်မှတ်|တကယ်|အများကြီး|ဟာ/.test(
+      combined
+    ) || (clause.includes('!') && !/angry|fierce|threat|မပေးဘူး|ဒေါသ/.test(combined));
+
+  const isHappiness = /happy|cheer|joy|delight|smile|relief|ပျော်|ဝမ်းသာ|အောင်မြင်/.test(combined);
+  const isEmpathy = /empath|caring|comfort|kind|tender|warm|စာနာ|နှစ်သိမ့်|ဂရု|သနား/.test(hint);
+  const isExcitement = /excit|enthusias|thrill|energetic|vivid|တက်ကြွ|စိတ်လှုပ်ရှား/.test(hint);
+  const isMocking =
+    /mock|smug|sarcas|playful|tease|ironic|chuckle|လှောင်|ခနဲ့/.test(hint) ||
+    /(?:ပြီပဲ|တာပဲ|နော်|ရယ်)[။.!?]?$/.test(clause);
+  const isDetermined =
+    /determin|fierce|angry|threat|intense|urgent|tense|warning|resolve|မာန်|ဒေါသ|ပြင်းထန်/.test(hint) ||
+    /(?:မပေးဘူး|သေချာပေါက်|ယူရမယ်|မခံဘူး|လုပ်ရမယ်|ဝယ်လိုက်)[။.!?]?$/.test(clause);
+  const isSad = /sad|sorrow|melanchol|grief|cry|pain|ဝမ်းနည်း|ငို|နာကျင်|မျက်ရည်/.test(combined);
+
+  // Subtle single-speaker inflection (keeps exact same voice identity, zero two-voice pitch splitting!)
+  if (isQuestion) {
+    pitchDelta = isLast ? 14 : 2;
+    rateDelta = 3;
+    volDelta = 6;
+  } else if (isSurprise) {
+    pitchDelta = isLast ? 15 : 3;
+    rateDelta = 6;
+    volDelta = 10;
+  } else if (isHappiness) {
+    pitchDelta = isLast ? 8 : 5;
+    rateDelta = 5;
+    volDelta = 6;
+  } else if (isEmpathy) {
+    pitchDelta = isLast ? -3 : 1;
+    rateDelta = -3;
+    volDelta = 0;
+  } else if (isExcitement) {
+    pitchDelta = isLast ? 12 : 6;
+    rateDelta = 8;
+    volDelta = 10;
+  } else if (isMocking) {
+    pitchDelta = idx === 0 && total > 1 ? 10 : -4;
+    rateDelta = 4;
+    volDelta = 8;
+  } else if (isDetermined) {
+    pitchDelta = -6;
+    rateDelta = 4;
+    volDelta = 12;
+  } else if (isSad) {
+    pitchDelta = -6;
+    rateDelta = -8;
+    volDelta = -6;
+  } else {
+    // Gentle conversational Burmese cadence within ONE consistent speaker's natural range
+    const warmEnd = /(?:ပြီ|ပဲ|မယ်|နော်|!)[။.!?]?$/.test(clause);
+    if (total === 1) {
+      pitchDelta = warmEnd ? 6 : 2;
+      rateDelta = 3;
+      volDelta = 4;
+    } else if (idx === 0) {
+      pitchDelta = 1;
+      rateDelta = 2;
+      volDelta = 2;
+    } else {
+      pitchDelta = warmEnd ? 8 : -4;
+      rateDelta = 3;
+      volDelta = 4;
+    }
+  }
+
+  const finalPitch = Math.max(-20, Math.min(24, basePitchPct + pitchDelta));
+  const finalRate = Math.max(-25, Math.min(40, baseRatePct + rateDelta));
+  const finalVol = Math.max(-15, Math.min(20, volDelta));
+
+  return {
+    pitchStr: `${finalPitch >= 0 ? '+' : ''}${finalPitch}%`,
+    rateStr: `${finalRate >= 0 ? '+' : ''}${finalRate}%`,
+    volStr: `${finalVol >= 0 ? '+' : ''}${finalVol}%`,
+  };
+}
+
+/**
+ * Light single-pass studio mic EQ & clean silence trim (ZERO pitch-splitting or crossfaded sub-clips).
+ */
+async function polishSingleVoiceStream(rawMp3: Buffer): Promise<Buffer> {
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tts-clean-'));
+  try {
+    const inPath = path.join(workDir, 'in.mp3');
+    const outPath = path.join(workDir, 'out.mp3');
+    fs.writeFileSync(inPath, rawMp3);
+
+    await execFileAsync(
+      'ffmpeg',
+      [
+        '-y',
+        '-i',
+        inPath,
+        '-af',
+        'silenceremove=start_periods=1:start_duration=0:start_threshold=-46dB:stop_periods=-1:stop_duration=0.16:stop_threshold=-46dB,highpass=f=80,equalizer=f=185:t=q:w=1.2:g=2.0,equalizer=f=3100:t=q:w=1.1:g=1.5,acompressor=threshold=-18dB:ratio=2.0:attack=10:release=90,alimiter=limit=0.95',
+        '-ar',
+        '24000',
+        '-ac',
+        '1',
+        '-b:a',
+        '64k',
+        outPath,
+      ],
+      { timeout: 12000 }
+    );
+
+    const polished = fs.readFileSync(outPath);
+    return polished.length > 100 ? polished : rawMp3;
+  } catch {
+    return rawMp3;
+  } finally {
+    try {
+      fs.rmSync(workDir, { recursive: true, force: true });
+    } catch (_) {}
+  }
+}
+
+/**
+ * Synthesizes ONE cohesive, recognizable Myanmar voice stream (single speaker identity,
+ * natural Burmese cadence, zero double-voice artifacts).
  */
 export async function synthesizeNeuralRealityMyanmar(
   text: string,
@@ -151,50 +341,40 @@ export async function synthesizeNeuralRealityMyanmar(
 ): Promise<Buffer> {
   const voiceKey = options.voice || 'Thiha';
   const profile = REALITY_VOICE_CONFIGS[voiceKey] || REALITY_VOICE_CONFIGS.Thiha;
-  const style = options.style || 'conversational';
+  const style = options.style || 'recap';
+  const emotionHint = options.emotion || '';
 
-  // Calculate style prosody offsets
-  let pitchShift = 0;
-  let rateShift = 0;
+  let pitchShiftPct = 0;
+  let rateShiftPct = 12;
 
   switch (style) {
     case 'recap':
-      // Cinematic Movie Recap: Deep bass storyteller, suspenseful dramatic pacing
-      pitchShift = -12;
-      rateShift = -8;
+      pitchShiftPct = 1;
+      rateShiftPct = 14;
       break;
     case 'broadcast':
-      // Broadcast News: Crisp, authoritative, fluent TV anchor cadence
-      pitchShift = 6;
-      rateShift = 12;
+      pitchShiftPct = 3;
+      rateShiftPct = 12;
       break;
     case 'energetic':
-      // TikTok/Shorts High Energy: High-tempo, vibrant, enthusiastic delivery
-      pitchShift = 18;
-      rateShift = 22;
+      pitchShiftPct = 6;
+      rateShiftPct = 18;
       break;
     case 'soothing':
-      // Calm & Soothing: Soft, relaxed, peaceful intimate warmth
-      pitchShift = -8;
-      rateShift = -14;
+      pitchShiftPct = -3;
+      rateShiftPct = -4;
       break;
     case 'affectionate':
-      // Affectionate: Warm, soft, intimate, gentle delivery
-      pitchShift = 4;
-      rateShift = -6;
+      pitchShiftPct = 2;
+      rateShiftPct = 4;
       break;
     case 'conversational':
     default:
-      pitchShift = 0;
-      rateShift = 0;
+      pitchShiftPct = 1;
+      rateShiftPct = 10;
       break;
   }
 
-  // Combine profile base pitch/rate with style offset and user speed
-  const basePitchNum = parseInt(profile.basePitch.replace('Hz', ''), 10) || 0;
-  const baseRateNum = parseInt(profile.baseRate.replace('%', ''), 10) || 0;
-
-  // Process user requested voice speed multiplier (e.g. 1.25 -> +25%)
   let userSpeedPercent = 0;
   if (typeof options.speed === 'number' && options.speed > 0) {
     userSpeedPercent = Math.round((options.speed - 1.0) * 100);
@@ -202,127 +382,154 @@ export async function synthesizeNeuralRealityMyanmar(
     userSpeedPercent = parseInt(options.rateOffset.replace('%', ''), 10) || 0;
   }
 
-  const totalPitch = basePitchNum + pitchShift;
-  const totalRate = Math.min(100, Math.max(-50, baseRateNum + rateShift + userSpeedPercent));
-
-  const finalPitchStr = `${totalPitch >= 0 ? '+' : ''}${totalPitch}Hz`;
-  const finalRateStr = `${totalRate >= 0 ? '+' : ''}${totalRate}%`;
+  const totalBasePitchPct = profile.basePitchPct + pitchShiftPct;
+  const totalBaseRatePct = Math.min(42, Math.max(-30, profile.baseRatePct + rateShiftPct + userSpeedPercent));
 
   const cleanSpeechText = formatMyanmarSpeechText(text);
-
-  const token = getSecMsGecV2Token();
-  if (!token) {
-    throw new Error('Failed to generate Sec-MS-GEC v2 authentication token');
+  if (!cleanSpeechText || !/[က-႟a-zA-Z0-9]/.test(cleanSpeechText)) {
+    throw new Error('Speech text contains no speakable characters');
   }
 
-  const reqId = Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
-  const wsUrl = `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${TRUSTED_CLIENT_TOKEN}&Sec-MS-GEC=${token}&Sec-MS-GEC-Version=2-${CHROMIUM_VERSION}&ConnectionId=${reqId}`;
+  // Max 2 <prosody> blocks inside ONE continuous <voice> stream — always single cohesive voice
+  const clauses = splitIntoTwoBalancedClauses(cleanSpeechText);
+  const prosodyXml = clauses
+    .map((clause, idx) => {
+      const p = computeNaturalSingleVoiceProsody(
+        clause,
+        emotionHint,
+        idx,
+        clauses.length,
+        totalBasePitchPct,
+        totalBaseRatePct
+      );
+      return `<prosody pitch="${p.pitchStr}" rate="${p.rateStr}" volume="${p.volStr}">${escapeXml(clause)}</prosody>`;
+    })
+    .join(' ');
 
-  return new Promise((resolve, reject) => {
-    let ws: WebSocket | null = null;
-    const audioChunks: Buffer[] = [];
-    let isFinished = false;
-
-    const timeout = setTimeout(() => {
-      if (!isFinished) {
-        isFinished = true;
-        if (ws) {
-          try {
-            ws.terminate();
-          } catch (_) {}
-        }
-        if (audioChunks.length > 0) {
-          resolve(Buffer.concat(audioChunks));
-        } else {
-          reject(new Error('Neural Reality TTS synthesis timed out'));
-        }
-      }
-    }, 15000);
-
-    try {
-      ws = new WebSocket(wsUrl, {
-        headers: {
-          'User-Agent': `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0`,
-          'Origin': 'chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold',
-          'Accept-Encoding': 'gzip, deflate, br',
-          'Accept-Language': 'en-US,en;q=0.9',
-        },
-      });
-
-      ws.on('open', () => {
-        // 1. Send speech config (24kHz 48kbps MP3)
-        const configMsg =
-          'Content-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"false"},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}';
-        ws?.send(configMsg);
-
-        // 2. Escape XML text
-        const xmlEscaped = cleanSpeechText
-          .replace(/&/g, '&amp;')
-          .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;')
-          .replace(/"/g, '&quot;')
-          .replace(/'/g, '&apos;');
-
-        // 3. Send SSML with prosody
-        const ssml = `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="my-MM"><voice name="${profile.azureVoice}"><prosody pitch="${finalPitchStr}" rate="${finalRateStr}">${xmlEscaped}</prosody></voice></speak>`;
-        const ssmlMsg = `X-RequestId:${reqId}\r\nContent-Type:application/ssml+xml\r\nPath:ssml\r\n\r\n${ssml}`;
-        ws?.send(ssmlMsg);
-      });
-
-      ws.on('message', (data: any, isBinary: boolean) => {
-        if (isBinary) {
-          const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
-          const delim = 'Path:audio\r\n';
-          const idx = buf.indexOf(delim);
-          if (idx !== -1) {
-            const audioData = buf.subarray(idx + delim.length);
-            if (audioData.length > 0) {
-              audioChunks.push(audioData);
-            }
-          }
-        } else {
-          const textMsg = data.toString();
-          if (textMsg.includes('Path:turn.end')) {
-            if (!isFinished) {
-              isFinished = true;
-              clearTimeout(timeout);
-              ws?.close();
-              const fullAudio = Buffer.concat(audioChunks);
-              resolve(fullAudio);
-            }
-          }
-        }
-      });
-
-      ws.on('error', (err) => {
-        if (!isFinished) {
-          isFinished = true;
-          clearTimeout(timeout);
-          if (audioChunks.length > 0) {
-            resolve(Buffer.concat(audioChunks));
-          } else {
-            reject(err);
-          }
-        }
-      });
-
-      ws.on('close', () => {
-        if (!isFinished) {
-          isFinished = true;
-          clearTimeout(timeout);
-          if (audioChunks.length > 0) {
-            resolve(Buffer.concat(audioChunks));
-          } else {
-            reject(new Error('WebSocket closed before audio was received'));
-          }
-        }
-      });
-    } catch (err) {
-      if (!isFinished) {
-        isFinished = true;
-        clearTimeout(timeout);
-        reject(err);
-      }
+  const runOnce = (forceFreshToken = false): Promise<Buffer> => {
+    if (forceFreshToken) {
+      cachedToken = '';
+      cachedTokenTime = 0;
     }
-  });
+    const token = getSecMsGecV2Token();
+    if (!token) {
+      return Promise.reject(new Error('Failed to generate Sec-MS-GEC v2 authentication token'));
+    }
+
+    const reqId = Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+    const wsUrl = `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${TRUSTED_CLIENT_TOKEN}&Sec-MS-GEC=${token}&Sec-MS-GEC-Version=2-${CHROMIUM_VERSION}&ConnectionId=${reqId}`;
+
+    return new Promise((resolve, reject) => {
+      let ws: WebSocket | null = null;
+      const audioChunks: Buffer[] = [];
+      let isFinished = false;
+
+      const timeout = setTimeout(() => {
+        if (!isFinished) {
+          isFinished = true;
+          if (ws) {
+            try {
+              ws.terminate();
+            } catch (_) {}
+          }
+          if (audioChunks.length > 100) {
+            resolve(Buffer.concat(audioChunks));
+          } else {
+            reject(new Error('Neural Reality TTS synthesis timed out'));
+          }
+        }
+      }, 15000);
+
+      try {
+        ws = new WebSocket(wsUrl, {
+          headers: {
+            'User-Agent': `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0`,
+            'Origin': 'chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept-Language': 'en-US,en;q=0.9',
+          },
+        });
+
+        ws.on('open', () => {
+          const configMsg =
+            'Content-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"false"},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}';
+          ws?.send(configMsg);
+
+          const ssml = `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="my-MM"><voice name="${profile.azureVoice}">${prosodyXml}</voice></speak>`;
+          const ssmlMsg = `X-RequestId:${reqId}\r\nContent-Type:application/ssml+xml\r\nPath:ssml\r\n\r\n${ssml}`;
+          ws?.send(ssmlMsg);
+        });
+
+        ws.on('message', (data: any, isBinary: boolean) => {
+          if (isBinary) {
+            const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+            const delim = 'Path:audio\r\n';
+            const idx = buf.indexOf(delim);
+            if (idx !== -1) {
+              const audioData = buf.subarray(idx + delim.length);
+              if (audioData.length > 0) {
+                audioChunks.push(audioData);
+              }
+            }
+          } else {
+            const textMsg = data.toString();
+            if (textMsg.includes('Path:turn.end')) {
+              if (!isFinished) {
+                isFinished = true;
+                clearTimeout(timeout);
+                ws?.close();
+                const fullAudio = Buffer.concat(audioChunks);
+                if (fullAudio.length < 100) {
+                  reject(new Error('Empty audio buffer from Edge Neural TTS'));
+                } else {
+                  resolve(fullAudio);
+                }
+              }
+            }
+          }
+        });
+
+        ws.on('error', (err) => {
+          if (!isFinished) {
+            isFinished = true;
+            clearTimeout(timeout);
+            if (audioChunks.length > 100) {
+              resolve(Buffer.concat(audioChunks));
+            } else {
+              reject(err);
+            }
+          }
+        });
+
+        ws.on('close', () => {
+          if (!isFinished) {
+            isFinished = true;
+            clearTimeout(timeout);
+            const fullAudio = Buffer.concat(audioChunks);
+            if (fullAudio.length > 100) {
+              resolve(fullAudio);
+            } else {
+              reject(new Error('WebSocket closed before audio was received'));
+            }
+          }
+        });
+      } catch (err) {
+        if (!isFinished) {
+          isFinished = true;
+          clearTimeout(timeout);
+          reject(err);
+        }
+      }
+    });
+  };
+
+  try {
+    const raw = await runOnce(false);
+    return await polishSingleVoiceStream(raw);
+  } catch (firstErr: any) {
+    console.warn('Neural Reality TTS retry #1 notice:', firstErr?.message);
+    await new Promise((r) => setTimeout(r, 250));
+    const raw = await runOnce(true);
+    return await polishSingleVoiceStream(raw);
+  }
 }

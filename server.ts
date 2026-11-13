@@ -4,9 +4,32 @@ import { WebSocketServer } from 'ws';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
 import dotenv from 'dotenv';
+import multer from 'multer';
+import { exec } from 'child_process';
+import os from 'os';
 import { GoogleGenAI, Modality, LiveServerMessage } from '@google/genai';
 import { synthesizeNeuralRealityMyanmar, REALITY_VOICE_CONFIGS } from './server/neuralRealityTts';
+import {
+  UPLOADS_DIR,
+  VIDEOS_DIR,
+  AUDIO_DIR,
+  EXPORTS_DIR,
+  createJob,
+  getJob,
+  probeVideoFile,
+  refineBurmeseSegment,
+  generateSegmentAudio,
+  generateAllNarrations,
+  exportNarratorPackage,
+} from './server/narratorJobManager';
+import { detectSeparationCapabilities, extractBgmAndSfxFromVideo } from './server/audioSeparationAdapter';
+import {
+  VERIFIED_BURMESE_PROVIDERS,
+  getProviderDisclosures,
+  generateTestSentenceAudio,
+} from './server/ttsAdapter';
 
 dotenv.config();
 
@@ -100,9 +123,15 @@ function createGeminiClient(apiKey?: string) {
   });
 }
 
-async function callGeminiRest(keyToUse: string, model: string, contentsPayload: any, systemInstruction?: any) {
+async function callGeminiRest(
+  keyToUse: string,
+  model: string,
+  contentsPayload: any,
+  systemInstruction?: any,
+  options?: { responseMimeType?: string; timeoutMs?: number }
+) {
   const isOAuth = keyToUse.startsWith('ya29.') || keyToUse.startsWith('ya29') || keyToUse.startsWith('1//');
-  
+
   const url = isOAuth
     ? `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`
     : `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(keyToUse)}`;
@@ -115,8 +144,19 @@ async function callGeminiRest(keyToUse: string, model: string, contentsPayload: 
     headers['Authorization'] = `Bearer ${keyToUse}`;
   }
 
+  let formattedContents: any;
+  if (typeof contentsPayload === 'string') {
+    formattedContents = [{ role: 'user', parts: [{ text: contentsPayload }] }];
+  } else if (Array.isArray(contentsPayload)) {
+    formattedContents = contentsPayload;
+  } else if (contentsPayload && Array.isArray(contentsPayload.parts)) {
+    formattedContents = [{ role: 'user', parts: contentsPayload.parts }];
+  } else {
+    formattedContents = contentsPayload;
+  }
+
   const body: any = {
-    contents: typeof contentsPayload === 'string' ? [{ parts: [{ text: contentsPayload }] }] : contentsPayload,
+    contents: formattedContents,
   };
 
   if (systemInstruction) {
@@ -127,10 +167,17 @@ async function callGeminiRest(keyToUse: string, model: string, contentsPayload: 
     }
   }
 
+  if (options?.responseMimeType) {
+    body.generationConfig = {
+      responseMimeType: options.responseMimeType,
+    };
+  }
+
   const res = await fetch(url, {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(options?.timeoutMs || 40000),
   });
 
   const data = await res.json().catch(() => ({}));
@@ -152,9 +199,22 @@ async function callGeminiRest(keyToUse: string, model: string, contentsPayload: 
   throw new Error('No text returned in Gemini REST response');
 }
 
+function getServerPort(): number {
+  const portArgIdx = process.argv.indexOf('--port');
+  if (portArgIdx !== -1 && process.argv[portArgIdx + 1]) {
+    const parsed = Number(process.argv[portArgIdx + 1]);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  const envPort = Number(process.env.PORT);
+  if (process.env.NODE_ENV !== 'production') {
+    return envPort && envPort !== 8080 ? envPort : 3000;
+  }
+  return envPort || 3000;
+}
+
 async function startServer() {
   const app = express();
-  const PORT = process.env.PORT || 3000;
+  const PORT = getServerPort();
 
   app.use(express.json({ limit: '100mb' }));
   app.use(express.urlencoded({ extended: true, limit: '100mb' }));
@@ -170,10 +230,383 @@ async function startServer() {
     next();
   });
 
+  // Static uploads directory for videos, audio clips, and exports
+  app.use('/uploads', express.static(UPLOADS_DIR));
+
+  // Configure Multer for video file uploads
+  const videoStorage = multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      cb(null, VIDEOS_DIR);
+    },
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname).toLowerCase() || '.mp4';
+      const cleanBase = path.basename(file.originalname, ext).replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 40);
+      cb(null, `vid_${Date.now()}_${cleanBase}${ext}`);
+    },
+  });
+
+  const uploadVideoMiddleware = multer({
+    storage: videoStorage,
+    limits: { fileSize: 350 * 1024 * 1024 }, // 350MB limit
+    fileFilter: (_req, file, cb) => {
+      const allowed = ['.mp4', '.mov', '.webm', '.m4v', '.mkv'];
+      const ext = path.extname(file.originalname).toLowerCase();
+      if (allowed.includes(ext) || file.mimetype.startsWith('video/')) {
+        cb(null, true);
+      } else {
+        cb(new Error('MP4, MOV, WebM ဗီဒီယို ဖိုင်များကိုသာ ခွင့်ပြုထားပါသည်'));
+      }
+    },
+  });
+
+  // 1. API Configuration & Secrets Status
+  app.get('/api/narrator/config', (_req, res) => {
+    const geminiKey = process.env.GEMINI_API_KEY;
+    const cambKey = process.env.CAMB_API_KEY;
+
+    return res.json({
+      geminiConfigured: Boolean(geminiKey && geminiKey.trim().length > 5),
+      cambConfigured: Boolean(cambKey && cambKey.trim().length > 5),
+      edgeConfigured: true,
+      defaultProvider: 'gemini',
+      providers: getProviderDisclosures(),
+      instructions: {
+        gemini: 'Google AI Studio ၏ Settings > Secrets တွင် GEMINI_API_KEY ကို ထည့်သွင်းထားပါက Gemini TTS နှင့် AI ဘာသာပြန်ကို အလိုအလျောက် အသုံးပြုနိုင်ပါသည်။',
+        camb: 'Third-party TTS Provider အသုံးပြုလိုပါက Settings > Secrets တွင် CAMB_API_KEY နာမည်ဖြင့် ထည့်သွင်းနိုင်ပါသည်။',
+      },
+    });
+  });
+
+  // 1b. Verified TTS Providers Disclosure
+  app.get('/api/narrator/tts-providers', (_req, res) => {
+    return res.json({
+      success: true,
+      providers: VERIFIED_BURMESE_PROVIDERS,
+    });
+  });
+
+  // 1c. Test Sentence Audio Synthesis Endpoint
+  app.post('/api/narrator/test-tts', async (req, res) => {
+    try {
+      const { provider = 'edge_neural', voice = 'Thiha', speed = 1.0, testText, apiKey } = req.body;
+      const result = await generateTestSentenceAudio({
+        provider,
+        voice,
+        speed: parseFloat(speed) || 1.0,
+        testText,
+        apiKey: apiKey || process.env.GEMINI_API_KEY,
+      });
+
+      const fileName = `test_sentence_${Date.now()}.mp3`;
+      const filePath = path.join(AUDIO_DIR, fileName);
+      fs.writeFileSync(filePath, result.audioBuffer);
+
+      return res.json({
+        success: true,
+        audioUrl: `/uploads/audio/${fileName}`,
+        durationSec: result.durationSec,
+        statusMessage: result.statusMessage,
+        provider,
+        voice,
+      });
+    } catch (err: any) {
+      console.error('Test TTS error:', err);
+      return res.status(400).json({ success: false, error: err.message || 'TTS test sentence failed' });
+    }
+  });
+
+  // 2. Video Upload and Metadata Probe
+  app.post('/api/narrator/upload-video', uploadVideoMiddleware.single('video'), async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: 'ဗီဒီယိုဖိုင် မတွေ့ရှိပါ' });
+      }
+
+      const filePath = req.file.path;
+      const metadata = await probeVideoFile(filePath, req.file.originalname);
+
+      // Validate video duration limit (up to 30 mins)
+      if (metadata.duration > 1800) {
+        fs.unlinkSync(filePath);
+        return res.status(400).json({ error: 'ဗီဒီယိုကြာချိန် မိနစ် ၃၀ ထက် ကျော်လွန်နေပါသည် (အများဆုံး မိနစ် ၃၀ အထိသာ ခွင့်ပြုပါသည်)' });
+      }
+
+      const relativeUrl = `/uploads/videos/${path.basename(filePath)}`;
+      return res.json({
+        success: true,
+        filePath,
+        videoUrl: relativeUrl,
+        metadata,
+      });
+    } catch (err: any) {
+      console.error('Video upload error:', err);
+      return res.status(500).json({ error: err.message || 'ဗီဒီယို တင်ယူမှု မအောင်မြင်ပါ' });
+    }
+  });
+
+  // 3. Start Narrator Job
+  app.post('/api/narrator/start-job', async (req, res) => {
+    try {
+      const {
+        videoPath,
+        videoUrl,
+        metadata,
+        mode = 'burmese_narrator',
+        provider = 'gemini',
+        voice = 'Thiha',
+        gender = 'male',
+        style = 'recap',
+        pacing = 1.0,
+        muteOriginal = true,
+        originalVolume = 0.0,
+        narrationVolume = 1.0,
+      } = req.body;
+
+      if (!videoPath || !fs.existsSync(videoPath)) {
+        return res.status(400).json({ error: 'ဗီဒီယိုဖိုင် လမ်းကြောင်း မမှန်ကန်ပါ' });
+      }
+
+      const job = createJob({
+        videoPath,
+        videoUrl,
+        metadata: metadata || (await probeVideoFile(videoPath, path.basename(videoPath))),
+        mode,
+        provider,
+        voice,
+        gender,
+        style,
+        pacing,
+        muteOriginal,
+        originalVolume,
+        narrationVolume,
+      });
+
+      return res.json({ success: true, jobId: job.id, job });
+    } catch (err: any) {
+      console.error('Start job error:', err);
+      return res.status(500).json({ error: err.message || 'Job စတင်ခြင်း မအောင်မြင်ပါ' });
+    }
+  });
+
+  // 4. Job Status & Segments
+  app.get('/api/narrator/job/:jobId', (req, res) => {
+    const job = getJob(req.params.jobId);
+    if (!job) {
+      return res.status(404).json({ error: 'Job မတွေ့ရှိပါ' });
+    }
+    return res.json(job);
+  });
+
+  // 5. Update Segment
+  app.post('/api/narrator/update-segment', (req, res) => {
+    const { jobId, segmentId, burmeseText, sourceText, startTime, endTime, approved } = req.body;
+    const job = getJob(jobId);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+
+    const seg = job.segments.find((s) => s.id === segmentId);
+    if (!seg) return res.status(404).json({ error: 'Segment not found' });
+
+    if (burmeseText !== undefined) seg.burmeseText = burmeseText;
+    if (sourceText !== undefined) seg.sourceText = sourceText;
+    if (startTime !== undefined) seg.startTime = parseFloat(startTime);
+    if (endTime !== undefined) seg.endTime = parseFloat(endTime);
+    if (seg.endTime > seg.startTime) {
+      seg.duration = parseFloat((seg.endTime - seg.startTime).toFixed(2));
+    }
+    if (approved !== undefined) seg.approved = Boolean(approved);
+
+    return res.json({ success: true, segment: seg });
+  });
+
+  // 6. Refine / Shorten Burmese Text
+  app.post('/api/narrator/refine-text', async (req, res) => {
+    try {
+      const { originalBurmese, targetDurationSec, sourceText } = req.body;
+      if (!originalBurmese) return res.status(400).json({ error: 'Burmese text required' });
+
+      const refined = await refineBurmeseSegment(
+        originalBurmese,
+        parseFloat(targetDurationSec) || 15,
+        sourceText
+      );
+      return res.json({ success: true, refined });
+    } catch (err: any) {
+      console.error('Refine text error:', err);
+      return res.status(500).json({ error: err.message || 'စာတိုပြန်ညှိခြင်း မအောင်မြင်ပါ' });
+    }
+  });
+
+  // 7. Generate Segment Audio
+  app.post('/api/narrator/generate-segment-audio', async (req, res) => {
+    try {
+      const { jobId, segmentId, customText } = req.body;
+      const job = getJob(jobId);
+      if (!job) return res.status(404).json({ error: 'Job not found' });
+
+      const updated = await generateSegmentAudio(job, segmentId, customText);
+      return res.json({ success: true, segment: updated });
+    } catch (err: any) {
+      console.error('Generate segment audio error:', err);
+      return res.status(500).json({ error: err.message || 'အသံထုတ်လုပ်မှု မအောင်မြင်ပါ' });
+    }
+  });
+
+  // 8. Generate All Narrations
+  app.post('/api/narrator/generate-all', async (req, res) => {
+    try {
+      const { jobId } = req.body;
+      const job = getJob(jobId);
+      if (!job) return res.status(404).json({ error: 'Job not found' });
+
+      // Run in background and return immediate acceptance
+      generateAllNarrations(job).catch((e) => {
+        console.error('generateAllNarrations background error:', e);
+        job.stage = 'error';
+        job.error = e.message;
+      });
+
+      return res.json({ success: true, message: 'အသံထုတ်လုပ်ခြင်း စတင်ပါပြီ' });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Generate all failed' });
+    }
+  });
+
+  // 9. Voice Sample Preview
+  app.post('/api/narrator/voice-preview', async (req, res) => {
+    try {
+      const { voice = 'Thiha', gender = 'male', style = 'recap', pacing = 1.0, provider = 'gemini' } = req.body;
+      const sampleText = 'မင်္ဂလာပါ၊ ဗီဒီယို ဇာတ်ကြောင်းပြောသူ အသံ စမ်းသပ်မှု ဖြစ်ပါတယ်။';
+      const outFileName = `preview_${Date.now()}.mp3`;
+      const outFilePath = path.join(AUDIO_DIR, outFileName);
+
+      let audioBuf: Buffer | null = null;
+      if (provider === 'gemini') {
+        try {
+          const ai = new GoogleGenAI({
+            apiKey: process.env.GEMINI_API_KEY,
+            httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+          });
+          const geminiVoice = gender === 'female' ? 'Kore' : 'Charon';
+          const ttsRes = await ai.models.generateContent({
+            model: 'gemini-3.8-flash-lite-tts',
+            contents: [
+              {
+                role: 'user',
+                parts: [{ text: sampleText, speechMetadata: { style: `${style} tone` } }],
+              },
+            ],
+            config: {
+              responseModalities: ['AUDIO'],
+              speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: geminiVoice } } },
+            },
+          });
+          const b64 = ttsRes.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+          if (b64) audioBuf = Buffer.from(b64, 'base64');
+        } catch (_) {}
+      }
+
+      if (!audioBuf) {
+        audioBuf = await synthesizeNeuralRealityMyanmar(sampleText, {
+          voice: voice || (gender === 'female' ? 'Nilar' : 'Thiha'),
+          style,
+          speed: pacing,
+        });
+      }
+
+      fs.writeFileSync(outFilePath, audioBuf);
+      return res.json({ success: true, audioUrl: `/uploads/audio/${outFileName}` });
+    } catch (err: any) {
+      console.error('Voice preview error:', err);
+      return res.status(500).json({ error: err.message || 'အသံနမူနာ စမ်းသပ်မှု မအောင်မြင်ပါ' });
+    }
+  });
+
+  // 10. Sync & Final Export
+  app.post('/api/narrator/export', async (req, res) => {
+    try {
+      const { jobId, muteOriginal, originalVolume, narrationVolume } = req.body;
+      const job = getJob(jobId);
+      if (!job) return res.status(404).json({ error: 'Job not found' });
+
+      if (muteOriginal !== undefined) job.muteOriginal = Boolean(muteOriginal);
+      if (originalVolume !== undefined) job.originalVolume = parseFloat(originalVolume);
+      if (narrationVolume !== undefined) job.narrationVolume = parseFloat(narrationVolume);
+
+      const exportUrls = await exportNarratorPackage(job);
+      return res.json({ success: true, exportUrls });
+    } catch (err: any) {
+      console.error('Export error:', err);
+      return res.status(500).json({ error: err.message || 'Export ထုတ်ယူမှု မအောင်မြင်ပါ' });
+    }
+  });
+
+  // 11. Audio Separation Capabilities
+  app.get('/api/narrator/separation-status', async (_req, res) => {
+    try {
+      const status = await detectSeparationCapabilities();
+      return res.json({ success: true, ...status });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Separation status check failed' });
+    }
+  });
+
+  // 12. Extract Background BGM & SFX Only (Removing Original Human Vocals)
+  app.post('/api/audio/extract-bgm', uploadVideoMiddleware.single('video'), async (req, res) => {
+    let tempUploadedPath: string | undefined;
+    try {
+      let targetVideoPath = '';
+      if (req.file && fs.existsSync(req.file.path)) {
+        targetVideoPath = req.file.path;
+        tempUploadedPath = req.file.path;
+      } else if (req.body?.videoPath && fs.existsSync(req.body.videoPath)) {
+        targetVideoPath = req.body.videoPath;
+      } else if (typeof req.body?.videoUrl === 'string' && req.body.videoUrl.startsWith('/')) {
+        const candidatePublic = path.join(process.cwd(), 'public', req.body.videoUrl.replace(/^\/+/, ''));
+        const candidateRoot = path.join(process.cwd(), req.body.videoUrl.replace(/^\/+/, ''));
+        if (fs.existsSync(candidatePublic)) targetVideoPath = candidatePublic;
+        else if (fs.existsSync(candidateRoot)) targetVideoPath = candidateRoot;
+      }
+
+      if (!targetVideoPath) {
+        return res.status(400).json({ error: 'နောက်ခံတီးလုံး ထုတ်ယူရန် ဗီဒီယိုဖိုင် မတွေ့ရှိပါ' });
+      }
+
+      const extractId = `bgm_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      const result = await extractBgmAndSfxFromVideo(targetVideoPath, EXPORTS_DIR, extractId);
+
+      // Clean up temporary uploaded video file after extracting BGM MP3
+      if (tempUploadedPath && fs.existsSync(tempUploadedPath)) {
+        try {
+          fs.unlinkSync(tempUploadedPath);
+        } catch (_) {}
+      }
+
+      const bgmUrl = `/uploads/exports/${path.basename(result.bgmMp3Path)}`;
+      const vocalUrl = result.vocalMp3Path ? `/uploads/exports/${path.basename(result.vocalMp3Path)}` : undefined;
+
+      return res.json({
+        success: true,
+        bgmUrl,
+        vocalUrl,
+        engineUsed: result.engineUsed,
+        statusMessage: result.statusMessage,
+        durationSec: result.durationSec,
+      });
+    } catch (err: any) {
+      if (tempUploadedPath && fs.existsSync(tempUploadedPath)) {
+        try {
+          fs.unlinkSync(tempUploadedPath);
+        } catch (_) {}
+      }
+      console.error('BGM extraction error:', err);
+      return res.status(500).json({ error: err.message || 'နောက်ခံတီးလုံး ခွဲထုတ်ခြင်း မအောင်မြင်ပါ' });
+    }
+  });
+
   // Server-side Gemini API route
   app.post(['/api/gemini/generate', '/gemini/generate', '/generate'], async (req, res) => {
     try {
-      const { apiKey, model = 'gemini-2.5-flash', prompt, contents, parts, systemInstruction } = req.body;
+      const { apiKey, model = 'gemini-3.1-flash-lite', prompt, contents, parts, systemInstruction, responseMimeType } = req.body;
       const rawKey = apiKey || process.env.GEMINI_API_KEY;
 
       if (!rawKey) {
@@ -182,7 +615,7 @@ async function startServer() {
         });
       }
 
-      let keyToUse = cleanAsciiHeader(rawKey);
+      const keyToUse = cleanAsciiHeader(rawKey);
 
       if (!isValidAsciiApiKey(keyToUse)) {
         return res.status(400).json({
@@ -191,15 +624,12 @@ async function startServer() {
       }
 
       const contentsPayload = contents || (parts ? { parts } : prompt);
-      const requestedModel = model || 'gemini-3.5-flash';
+      const requestedModel = model || 'gemini-3.1-flash-lite';
       const candidateModels = [
         requestedModel,
-        'gemini-3.5-flash',
+        'gemini-3.1-flash-lite',
         'gemini-3.5-flash-lite',
-        'gemini-3.8-flash',
-        'gemini-2.5-flash',
-        'gemini-2.5-flash-lite',
-        'gemini-flash-latest',
+        'gemini-4-hydrogen',
       ].filter(Boolean).filter((m, idx, arr) => arr.indexOf(m) === idx);
 
       let lastError: any = null;
@@ -207,10 +637,13 @@ async function startServer() {
         let retries = 0;
         while (retries < 2) {
           try {
-            const textResult = await callGeminiRest(keyToUse, m, contentsPayload, systemInstruction);
+            const textResult = await callGeminiRest(keyToUse, m, contentsPayload, systemInstruction, {
+              responseMimeType,
+              timeoutMs: 40000,
+            });
 
             if (textResult !== undefined) {
-              return res.json({ text: textResult });
+              return res.json({ text: textResult, model: m });
             }
           } catch (modelErr: any) {
             lastError = modelErr;
@@ -223,16 +656,16 @@ async function startServer() {
                 status,
               });
             }
-            if (status === 404) {
-              // Model not found or deprecated, try next candidate model
+            if (status === 404 || modelErr?.name === 'TimeoutError' || modelErr?.name === 'AbortError') {
+              // Model not found or timed out — fail over immediately to next verified fast model
               break;
             }
             const errMsg = modelErr?.message || '';
             const isQuota = status === 429 || errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('quota');
-            
+
             if (isQuota && retries === 0) {
               retries++;
-              await new Promise((r) => setTimeout(r, 1200));
+              await new Promise((r) => setTimeout(r, 900));
               continue;
             }
             break;
@@ -240,13 +673,12 @@ async function startServer() {
         }
       }
 
-      const errorDetails = analyzeGeminiError(lastError);
       throw lastError || new Error('All Gemini model candidates failed');
     } catch (error: any) {
       console.error('Gemini error:', error);
       const status = error?.status || error?.statusCode || 500;
       const errorDetails = analyzeGeminiError(error);
-      let errMsg = formatNetworkError(error, 'Gemini');
+      const errMsg = formatNetworkError(error, 'Gemini');
       return res.status(status).json({
         error: errMsg,
         errorDetails,
@@ -258,7 +690,7 @@ async function startServer() {
   // Test connection route
   app.post(['/api/gemini/test', '/gemini/test', '/test'], async (req, res) => {
     try {
-      const { apiKey, model = 'gemini-3.5-flash' } = req.body;
+      const { apiKey, model = 'gemini-3.1-flash-lite' } = req.body;
       const rawKey = apiKey || process.env.GEMINI_API_KEY;
 
       if (!rawKey || !isValidAsciiApiKey(rawKey)) {
@@ -267,24 +699,22 @@ async function startServer() {
 
       const keyToUse = cleanAsciiHeader(rawKey);
       const candidateModels = [
-        model || 'gemini-3.5-flash',
-        'gemini-3.5-flash',
+        model || 'gemini-3.1-flash-lite',
+        'gemini-3.1-flash-lite',
         'gemini-3.5-flash-lite',
-        'gemini-3.8-flash',
-        'gemini-2.5-flash',
-        'gemini-2.5-flash-lite',
+        'gemini-4-hydrogen',
       ].filter(Boolean).filter((m, idx, arr) => arr.indexOf(m) === idx);
 
       let lastError: any = null;
       for (const m of candidateModels) {
         try {
-          const textResult = await callGeminiRest(keyToUse, m, 'Ping');
+          const textResult = await callGeminiRest(keyToUse, m, 'Ping', undefined, { timeoutMs: 10000 });
           if (textResult !== undefined) {
             return res.json({ ok: true, message: 'Gemini API connection test successful.', text: textResult, model: m });
           }
         } catch (mErr: any) {
           lastError = mErr;
-          if (mErr?.status === 404 || mErr?.status === 503) continue;
+          if (mErr?.status === 404 || mErr?.status === 503 || mErr?.name === 'TimeoutError' || mErr?.name === 'AbortError') continue;
           break;
         }
       }
@@ -301,7 +731,7 @@ async function startServer() {
   // Server-side Gemini Streaming API route (Server-Sent Events)
   app.post('/api/gemini/stream', async (req, res) => {
     try {
-      const { apiKey, model = 'gemini-3.8-flash', prompt, contents, parts, systemInstruction } = req.body;
+      const { apiKey, model = 'gemini-3.1-flash-lite', prompt, contents, parts, systemInstruction } = req.body;
       const rawKey = apiKey || process.env.GEMINI_API_KEY;
 
       if (!rawKey || !isValidAsciiApiKey(rawKey)) {
@@ -317,7 +747,7 @@ async function startServer() {
 
       const contentsPayload = contents || (parts ? { parts } : prompt);
       const responseStream = await ai.models.generateContentStream({
-        model: model || 'gemini-3.8-flash',
+        model: model || 'gemini-3.1-flash-lite',
         contents: contentsPayload,
         config: systemInstruction ? { systemInstruction } : undefined,
       });
@@ -339,13 +769,13 @@ async function startServer() {
   // 100% Free Unlimited 24kHz Studio Neural Myanmar Voice Endpoint (8 Distinct Human Personas)
   app.post(['/api/tts/free', '/api/tts/edge'], async (req, res) => {
     try {
-      const { text, voice = 'Thiha', style = 'conversational', speed, rate } = req.body;
+      const { text, voice = 'Thiha', style = 'recap', emotion = '', speed, rate } = req.body;
       if (!text || typeof text !== 'string') {
         return res.status(400).json({ error: 'Text is required for TTS' });
       }
 
       const activeSpeed = typeof speed === 'number' ? speed : (rate ? parseFloat(rate) : 1.0);
-      const mp3Buffer = await synthesizeNeuralRealityMyanmar(text, { voice, style, speed: activeSpeed });
+      const mp3Buffer = await synthesizeNeuralRealityMyanmar(text, { voice, style, emotion, speed: activeSpeed });
       res.setHeader('Content-Type', 'audio/mpeg');
       res.setHeader('Content-Length', mp3Buffer.length);
       return res.send(mp3Buffer);
@@ -424,7 +854,7 @@ async function startServer() {
   // Human Reality Studio TTS endpoint (Gemini Flagship Neural Voice Model with 24kHz Neural Fallback)
   app.post('/api/tts/gemini', async (req, res) => {
     try {
-      const { text, voice = 'Thiha', style = 'conversational', speed, rate, apiKey } = req.body;
+      const { text, voice = 'Thiha', style = 'recap', emotion = '', speed, rate, apiKey } = req.body;
       if (!text || typeof text !== 'string') {
         return res.status(400).json({ error: 'Text is required for TTS' });
       }
@@ -438,7 +868,7 @@ async function startServer() {
         .trim();
 
       cleanText = cleanText
-        .replace(/([။.!?])(?!\s*($|\n))/g, '$1\n\n')
+        .replace(/([။.!?])(?!\s*($|\n))/g, '$1 ')
         .replace(/([၊,])(?!\s)/g, '$1 ')
         .trim();
 
@@ -460,7 +890,7 @@ async function startServer() {
           persona: 'Energetic, dynamic, friendly young Burmese male speaker. Lifelike youth enthusiasm, fast-paced engaging rhythm, expressive modern cadence, vivid articulation',
         },
         MinThway: {
-          voice: 'Orpheus',
+          voice: 'Charon',
           persona: 'Smooth, calm, dignified Burmese male storyteller. Serene pacing, peaceful human warmth, reflective emotional nuance, soothing native pronunciation',
         },
         Nilar: {
@@ -476,7 +906,7 @@ async function startServer() {
           persona: 'Bright, articulate, intelligent Burmese female broadcast and news anchor. Crisp fluent diction, steady authoritative cadence, confident professional delivery',
         },
         SuSu: {
-          voice: 'Enceladus',
+          voice: 'Zephyr',
           persona: 'Charming, lively, joyful and refreshed Burmese female speaker. Cheerful smiles in the voice, playful sweet cadence, vibrant conversational rhythm',
         },
         Sulafat: {
@@ -496,55 +926,55 @@ async function startServer() {
           persona: 'Strong, bold and energetic Burmese male speaker with powerful vocal projection and dynamic enthusiasm',
         },
         Minerva: {
-          voice: 'Minerva',
+          voice: 'Aoede',
           persona: 'Wise, steady and articulate Burmese female speaker with professional clarity and composed cadence',
         },
         Luna: {
-          voice: 'Luna',
+          voice: 'Kore',
           persona: 'Soft, dreamy and lyrical Burmese female speaker with gentle melodic tone and soothing warmth',
         },
         Oberon: {
-          voice: 'Oberon',
+          voice: 'Charon',
           persona: 'Deep, resonant and cinematic Burmese male storyteller with rich baritone presence and suspenseful pacing',
         },
         Lyra: {
-          voice: 'Lyra',
+          voice: 'Zephyr',
           persona: 'Musical, flowing and expressive Burmese female speaker with graceful articulation and melodic rhythm',
         },
         Atlas: {
-          voice: 'Atlas',
+          voice: 'Charon',
           persona: 'Powerful, deep and commanding Burmese male speaker with strong resonance and firm authority',
         },
         Schedar: {
-          voice: 'Schedar',
+          voice: 'Puck',
           persona: 'Even, balanced and natural Burmese male speaker with steady cadence and clear conversational delivery',
         },
         Gacrux: {
-          voice: 'Gacrux',
+          voice: 'Charon',
           persona: 'Mature, seasoned and dignified Burmese male speaker with deep vocal experience and grounded authority',
         },
         Pulcherrima: {
-          voice: 'Pulcherrima',
+          voice: 'Aoede',
           persona: 'Forward, dynamic and engaging Burmese female speaker with bright enthusiasm and crisp articulation',
         },
         Achird: {
-          voice: 'Achird',
+          voice: 'Fenrir',
           persona: 'Friendly, warm and approachable Burmese male speaker with casual conversational warmth and natural smiles',
         },
         Zubenelgenubi: {
-          voice: 'Zubenelgenubi',
+          voice: 'Puck',
           persona: 'Casual, relaxed and easygoing Burmese male speaker with effortless conversational rhythm',
         },
         Vindemiatrix: {
-          voice: 'Vindemiatrix',
+          voice: 'Aoede',
           persona: 'Gentle, soft and tender Burmese female speaker with soothing calm and comforting emotional tone',
         },
         Sadachbia: {
-          voice: 'Sadachbia',
+          voice: 'Zephyr',
           persona: 'Lively, vibrant and cheerful Burmese female speaker with upbeat energy and playful cadence',
         },
         Sadaltager: {
-          voice: 'Sadaltager',
+          voice: 'Charon',
           persona: 'Knowledgeable, intelligent and articulate Burmese male speaker with educational clarity and professional presence',
         },
       };
@@ -562,69 +992,98 @@ async function startServer() {
 
       const styleDescription = styleModifierMap[style] || styleModifierMap.conversational;
 
-      const combinedStylePrompt = `GEMINI FLAGSHIP NEURAL REALITY ENGINE (24kHz Studio Neural Model).
-Speaker Persona: ${selected.persona}.
-Delivery Style: ${styleDescription}.
-Native Language: Burmese (မြန်မာဘာသာ).
+      // Detect dynamic vocal emotion acting cues from segment emotion + Burmese meaning
+      const combinedEmotionSource = `${emotion || ''} ${cleanText}`.toLowerCase();
+      let emotionalActingCue =
+        'NATURAL CONVERSATIONAL FLOW: Speak like talking face-to-face with a close friend—authentic Burmese sentence melody, connected phrasing, varied pacing, and natural emphasis on meaningful words without exaggerating.';
+      if (/surpris|shock|amaze|astonish|wow|discover|အံ့ဩ|မထင်မှတ်|တကယ်|အများကြီး|!/.test(combinedEmotionSource)) {
+        emotionalActingCue =
+          'SPONTANEOUS SURPRISE: Genuinely and naturally surprised in the moment, lifting pitch cleanly on the key reveal without sounding theatrical or artificial.';
+      } else if (/question|curious|wonder|မေး|\?|လား|လဲ/.test(combinedEmotionSource)) {
+        emotionalActingCue =
+          'CURIOSITY: Naturally inquisitive conversational delivery with gentle rising Burmese question intonation.';
+      } else if (/happy|cheer|joy|delight|smile|warm|relief|ပျော်|ဝမ်းသာ|ကောင်း|အောင်မြင်/.test(combinedEmotionSource)) {
+        emotionalActingCue =
+          'HAPPINESS: Warm, cheerful, lively conversational smile in the voice—bright and genuine, never forced.';
+      } else if (/empath|caring|comfort|kind|gentle|စာနာ|နှစ်သိမ့်|ဂရု|သနား/.test(combinedEmotionSource)) {
+        emotionalActingCue =
+          'EMPATHY: Caring, comforting, warm personal closeness, speaking gently as to a trusted friend.';
+      } else if (/sad|sorrow|melanchol|pain|ဝမ်းနည်း|ငို|နာကျင်/.test(combinedEmotionSource)) {
+        emotionalActingCue =
+          'SADNESS: Gentle, soft, emotionally sincere delivery with quiet authentic weight and natural human breath.';
+      } else if (/excit|energetic|enthusias|viral|thrill|တက်ကြွ|စိတ်လှုပ်ရှား/.test(combinedEmotionSource)) {
+        emotionalActingCue =
+          'EXCITEMENT: Energetic, expressive, enthusiastic storytelling momentum with natural dynamic emphasis.';
+      } else if (/mock|smug|sarcas|playful|tease|လှောင်|နော်|ပြီပဲ|တာပဲ/.test(combinedEmotionSource)) {
+        emotionalActingCue =
+          'PLAYFUL / KNOWING: Subtle sly conversational inflection on the punchline, natural and human.';
+      } else if (/determin|fierce|angry|threat|urgent|tense|မာန်|ဒေါသ|မပေးဘူး|သေချာပေါက်|ယူရမယ်/.test(combinedEmotionSource)) {
+        emotionalActingCue =
+          'FIRM RESOLVE: Grounded, sincere determination with clear natural vocal weight on key words.';
+      }
 
-EXACT HUMAN REALITY DIRECTIVES:
-1. PURE HUMAN REALISM: Speak with 100% natural human voice. Incorporate natural breath pauses (သဘာဝကျသော အသက်ရှုသံ), conversational cadence (စကားပြောစည်းဝါး), and human inflection (အသံနေအထား). Eliminate all robotic concatenation or synthetic flatness.
-2. FULL AND COMPLETE READING: You MUST narrate the text completely from the first word to the very last word without dropping or skipping words.
-3. NATURAL SENTENCE PAUSES: Pause gently and naturally at sentence ends ('။', '.', '?', '!') before narrating the next sentence.
-4. CLEAN SILENT PAUSES & CRYSTAL TAIL: The audio must remain crystal clear with zero buzz ('jee-jee'), zero clicks, and zero vocoder artifacts at word and sentence endings.`;
+      const speechStyleMetadata =
+        `VOICE DIRECTOR — BURMESE NATURAL HUMAN VOICE (${selected.persona}). ` +
+        `Scene: Speaking directly face-to-face to a close friend in real time (NOT a speech, audiobook, presentation, or newsreader). ` +
+        `Style: ${styleDescription}. Emotion: ${emotion ? `${emotion} — ` : ''}${emotionalActingCue} ` +
+        `Rules: Authentic native Burmese pronunciation and sentence melody; connected conversational rhythm with subtle natural breaths and varied pacing; stress meaningful words naturally; NEVER robotic, NEVER monotonous, NEVER identical rhythm across sentences, NEVER exaggerate every emotion, and speak the exact words without adding or changing anything.`;
 
       let audioBuffer: Buffer | null = null;
+      let usedEngine = 'neural-reality-24k';
 
-      // If a Gemini API key is present, attempt Gemini synthesis first
+      // If a Gemini API key is present, attempt Gemini Expressive TTS first
       if (keyToUse) {
         try {
           const ai = createGeminiClient(keyToUse);
 
           const tryModel = async (modelName: string): Promise<Buffer> => {
-            const fullPromptText = `Instructions: Perform the following Burmese narration with exact vocal emotion, pitch, tempo, and character style.
-Speaker Persona: ${selected.persona}.
-Delivery Style: ${styleDescription}.
-
-BURMESE TEXT TO READ OUT LOUD COMPLETELY:
-${cleanText}`;
-
-            const response = await ai.models.generateContent({
-              model: modelName,
-              contents: [
-                {
-                  role: 'user',
-                  parts: [
-                    {
-                      text: fullPromptText,
+            // Note: Gemini 3.8 TTS models use speechMetadata.style (no systemInstruction in config)
+            const response = await Promise.race([
+              ai.models.generateContent({
+                model: modelName,
+                contents: [
+                  {
+                    role: 'user',
+                    parts: [
+                      {
+                        text: cleanText,
+                        speechMetadata: {
+                          style: speechStyleMetadata,
+                        },
+                      } as any,
+                    ],
+                  },
+                ],
+                config: {
+                  responseModalities: ['AUDIO'],
+                  speechConfig: {
+                    voiceConfig: {
+                      prebuiltVoiceConfig: { voiceName: selected.voice },
                     },
-                  ],
-                },
-              ],
-              config: {
-                systemInstruction: combinedStylePrompt,
-                responseModalities: ['AUDIO'],
-                speechConfig: {
-                  voiceConfig: {
-                    prebuiltVoiceConfig: { voiceName: selected.voice },
                   },
                 },
-              },
-            });
+              }),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error(`${modelName} TTS timeout (15s)`)), 15000)
+              ),
+            ]);
 
             const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
             if (!base64Audio) {
               throw new Error(`No audio returned from ${modelName}`);
             }
             const rawWav = Buffer.from(base64Audio, 'base64');
-            return appendWavSilencePadding(rawWav, 0.25);
+            return appendWavSilencePadding(rawWav, 0.1);
           };
 
           try {
-            audioBuffer = await tryModel('gemini-3.8-flash-lite-tts');
+            audioBuffer = await tryModel('gemini-3.8-flash-tts');
+            usedEngine = 'gemini-3.8-flash-tts';
           } catch (err: any) {
-            console.warn('Primary Gemini TTS attempt failed (quota or model):', err.message);
+            console.warn('Primary Gemini expressive TTS attempt failed:', err.message);
             try {
-              audioBuffer = await tryModel('gemini-3.8-flash-tts');
+              audioBuffer = await tryModel('gemini-3.8-flash-lite-tts');
+              usedEngine = 'gemini-3.8-flash-lite-tts';
             } catch (err2: any) {
               console.warn('Secondary Gemini TTS attempt failed:', err2.message);
             }
@@ -637,15 +1096,17 @@ ${cleanText}`;
       if (audioBuffer && audioBuffer.length > 0) {
         res.setHeader('Content-Type', 'audio/wav');
         res.setHeader('Content-Length', audioBuffer.length);
+        res.setHeader('X-TTS-Engine', usedEngine);
         return res.send(audioBuffer);
       }
 
-      // If Gemini hit quota (429) or no key, instantly synthesize with 24kHz Studio Neural Model
-      console.log(`Using 24kHz Studio Neural Voice Actor fallback for ${voice} (${style})...`);
+      // Expressive 24kHz Studio Neural fallback with Rubberband pitch/cadence sculpting
+      console.log(`Using expressive 24kHz Studio Neural Voice Actor for ${voice} (${style} | ${emotion || 'recap'})...`);
       const activeSpeed = typeof speed === 'number' ? speed : (rate ? parseFloat(rate) : 1.0);
-      const neuralMp3 = await synthesizeNeuralRealityMyanmar(cleanText, { voice, style, speed: activeSpeed });
+      const neuralMp3 = await synthesizeNeuralRealityMyanmar(cleanText, { voice, style, emotion, speed: activeSpeed });
       res.setHeader('Content-Type', 'audio/mpeg');
       res.setHeader('Content-Length', neuralMp3.length);
+      res.setHeader('X-TTS-Engine', 'neural-reality-24k');
       return res.send(neuralMp3);
     } catch (error: any) {
       console.error('TTS synthesis error:', error);
@@ -962,12 +1423,310 @@ ${cleanText}`;
     }
   });
 
+  // ============================================================================
+  // TTS PROVIDERS CONFIG STATUS
+  // ============================================================================
+  app.get('/api/tts/providers-status', (_req, res) => {
+    res.json({
+      geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
+      elevenLabsConfigured: Boolean(process.env.ELEVENLABS_API_KEY),
+      huggingFaceConfigured: Boolean(process.env.HUGGINGFACE_API_KEY || process.env.HF_TOKEN),
+    });
+  });
+
+  // ============================================================================
+  // ELEVENLABS VOICE CLONE & TTS PROXY ENDPOINTS
+  // ============================================================================
+  const memoryUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 25 * 1024 * 1024 },
+  });
+
+  app.post('/api/elevenlabs/verify', async (req, res) => {
+    try {
+      const rawKey = req.body?.apiKey || process.env.ELEVENLABS_API_KEY;
+      if (!rawKey) {
+        return res.status(400).json({ ok: false, error: 'ElevenLabs API Key မရှိသေးပါ။' });
+      }
+      if (!isValidAsciiApiKey(rawKey)) {
+        return res.status(400).json({ ok: false, error: 'ElevenLabs API Key တွင် မြန်မာစာလုံးများ မပါဝင်ရပါ။' });
+      }
+      const keyToUse = cleanAsciiHeader(rawKey);
+      const elRes = await fetch('https://api.elevenlabs.io/v1/user', {
+        method: 'GET',
+        headers: { 'xi-api-key': keyToUse },
+        signal: AbortSignal.timeout(12000),
+      });
+      if (elRes.ok) {
+        const user = await elRes.json().catch(() => ({}));
+        const tier = user?.subscription?.tier ? ` (${user.subscription.tier})` : '';
+        return res.json({
+          ok: true,
+          message: `✓ ElevenLabs Voice Clone ချိတ်ဆက်မှု အောင်မြင်ပါသည်!${tier}`,
+        });
+      }
+      const errData = await elRes.json().catch(() => ({}));
+      const msg = errData?.detail?.message || errData?.detail || `ElevenLabs Auth Failed (HTTP ${elRes.status})`;
+      return res.status(elRes.status).json({ ok: false, error: typeof msg === 'string' ? msg : JSON.stringify(msg) });
+    } catch (error: any) {
+      return res.status(500).json({ ok: false, error: formatNetworkError(error, 'ElevenLabs') });
+    }
+  });
+
+  app.post('/api/elevenlabs/voices', async (req, res) => {
+    try {
+      const rawKey = req.body?.apiKey || process.env.ELEVENLABS_API_KEY;
+      if (!rawKey) {
+        return res.status(400).json({ error: 'ElevenLabs API Key ထည့်သွင်းပေးပါ (သို့မဟုတ် Environment Variable တွင် သတ်မှတ်ပါ)။' });
+      }
+      if (!isValidAsciiApiKey(rawKey)) {
+        return res.status(400).json({ error: 'ElevenLabs API Key မမှန်ကန်ပါ။' });
+      }
+      const keyToUse = cleanAsciiHeader(rawKey);
+      const elRes = await fetch('https://api.elevenlabs.io/v1/voices', {
+        method: 'GET',
+        headers: { 'xi-api-key': keyToUse },
+        signal: AbortSignal.timeout(15000),
+      });
+      const data = await elRes.json().catch(() => ({}));
+      if (!elRes.ok) {
+        const msg = data?.detail?.message || data?.detail || `Failed to load voices (HTTP ${elRes.status})`;
+        return res.status(elRes.status).json({ error: typeof msg === 'string' ? msg : JSON.stringify(msg) });
+      }
+      const voices = Array.isArray(data?.voices)
+        ? data.voices.map((v: any) => ({
+            voice_id: v.voice_id,
+            name: v.name,
+            category: v.category || 'premade',
+            preview_url: v.preview_url,
+            labels: v.labels || {},
+          }))
+        : [];
+      return res.json({ voices });
+    } catch (error: any) {
+      return res.status(500).json({ error: formatNetworkError(error, 'ElevenLabs') });
+    }
+  });
+
+  app.post('/api/elevenlabs/clone', memoryUpload.single('audio'), async (req, res) => {
+    try {
+      const rawKey = req.body?.apiKey || process.env.ELEVENLABS_API_KEY;
+      if (!rawKey) {
+        return res.status(400).json({ error: 'ElevenLabs API Key မရှိသေးပါ။' });
+      }
+      if (!isValidAsciiApiKey(rawKey)) {
+        return res.status(400).json({ error: 'ElevenLabs API Key မမှန်ကန်ပါ။' });
+      }
+      const file = req.file;
+      if (!file || !file.buffer?.length) {
+        return res.status(400).json({ error: 'Voice Clone ပြုလုပ်ရန် နမူနာ အသံဖိုင် (MP3/WAV/M4A) ထည့်သွင်းပေးပါ။' });
+      }
+
+      const keyToUse = cleanAsciiHeader(rawKey);
+      const voiceName = String(req.body?.name || 'Myanmar Cloned Voice').trim().slice(0, 80);
+      const description = String(req.body?.description || 'Burmese Natural Human Voice Clone').trim().slice(0, 400);
+
+      const form = new FormData();
+      form.append('name', voiceName);
+      form.append('description', description);
+      const audioBlob = new Blob([new Uint8Array(file.buffer)], {
+        type: file.mimetype || 'audio/mpeg',
+      });
+      form.append('files', audioBlob, file.originalname || 'voice_sample.mp3');
+
+      const cloneRes = await fetch('https://api.elevenlabs.io/v1/voices/add', {
+        method: 'POST',
+        headers: { 'xi-api-key': keyToUse },
+        body: form,
+        signal: AbortSignal.timeout(45000),
+      });
+
+      const data = await cloneRes.json().catch(() => ({}));
+      if (!cloneRes.ok || !data?.voice_id) {
+        const msg = data?.detail?.message || data?.detail || data?.message || `Voice Clone failed (HTTP ${cloneRes.status})`;
+        return res.status(cloneRes.status || 400).json({ error: typeof msg === 'string' ? msg : JSON.stringify(msg) });
+      }
+
+      return res.json({
+        success: true,
+        voice_id: data.voice_id,
+        name: voiceName,
+      });
+    } catch (error: any) {
+      return res.status(500).json({ error: formatNetworkError(error, 'ElevenLabs Voice Clone') });
+    }
+  });
+
+  // 1-Click Instant Voice Clone directly from user's attached sample video or project video
+  app.post('/api/elevenlabs/clone-sample-video', async (req, res) => {
+    try {
+      const rawKey = req.body?.apiKey || process.env.ELEVENLABS_API_KEY;
+      if (!rawKey) {
+        return res.status(400).json({ error: 'ElevenLabs API Key မရှိသေးပါ။ Step 1 တွင် API Key ထည့်သွင်းပေးပါ။' });
+      }
+      if (!isValidAsciiApiKey(rawKey)) {
+        return res.status(400).json({ error: 'ElevenLabs API Key မမှန်ကန်ပါ။' });
+      }
+
+      let targetVideo = path.join(process.cwd(), 'public/assets/aistudio/89cbad80-de9b-11f1-9f64-f9e4747b79f2_c572e83d.mp4');
+      if (req.body?.videoPath && fs.existsSync(req.body.videoPath)) {
+        targetVideo = req.body.videoPath;
+      }
+
+      if (!fs.existsSync(targetVideo)) {
+        return res.status(404).json({ error: 'နမူနာ ဗီဒီယိုဖိုင် မတွေ့ရှိပါ' });
+      }
+
+      const outTmpAudio = path.join(os.tmpdir(), `sample_clone_${Date.now()}.mp3`);
+      await new Promise<void>((resolve, reject) => {
+        exec(
+          `ffmpeg -y -ss 00:00:02 -i "${targetVideo}" -t 35 -vn -ar 44100 -ac 1 -b:a 192k "${outTmpAudio}"`,
+          (err) => {
+            if (err) reject(err);
+            else resolve();
+          }
+        );
+      });
+
+      if (!fs.existsSync(outTmpAudio) || fs.statSync(outTmpAudio).size < 1000) {
+        return res.status(500).json({ error: 'ဗီဒီယိုမှ အသံထုတ်ယူခြင်း မအောင်မြင်ပါ' });
+      }
+
+      const audioBuf = fs.readFileSync(outTmpAudio);
+      try { fs.unlinkSync(outTmpAudio); } catch (_) {}
+
+      const keyToUse = cleanAsciiHeader(rawKey);
+      const voiceName = String(req.body?.name || 'Sample Video Burmese Narrator').trim().slice(0, 80);
+      const description = 'Extracted Burmese Natural Human Narrator Voice from sample video for Expressive Recaps';
+
+      const form = new FormData();
+      form.append('name', voiceName);
+      form.append('description', description);
+      const audioBlob = new Blob([new Uint8Array(audioBuf)], { type: 'audio/mpeg' });
+      form.append('files', audioBlob, 'sample_narrator.mp3');
+
+      const cloneRes = await fetch('https://api.elevenlabs.io/v1/voices/add', {
+        method: 'POST',
+        headers: { 'xi-api-key': keyToUse },
+        body: form,
+        signal: AbortSignal.timeout(50000),
+      });
+
+      const data = await cloneRes.json().catch(() => ({}));
+      if (!cloneRes.ok || !data?.voice_id) {
+        const msg = data?.detail?.message || data?.detail || data?.message || `Voice Clone failed (HTTP ${cloneRes.status})`;
+        return res.status(cloneRes.status || 400).json({ error: typeof msg === 'string' ? msg : JSON.stringify(msg) });
+      }
+
+      return res.json({
+        success: true,
+        voice_id: data.voice_id,
+        name: voiceName,
+      });
+    } catch (error: any) {
+      console.error('Clone from sample video error:', error);
+      return res.status(500).json({ error: formatNetworkError(error, 'Sample Video Voice Clone') });
+    }
+  });
+
+  app.post('/api/elevenlabs/tts', async (req, res) => {
+    try {
+      const {
+        text,
+        voiceId,
+        modelId = 'eleven_v3',
+        stability = 0.5,
+        style = 0.0,
+        emotion = '',
+        apiKey,
+      } = req.body || {};
+
+      const rawKey = apiKey || process.env.ELEVENLABS_API_KEY;
+      if (!rawKey) {
+        return res.status(400).json({ error: 'ElevenLabs API Key မရှိသေးပါ။ Step 1 တွင် ElevenLabs API Key ထည့်သွင်းပေးပါ။' });
+      }
+      if (!isValidAsciiApiKey(rawKey)) {
+        return res.status(400).json({ error: 'ElevenLabs API Key မမှန်ကန်ပါ။' });
+      }
+      if (!text || typeof text !== 'string' || !text.trim()) {
+        return res.status(400).json({ error: 'TTS ပြုလုပ်ရန် စာသား လိုအပ်ပါသည်။' });
+      }
+      if (!voiceId || typeof voiceId !== 'string' || !voiceId.trim()) {
+        return res.status(400).json({ error: 'ElevenLabs Voice ID ရွေးချယ်ပေးပါ (သို့မဟုတ် Instant Clone ပြုလုပ်ပါ)။' });
+      }
+
+      const keyToUse = cleanAsciiHeader(rawKey);
+      const cleanVoiceId = cleanAsciiHeader(voiceId);
+
+      const emLower = String(emotion || '').toLowerCase();
+      let dynStability = Number(stability);
+      let dynStyle = Number(style);
+      if (emLower.includes('excited') || emLower.includes('surpris') || emLower.includes('fierce')) {
+        dynStability = Math.max(0.3, dynStability - 0.1);
+        dynStyle = Math.min(0.5, dynStyle + 0.1);
+      } else if (emLower.includes('sad') || emLower.includes('empathetic') || emLower.includes('calm')) {
+        dynStability = Math.min(0.7, dynStability + 0.1);
+      }
+
+      // ElevenLabs v3 models require exact schema:
+      // Note: `similarity_boost` MUST NOT be sent to eleven_v3 (causes 422 Unprocessable Entity)
+      // `language_code: "my"` specifies Burmese Unicode text
+      const cleanText = text.trim();
+      const v3Payload = {
+        text: cleanText,
+        model_id: 'eleven_v3',
+        language_code: 'my',
+        voice_settings: {
+          stability: Number.isFinite(dynStability) ? Math.min(1.0, Math.max(0.0, dynStability)) : 0.5,
+          style: Number.isFinite(dynStyle) ? Math.min(1.0, Math.max(0.0, dynStyle)) : 0.0,
+          use_speaker_boost: true,
+        },
+      };
+
+      const ttsUrl = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(cleanVoiceId)}?output_format=mp3_44100_128`;
+      const ttsRes = await fetch(ttsUrl, {
+        method: 'POST',
+        headers: {
+          'xi-api-key': keyToUse,
+          'Content-Type': 'application/json',
+          Accept: 'audio/mpeg',
+        },
+        body: JSON.stringify(v3Payload),
+        signal: AbortSignal.timeout(35000),
+      });
+
+      if (ttsRes.ok) {
+        const audioBuf = Buffer.from(await ttsRes.arrayBuffer());
+        if (audioBuf.length > 100) {
+          res.setHeader('Content-Type', 'audio/mpeg');
+          res.setHeader('Content-Length', audioBuf.length);
+          res.setHeader('X-TTS-Engine', 'elevenlabs_v3');
+          return res.send(audioBuf);
+        }
+      }
+
+      const errJson = await ttsRes.json().catch(() => ({}));
+      console.error(`ElevenLabs TTS HTTP ${ttsRes.status} Error:`, JSON.stringify(errJson));
+      const detail = errJson?.detail?.message || errJson?.detail || errJson?.message || `ElevenLabs API error (HTTP ${ttsRes.status})`;
+      const errMessage = typeof detail === 'string' ? detail : JSON.stringify(detail);
+
+      return res.status(ttsRes.status || 400).json({
+        error: `ElevenLabs TTS Error: ${errMessage}`,
+        status: ttsRes.status,
+      });
+    } catch (error: any) {
+      console.error('ElevenLabs TTS error:', error);
+      return res.status(500).json({ error: formatNetworkError(error, 'ElevenLabs TTS') });
+    }
+  });
+
 
 
   // Vite integration
   if (process.env.NODE_ENV !== 'production') {
+    process.env.DISABLE_HMR = 'true';
     const vite = await createViteServer({
-      server: { middlewareMode: true, hmr: false },
+      server: { middlewareMode: true, hmr: false, watch: null },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -1053,8 +1812,8 @@ ${cleanText}`;
     }
   });
 
-  server.listen(PORT, () => {
-    console.log(`Server listening on port ${PORT}`);
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server listening on http://0.0.0.0:${PORT}`);
   });
 }
 
@@ -1120,6 +1879,9 @@ function appendWavSilencePadding(wavBuffer: Buffer, paddingSeconds = 0.25): Buff
   }
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
+});
 
 

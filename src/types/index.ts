@@ -11,6 +11,8 @@ export interface GeminiKeyInfo {
 export interface ApiKeys {
   assemblyAiKey: string;
   huggingFaceKey?: string;
+  manusApiKey?: string;
+  elevenLabsKey?: string;
 }
 
 export interface FalConfig {
@@ -70,9 +72,10 @@ export interface TranscriptSegment {
   playbackRate?: number; // voice clone speed for this segment
   videoPlaybackRate?: number; // video playback speed for this segment
   style?: 'conversational' | 'recap' | 'broadcast' | 'energetic' | 'soothing' | 'affectionate'; // vocal style for this segment
-  voiceProvider?: 'gemini' | 'huggingface' | 'cloudtts_gemini';
+  voiceProvider?: 'gemini' | 'huggingface' | 'elevenlabs' | 'cloudtts_gemini';
   hfModel?: string;
   hfSpeaker?: string;
+  elevenLabsVoiceId?: string;
   syllableCount?: number; // Burmese syllable count
   maxAllowedSyllables?: number; // Strict 5-second syllable budget
   atempoRate?: number; // Pitch-preserving audio speed factor (e.g. 1.0 - 1.25)
@@ -80,6 +83,8 @@ export interface TranscriptSegment {
   pauseLead?: number; // Pre-speech breathing pause in seconds (default 0.1s)
   pauseTrail?: number; // Post-speech reaction pause in seconds
   sceneShotId?: string; // Visual shot / scene cut reference
+  minutePartIndex?: number; // 1-based 1-minute video time block index (e.g. Part 1 = 0:00-1:00)
+  narratorTimingWarning?: string; // Gentle timing warning if speech exceeds slot even at 1.15x
   visemeData?: { time: number; mouthOpening: number }[]; // Lip-sync viseme frames
 }
 
@@ -165,4 +170,8 @@ export interface ProjectState {
   blurBoxes: BlurBox[];
   logoConfig?: LogoConfig | null;
   globalColorFilter: 'none' | 'cinematic' | 'warm' | 'vintage' | 'cyber' | 'dhamma_gold';
+  extractedBgmUrl?: string | null; // Extracted background music & SFX track (original vocals removed)
+  useExtractedBgm?: boolean; // When true, reuse extracted BGM/SFX without original human dialogue
+  bgmVolume?: number; // Background music track volume (0.0 to 1.0, default 0.35)
+  bgmEngineUsed?: string | null; // Engine used for vocal removal (demucs / ffmpeg_stem_filter)
 }

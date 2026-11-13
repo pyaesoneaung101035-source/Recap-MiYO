@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { X, KeyRound, Check, RefreshCw, AlertCircle, ShieldCheck, Sparkles, Smartphone, Radio, Zap, Loader2, ExternalLink } from 'lucide-react';
 import { GeminiKeyInfo } from '../types';
 import { parseKeysFromInput, saveGeminiKeys, resetKeyStatuses, testGeminiKeyDirect } from '../utils/geminiPool';
-import { loadApiKeys, saveApiKeys, verifyAssemblyAiKey, verifyHuggingFaceKey, isAsciiOnly, sanitizeApiKey } from '../utils/apiKeys';
+import { loadApiKeys, saveApiKeys, verifyAssemblyAiKey, verifyHuggingFaceKey, verifyElevenLabsKey, isAsciiOnly, sanitizeApiKey } from '../utils/apiKeys';
+import { fetchTtsProvidersStatus } from '../utils/elevenLabsHumeClient';
 
 interface ApiKeyModalProps {
   isOpen: boolean;
@@ -27,6 +28,12 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
   const [huggingFaceStatus, setHuggingFaceStatus] = useState<'idle' | 'testing' | 'connected' | 'error'>('idle');
   const [huggingFaceMsg, setHuggingFaceMsg] = useState('');
 
+  const [elevenLabsKey, setElevenLabsKey] = useState('');
+  const [elevenLabsStatus, setElevenLabsStatus] = useState<'idle' | 'testing' | 'connected' | 'error'>('idle');
+  const [elevenLabsMsg, setElevenLabsMsg] = useState('');
+
+  const [serverSecrets, setServerSecrets] = useState({ elevenLabs: false });
+
   const [testResult, setTestResult] = useState<{ status: 'idle' | 'testing' | 'success' | 'error'; message: string }>({
     status: 'idle',
     message: '',
@@ -37,8 +44,13 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
       const keys = loadApiKeys();
       setAssemblyAiKey(keys.assemblyAiKey);
       setHuggingFaceKey(keys.huggingFaceKey || '');
+      setElevenLabsKey(keys.elevenLabsKey || '');
       setAssemblyAiStatus('idle');
       setHuggingFaceStatus('idle');
+      setElevenLabsStatus('idle');
+      fetchTtsProvidersStatus().then((st) => {
+        setServerSecrets({ elevenLabs: st.elevenLabsConfigured });
+      });
     }
   }, [isOpen]);
 
@@ -100,6 +112,32 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
     }
   };
 
+  const handleSaveElevenLabsKey = (key: string) => {
+    const current = loadApiKeys();
+    saveApiKeys({ ...current, assemblyAiKey: current.assemblyAiKey || assemblyAiKey, elevenLabsKey: key });
+  };
+
+  const handleConnectElevenLabs = async () => {
+    if (!elevenLabsKey.trim() && !serverSecrets.elevenLabs) {
+      setElevenLabsStatus('error');
+      setElevenLabsMsg('ကျေးဇူးပြု၍ ElevenLabs API Key ထည့်သွင်းပေးပါ။');
+      return;
+    }
+    setElevenLabsStatus('testing');
+    setElevenLabsMsg('ElevenLabs Voice Clone API သို့ စစ်ဆေးချိတ်ဆက်နေပါသည်...');
+    const res = await verifyElevenLabsKey(elevenLabsKey);
+    if (res.ok) {
+      setElevenLabsStatus('connected');
+      setElevenLabsMsg(res.message);
+      if (elevenLabsKey.trim()) handleSaveElevenLabsKey(elevenLabsKey);
+    } else {
+      setElevenLabsStatus('error');
+      setElevenLabsMsg(res.message);
+    }
+  };
+
+
+
   const handleAddKeys = () => {
     if (!keysInput.trim()) return;
     const combined = [...geminiKeys.map((k) => k.key), ...keysInput.split(/[\n,;]+/)].join('\n');
@@ -122,7 +160,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
   const handleTestKeyRotation = async () => {
     if (geminiKeys.length === 0) {
       setTestResult({ status: 'testing', message: 'Server Gemini API ချိတ်ဆက်မှုကို စစ်ဆေးနေပါသည်...' });
-      const testRes = await testGeminiKeyDirect(undefined, 'gemini-3.5-flash');
+      const testRes = await testGeminiKeyDirect(undefined, 'gemini-3.1-flash-lite');
       if (testRes.ok) {
         setTestResult({
           status: 'success',
@@ -141,7 +179,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
 
     try {
       const activeKey = geminiKeys.find((k) => k.status === 'active') || geminiKeys[0];
-      const result = await testGeminiKeyDirect(activeKey.key, 'gemini-3.5-flash');
+      const result = await testGeminiKeyDirect(activeKey.key, 'gemini-3.1-flash-lite');
 
       if (result.ok) {
         setTestResult({
@@ -527,6 +565,74 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
               )}
             </div>
           </div>
+
+          {/* ElevenLabs Voice Clone Card */}
+          <div className="p-3.5 rounded-xl bg-zinc-950/70 border border-violet-900/40 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-6 h-6 rounded-lg bg-violet-950/60 border border-violet-500/40 text-violet-300 flex items-center justify-center text-[11px] font-black">
+                  II
+                </div>
+                <div>
+                  <h4 className="text-xs font-bold text-zinc-200">ElevenLabs API Key (Voice Clone)</h4>
+                  <p className="text-[10px] text-zinc-400 font-myanmar">Instant Voice Clone & eleven_v3 TTS</p>
+                </div>
+              </div>
+
+              {(elevenLabsStatus === 'connected' || serverSecrets.elevenLabs) && (
+                <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-emerald-950/70 text-emerald-400 border border-emerald-800/60 flex items-center gap-1">
+                  <Check className="w-3 h-3" />
+                  <span>{elevenLabsStatus === 'connected' ? 'Connected' : 'Server Ready'}</span>
+                </span>
+              )}
+            </div>
+
+            <input
+              type="password"
+              value={elevenLabsKey}
+              onChange={(e) => {
+                const val = e.target.value;
+                setElevenLabsKey(val);
+                setElevenLabsStatus('idle');
+                handleSaveElevenLabsKey(val);
+              }}
+              placeholder="ElevenLabs API Key (sk_...)"
+              className={`w-full px-3 py-1.5 bg-zinc-900 border rounded-lg text-xs font-mono text-zinc-200 placeholder-zinc-600 focus:outline-none ${
+                elevenLabsKey && !isAsciiOnly(elevenLabsKey)
+                  ? 'border-rose-500/70 focus:border-rose-500'
+                  : 'border-zinc-800 focus:border-violet-500/60'
+              }`}
+            />
+
+            <div className="flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={handleConnectElevenLabs}
+                disabled={elevenLabsStatus === 'testing' || (!elevenLabsKey.trim() && !serverSecrets.elevenLabs) || (Boolean(elevenLabsKey) && !isAsciiOnly(elevenLabsKey))}
+                className="px-3 py-1.5 text-xs font-bold bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
+              >
+                {elevenLabsStatus === 'testing' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
+                <span>{elevenLabsStatus === 'testing' ? 'စစ်ဆေးနေပါသည်...' : 'Connect ElevenLabs'}</span>
+              </button>
+              <a
+                href="https://elevenlabs.io/app/settings/api-keys"
+                target="_blank"
+                rel="noreferrer"
+                className="text-violet-400 hover:text-violet-300 text-[10px] underline flex items-center gap-1"
+              >
+                <span>Key ရယူရန်</span>
+                <ExternalLink className="w-2.5 h-2.5" />
+              </a>
+            </div>
+
+            {elevenLabsMsg && (
+              <p className={`text-[11px] font-myanmar ${elevenLabsStatus === 'connected' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {elevenLabsMsg}
+              </p>
+            )}
+          </div>
+
+
         </div>
 
         {/* Footer */}

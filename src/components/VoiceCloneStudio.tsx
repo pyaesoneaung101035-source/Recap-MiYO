@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Volume2,
   Play,
@@ -28,9 +28,24 @@ import { ProjectState, TranscriptSegment, VoiceOption } from '../types';
 import { synthesizeMyanmarVoice, VOICE_PROFILES, VoiceStyle } from '../utils/edgeTtsClient';
 import { synthesizeHuggingFaceVoice, HF_VOICE_MODELS, HF_MULTI_SPEAKERS } from '../utils/huggingFaceClient';
 import { loadApiKeys } from '../utils/apiKeys';
+import {
+  fetchElevenLabsVoices,
+  cloneElevenLabsVoice,
+  cloneElevenLabsFromSampleVideo,
+  synthesizeElevenLabsVoice,
+  ElevenLabsVoiceItem,
+} from '../utils/elevenLabsHumeClient';
 import { shortenBurmeseTextForDuration } from '../utils/geminiPool';
 import { VideoPlayerView } from './VideoPlayerView';
 import { HumanReviewDubbingStudio } from './HumanReviewDubbingStudio';
+import {
+  getMinuteBlocks,
+  formatMinSec,
+  clampGentleNarratorRate,
+  realignSegmentsByMinuteBlocks,
+  findActiveSegmentForTime,
+  MINUTE_BLOCK_SECONDS,
+} from '../utils/timingSync';
 
 interface VoiceCloneStudioProps {
   project: ProjectState;
@@ -60,7 +75,54 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
   onNextStep,
 }) => {
   const [studioTab, setStudioTab] = useState<'generation' | 'review'>('generation');
-  const [voiceEngine, setVoiceEngine] = useState<'gemini' | 'huggingface'>('gemini');
+  const [voiceEngine, setVoiceEngine] = useState<'gemini' | 'huggingface' | 'elevenlabs'>('gemini');
+  
+  const [elevenLabsVoices, setElevenLabsVoices] = useState<ElevenLabsVoiceItem[]>([]);
+  const [selectedElevenLabsVoiceId, setSelectedElevenLabsVoiceId] = useState<string>('');
+  const [isElevenLabsFlowOpen, setIsElevenLabsFlowOpen] = useState(false);
+  const [isCloningVoice, setIsCloningVoice] = useState(false);
+  const [isCloningSampleVideo, setIsCloningSampleVideo] = useState(false);
+  const [cloneAudioFile, setCloneAudioFile] = useState<File | null>(null);
+  const [cloneVoiceName, setCloneVoiceName] = useState('My Burmese Clone');
+
+  const handleApplyElevenLabsAllocation = (voiceId: string, voiceName?: string) => {
+    setSelectedElevenLabsVoiceId(voiceId);
+    const targetName = voiceName || elevenLabsVoices.find((v) => v.voice_id === voiceId)?.name || 'Cloned Voice';
+    setProject((prev) => ({
+      ...prev,
+      segments: prev.segments.map((s) => ({
+        ...s,
+        voiceProvider: 'elevenlabs',
+        elevenLabsVoiceId: voiceId,
+        speaker: `ElevenLabs (${targetName})`,
+      })),
+    }));
+    setStatusText(`✓ ElevenLabs Voice Clone (${targetName}) ကို TTX Segments အားလုံးသို့ သတ်မှတ်ပြီးပါပြီ!`);
+  };
+
+  useEffect(() => {
+    if (voiceEngine === 'elevenlabs') {
+      fetchElevenLabsVoices().then((v) => {
+        setElevenLabsVoices(v);
+        if (v.length > 0) {
+          const vId = selectedElevenLabsVoiceId || v[0].voice_id;
+          if (!selectedElevenLabsVoiceId) {
+            setSelectedElevenLabsVoiceId(vId);
+          }
+          const chosenName = v.find((x) => x.voice_id === vId)?.name;
+          setProject((prev) => ({
+            ...prev,
+            segments: prev.segments.map((s) => ({
+              ...s,
+              voiceProvider: 'elevenlabs',
+              elevenLabsVoiceId: s.elevenLabsVoiceId || vId,
+              speaker: s.speaker?.includes('ElevenLabs') ? s.speaker : `ElevenLabs (${chosenName || 'Cloned Voice'})`,
+            })),
+          }));
+        }
+      }).catch(() => {});
+    }
+  }, [voiceEngine]);
   
   // Single vs Double Voice Mode State
   const [voiceMode, setVoiceMode] = useState<'single' | 'double'>('single');
@@ -74,7 +136,7 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
 
   const [targetSlot, setTargetSlot] = useState<'single' | 'speakerA' | 'speakerB'>('single');
 
-  const [voiceStyle, setVoiceStyle] = useState<VoiceStyle>('conversational');
+  const [voiceStyle, setVoiceStyle] = useState<VoiceStyle>(project.voiceStyle || 'recap');
 
   // Flow Panels State
   const [isGeminiFlowOpen, setIsGeminiFlowOpen] = useState(false);
@@ -91,6 +153,7 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
   // Generation & Audio state
   const [trimSilence, setTrimSilence] = useState<boolean>(false);
   const [isBatchGenerating, setIsBatchGenerating] = useState(false);
+  const [isSyncFitting, setIsSyncFitting] = useState(false);
   const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(null);
 
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
@@ -100,13 +163,29 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
 
   const [testingVoice, setTestingVoice] = useState<string | null>(null);
   const [testAudioUrls, setTestAudioUrls] = useState<Record<string, string>>({});
+  const [selectedMinutePart, setSelectedMinutePart] = useState<number | 'all'>('all');
 
-  // Active Subtitle for Video Player
+  const minuteBlocks = getMinuteBlocks(project.videoDuration || MINUTE_BLOCK_SECONDS);
+  const totalMinuteBlocks = minuteBlocks.length;
+
+  const displayedSegments = project.segments.filter((s) => {
+    if (selectedMinutePart === 'all') return true;
+    const part = minuteBlocks[selectedMinutePart - 1];
+    if (!part) return true;
+    const isLast = part.partNumber === totalMinuteBlocks;
+    return isLast
+      ? s.startTime >= part.startSec && s.startTime <= part.endSec + 0.5
+      : s.startTime >= part.startSec && s.startTime < part.endSec;
+  });
+
+  // Active Subtitle for Video Player (strictly clamped inside segment & minute boundary)
   const activeSegment: TranscriptSegment | null =
-    project.segments.find((s) => {
-      const effectiveEnd = Math.max(s.endTime, s.startTime + (s.audioDuration || 0));
-      return project.currentTime >= s.startTime && project.currentTime <= effectiveEnd;
-    }) || null;
+    findActiveSegmentForTime(
+      project.segments,
+      project.currentTime,
+      project.voicePlaybackRate || 1.0,
+      false
+    )?.segment || null;
 
   const stopAudio = () => {
     if (audioElement) {
@@ -232,9 +311,10 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
       segments: prev.segments.map((s) => ({
         ...s,
         voice: selected,
+        speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
       })),
     }));
-    setStatusText(`✓ All segments allocated to single voice (${VOICE_PROFILES[selected].name}).`);
+    setStatusText(`✓ Single Burmese Narrator (${VOICE_PROFILES[selected].name}) ကို Segments အားလုံးသို့ သတ်မှတ်ပြီးပါပြီ။`);
   };
 
   const handleApplyHfSpeakerAllocation = (overrideSpeaker?: string) => {
@@ -292,6 +372,18 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
     setStatusText(`✓ Voice style updated to "${newStyle}".`);
   };
 
+  const handleSegmentEmotionChange = (segId: string, newEmotion: string) => {
+    setProject((prev) => ({
+      ...prev,
+      segments: prev.segments.map((s) =>
+        s.id === segId
+          ? { ...s, emotion: newEmotion || undefined, audioUrl: undefined, audioDuration: undefined }
+          : s
+      ),
+    }));
+    setStatusText('✓ အသံလေယူလေသိမ်း (Emotion) ပြောင်းပြီးပါပြီ — Gen နှိပ်၍ အသံအသစ် ထုတ်နိုင်ပါသည်။');
+  };
+
   const handleUpdateSegmentRate = (segId: string, newRate: number) => {
     setProject((prev) => ({
       ...prev,
@@ -330,26 +422,23 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
   };
 
   const handleAutoRetimeAll = () => {
-    setProject((prev) => ({
-      ...prev,
-      segments: prev.segments.map((s) => {
-        const slotDuration = Math.max(0.5, s.endTime - s.startTime);
-        if (s.audioDuration && s.audioDuration > 0) {
-          // Rule 8: If narration audio duration > video segment duration:
-          // Slightly boost tempo up to 1.35x max with atempo pitch preservation
-          // Rule 9: If narration audio duration < video segment duration:
-          // Do not speed up; keep natural tempo (1.0x) with natural pause/silence padding
-          if (s.audioDuration > slotDuration) {
-            const autoRate = Math.min(1.35, Math.max(1.0, parseFloat((s.audioDuration / slotDuration).toFixed(2))));
-            return { ...s, playbackRate: autoRate };
-          } else {
-            return { ...s, playbackRate: 1.0 };
-          }
+    setProject((prev) => {
+      const realigned = realignSegmentsByMinuteBlocks(
+        prev.segments,
+        prev.videoDuration || MINUTE_BLOCK_SECONDS,
+        {
+          enforceSingleVoice: voiceMode === 'single' ? singleVoice : undefined,
+          enforceSingleSpeakerLabel: voiceMode === 'single',
         }
-        return s;
-      }),
-    }));
-    setStatusText('✓ Auto-Fit Retime: Segment playback rates adjusted to match video timing (Audio > Slot re-timed up to 1.35x max; Audio <= Slot kept at 1.0x with silence padding).');
+      );
+      return {
+        ...prev,
+        segments: realigned,
+      };
+    });
+    setStatusText(
+      `✓ 1-Minute Block Auto-Align ပြီးစီးပါပြီ: ၁ မိနစ်စာ အပိုင်း (${totalMinuteBlocks} Parts) တစ်ခုချင်းစီအတွင်း နောက်ပိုင်းအသံများ အချိန်မရွေ့စေရန် Gentle Speed (0.90x - 1.15x) ဖြင့် ပြန်ညှိပြီးပါပြီ။`
+    );
   };
 
   const handleGenerateSingle = async (seg: TranscriptSegment) => {
@@ -361,30 +450,45 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
       segments: prev.segments.map((s) => (s.id === seg.id ? { ...s, isGeneratingAudio: true } : s)),
     }));
 
-    const activeSpeed = seg.playbackRate || project.voicePlaybackRate || 1.0;
-    const activeStyle = seg.style || voiceStyle || project.voiceStyle || 'conversational';
+    const activeSpeed = clampGentleNarratorRate(seg.playbackRate || project.voicePlaybackRate || 1.0);
+    const activeStyle = voiceStyle || seg.style || project.voiceStyle || 'recap';
 
     try {
       let resultUrl = '';
       let resultDuration = 0;
 
-      if (voiceEngine === 'huggingface') {
+      if (voiceEngine === 'elevenlabs') {
+        const vId = seg.elevenLabsVoiceId || selectedElevenLabsVoiceId || elevenLabsVoices[0]?.voice_id;
+        if (!vId) {
+          throw new Error('ElevenLabs Voice ID မရှိသေးပါ။ ကျေးဇူးပြု၍ Voice တစ်ခု ရွေးချယ်ပါ သို့မဟုတ် Voice Clone ဖန်တီးပါ။');
+        }
+        const elResult = await synthesizeElevenLabsVoice(text, {
+          voiceId: vId,
+          emotion: seg.emotion,
+          onStatusUpdate: (msg) => setStatusText(msg),
+        });
+        resultUrl = elResult.audioUrl;
+        resultDuration = elResult.duration;
+      } else if (voiceEngine === 'huggingface') {
         const activeModel = hfModel === 'custom' ? (customHfModel.trim() || 'facebook/mms-tts-mya') : hfModel;
         const activeSpeaker = seg.hfSpeaker || (voiceMode === 'double' ? (project.segments.findIndex(s => s.id === seg.id) % 2 === 0 ? hfSpeakerA : hfSpeakerB) : selectedHfSpeaker);
         const hfResult = await synthesizeHuggingFaceVoice(text, {
           model: activeModel,
           speakerId: activeSpeaker,
-          speed: activeSpeed,
+          speed: 1.0,
           onStatusUpdate: (msg) => setStatusText(msg),
         });
         resultUrl = hfResult.audioUrl;
         resultDuration = hfResult.duration;
       } else {
-        const activeVoice = seg.voice || (voiceMode === 'double' ? (project.segments.findIndex(s => s.id === seg.id) % 2 === 0 ? speakerA : speakerB) : singleVoice);
+        const activeVoice = voiceMode === 'single'
+          ? singleVoice
+          : (seg.voice || (project.segments.findIndex(s => s.id === seg.id) % 2 === 0 ? speakerA : speakerB));
         const result = await synthesizeMyanmarVoice(text, {
           voice: activeVoice,
           style: activeStyle,
-          speed: activeSpeed,
+          emotion: seg.emotion,
+          speed: 1.0,
           trimSilence,
           onStatusUpdate: (msg) => setStatusText(msg),
         });
@@ -392,21 +496,46 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
         resultDuration = result.duration;
       }
 
-      setProject((prev) => ({
-        ...prev,
-        segments: prev.segments.map((s) =>
+      let resolvedRate = activeSpeed;
+      setProject((prev) => {
+        const vId = seg.elevenLabsVoiceId || selectedElevenLabsVoiceId || elevenLabsVoices[0]?.voice_id;
+        const elevenLabsName = elevenLabsVoices.find((v) => v.voice_id === vId)?.name || 'Cloned Voice';
+        const updatedSegs = prev.segments.map((s) =>
           s.id === seg.id
             ? {
                 ...s,
                 audioUrl: resultUrl,
                 audioDuration: resultDuration,
                 isGeneratingAudio: false,
+                voiceProvider: voiceEngine,
+                elevenLabsVoiceId: voiceEngine === 'elevenlabs' ? vId : s.elevenLabsVoiceId,
+                voice: voiceMode === 'single' ? singleVoice : s.voice,
+                speaker:
+                  voiceEngine === 'elevenlabs'
+                    ? `ElevenLabs (${elevenLabsName})`
+                    : voiceMode === 'single'
+                    ? 'Narrator (ဇာတ်ကြောင်းပြောသူ)'
+                    : s.speaker,
               }
             : s
-        ),
-      }));
+        );
+        const aligned = realignSegmentsByMinuteBlocks(
+          updatedSegs,
+          prev.videoDuration || MINUTE_BLOCK_SECONDS,
+          {
+            enforceSingleVoice: voiceEngine === 'gemini' && voiceMode === 'single' ? singleVoice : undefined,
+            enforceSingleSpeakerLabel: voiceEngine === 'gemini' && voiceMode === 'single',
+          }
+        );
+        const found = aligned.find((a) => a.id === seg.id);
+        if (found?.playbackRate) resolvedRate = found.playbackRate;
+        return {
+          ...prev,
+          segments: aligned,
+        };
+      });
 
-      playVoiceClip(seg.id, resultUrl, activeSpeed);
+      playVoiceClip(seg.id, resultUrl, resolvedRate);
       setStatusText(null);
     } catch (err: any) {
       console.error('TTS error:', err);
@@ -419,79 +548,277 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
     }
   };
 
-  const handleGenerateAll = async () => {
-    if (project.segments.length === 0) {
-      setErrorMessage('စာတန်းထိုး Segment များ မရှိသေးပါ။ အဆင့် 4 တွင် အရင် Generate လုပ်ပေးပါ။');
+  const handleGenerateAll = async (onlyPartNumber?: number, onlyMissing: boolean = false) => {
+    let targetSegs = onlyPartNumber
+      ? project.segments.filter((s) => {
+          const part = minuteBlocks[onlyPartNumber - 1];
+          if (!part) return false;
+          const isLast = part.partNumber === totalMinuteBlocks;
+          return isLast
+            ? s.startTime >= part.startSec && s.startTime <= part.endSec + 0.5
+            : s.startTime >= part.startSec && s.startTime < part.endSec;
+        })
+      : project.segments;
+
+    if (onlyMissing) {
+      targetSegs = targetSegs.filter((s) => !s.audioUrl);
+    }
+
+    if (targetSegs.length === 0) {
+      if (onlyMissing) {
+        setStatusText('✓ Segments အားလုံး Voice Clone အသံ ထုတ်ပြီးသား ဖြစ်ပါသည်။');
+      } else {
+        setErrorMessage('အသံသွင်းရန် Segment များ မရှိသေးပါ။ အဆင့် ၃ တွင် အရင် Generate လုပ်ပေးပါ။');
+      }
       return;
     }
 
     setIsBatchGenerating(true);
     setErrorMessage(null);
-    setBatchProgress({ current: 0, total: project.segments.length });
+    setBatchProgress({ current: 0, total: targetSegs.length });
 
-    const total = project.segments.length;
+    const total = targetSegs.length;
+    const generatedMap = new Map<string, { audioUrl: string; audioDuration: number; voice?: VoiceOption }>();
+    const failedSegs: Array<{ idx: number; id: string; text: string; reason: string }> = [];
 
     for (let i = 0; i < total; i++) {
-      const seg = project.segments[i];
-      const text = seg.myanmarTranslation || seg.originalText;
+      const seg = targetSegs[i];
+      const text = (seg.myanmarTranslation || seg.originalText || '').trim();
       if (!text) continue;
 
+      const partNum = Math.floor(Math.max(0, seg.startTime) / MINUTE_BLOCK_SECONDS) + 1;
       setBatchProgress({ current: i + 1, total });
-      setStatusText(`Synthesizing (${i + 1}/${total}): "${text.substring(0, 20)}..."`);
+      setStatusText(`🔊 [Part ${partNum}] Narrator အသံသွင်းနေသည် (${i + 1}/${total}): "${text.substring(0, 22)}..."`);
 
-      const activeSpeed = seg.playbackRate || project.voicePlaybackRate || 1.0;
-      const activeStyle = seg.style || voiceStyle || project.voiceStyle || 'conversational';
+      const activeStyle = voiceStyle || seg.style || project.voiceStyle || 'recap';
+      let succeeded = false;
+      let lastErrMsg = 'Synthesis failed';
 
-      try {
-        let resultUrl = '';
-        let resultDuration = 0;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          let resultUrl = '';
+          let resultDuration = 0;
+          let usedVoice: VoiceOption | undefined = undefined;
 
-        if (voiceEngine === 'huggingface') {
-          const activeModel = hfModel === 'custom' ? (customHfModel.trim() || 'facebook/mms-tts-mya') : hfModel;
-          const activeSpeaker = seg.hfSpeaker || (voiceMode === 'double' ? (i % 2 === 0 ? hfSpeakerA : hfSpeakerB) : selectedHfSpeaker);
-          const hfResult = await synthesizeHuggingFaceVoice(text, {
-            model: activeModel,
-            speakerId: activeSpeaker,
-            speed: activeSpeed,
+          if (voiceEngine === 'elevenlabs') {
+            const vId = seg.elevenLabsVoiceId || selectedElevenLabsVoiceId || elevenLabsVoices[0]?.voice_id;
+            if (!vId) throw new Error('ElevenLabs Voice ID missing');
+            const elResult = await synthesizeElevenLabsVoice(text, {
+              voiceId: vId,
+              emotion: seg.emotion,
+            });
+            resultUrl = elResult.audioUrl;
+            resultDuration = elResult.duration;
+          } else if (voiceEngine === 'huggingface') {
+            const activeModel = hfModel === 'custom' ? (customHfModel.trim() || 'facebook/mms-tts-mya') : hfModel;
+            const activeSpeaker = seg.hfSpeaker || (voiceMode === 'double' ? (i % 2 === 0 ? hfSpeakerA : hfSpeakerB) : selectedHfSpeaker);
+            const hfResult = await synthesizeHuggingFaceVoice(text, {
+              model: activeModel,
+              speakerId: activeSpeaker,
+              speed: 1.0,
+            });
+            resultUrl = hfResult.audioUrl;
+            resultDuration = hfResult.duration;
+          } else {
+            const activeVoice = voiceMode === 'single'
+              ? singleVoice
+              : (seg.voice || (i % 2 === 0 ? speakerA : speakerB));
+            usedVoice = activeVoice;
+            const result = await synthesizeMyanmarVoice(text, {
+              voice: activeVoice,
+              style: activeStyle,
+              emotion: seg.emotion,
+              speed: 1.0,
+              trimSilence,
+            });
+            resultUrl = result.audioUrl;
+            resultDuration = result.duration;
+          }
+
+          if (!resultUrl) {
+            throw new Error('Empty audio URL returned');
+          }
+
+          generatedMap.set(seg.id, {
+            audioUrl: resultUrl,
+            audioDuration: resultDuration,
+            voice: usedVoice,
           });
-          resultUrl = hfResult.audioUrl;
-          resultDuration = hfResult.duration;
-        } else {
-          const activeVoice = seg.voice || (voiceMode === 'double' ? (i % 2 === 0 ? speakerA : speakerB) : singleVoice);
-          const result = await synthesizeMyanmarVoice(text, {
-            voice: activeVoice,
-            style: activeStyle,
-            speed: activeSpeed,
-            trimSilence,
-          });
-          resultUrl = result.audioUrl;
-          resultDuration = result.duration;
+
+          const targetVId = voiceEngine === 'elevenlabs' ? (seg.elevenLabsVoiceId || selectedElevenLabsVoiceId || elevenLabsVoices[0]?.voice_id) : undefined;
+          setProject((prev) => ({
+            ...prev,
+            segments: prev.segments.map((s) =>
+              s.id === seg.id
+                ? {
+                    ...s,
+                    audioUrl: resultUrl,
+                    audioDuration: resultDuration,
+                    voiceProvider: voiceEngine,
+                    elevenLabsVoiceId: targetVId || s.elevenLabsVoiceId,
+                    voice: usedVoice || s.voice,
+                    speaker: voiceEngine === 'elevenlabs' ? 'ElevenLabs Cloned Narrator' : s.speaker,
+                    isGeneratingAudio: false,
+                  }
+                : s
+            ),
+          }));
+          succeeded = true;
+          break;
+        } catch (err: any) {
+          lastErrMsg = err?.message || 'TTS error';
+          console.warn(`Batch item ${i + 1} (attempt ${attempt}/2) warning:`, lastErrMsg);
+          if (attempt < 2) {
+            await new Promise((r) => setTimeout(r, 250));
+          }
         }
+      }
 
-        setProject((prev) => ({
-          ...prev,
-          segments: prev.segments.map((s) =>
-            s.id === seg.id
-              ? {
-                  ...s,
-                  audioUrl: resultUrl,
-                  audioDuration: resultDuration,
-                }
-              : s
-          ),
-        }));
-      } catch (err: any) {
-        console.warn(`Batch item ${i + 1} warning:`, err.message);
+      if (!succeeded) {
+        failedSegs.push({
+          idx: i + 1,
+          id: seg.id,
+          text: text.substring(0, 28),
+          reason: lastErrMsg,
+        });
+      }
+
+      if (i < total - 1) {
+        await new Promise((r) => setTimeout(r, 120));
       }
     }
 
+    // Re-align all segments cleanly inside each 1-minute video block with gentle speed (0.90x-1.18x) so later parts never drift
+    setProject((prev) => {
+      const merged = prev.segments.map((s) => {
+        const gen = generatedMap.get(s.id);
+        return gen
+          ? {
+              ...s,
+              audioUrl: gen.audioUrl,
+              audioDuration: gen.audioDuration,
+              voiceProvider: voiceEngine,
+              voice: gen.voice || s.voice,
+            }
+          : s;
+      });
+      const aligned = realignSegmentsByMinuteBlocks(
+        merged,
+        prev.videoDuration || MINUTE_BLOCK_SECONDS,
+        {
+          enforceSingleVoice: voiceEngine === 'gemini' && voiceMode === 'single' ? singleVoice : undefined,
+          enforceSingleSpeakerLabel: voiceEngine === 'gemini' && voiceMode === 'single',
+        }
+      );
+      return {
+        ...prev,
+        segments: aligned,
+      };
+    });
+
     setIsBatchGenerating(false);
     setBatchProgress(null);
-    setStatusText(`✓ All ${total} segment audios synthesized successfully!`);
-    setTimeout(() => setStatusText(null), 5000);
+
+    if (failedSegs.length > 0) {
+      setErrorMessage(
+        `⚠️ စာကြောင်း ${failedSegs.length} ခု Voice Clone ထုတ်မရသေးပါ (ဥပမာ "${failedSegs[0].text}...": ${failedSegs[0].reason})။ "Retry Missing Voices" ခလုတ်ကို နှိပ်၍ ပြန်ထုတ်နိုင်ပါသည်။`
+      );
+      setStatusText(
+        `✓ ${generatedMap.size}/${total} Segments အသံသွင်းပြီးပါပြီ (${failedSegs.length} ခု မအောင်မြင်ပါ)`
+      );
+    } else {
+      setStatusText(
+        onlyMissing
+          ? `✓ ကျန်ရှိနေသော Voice Clone ${generatedMap.size} ခုလုံးကို အောင်မြင်စွာ ပြန်လည်ထုတ်ယူပြီးပါပြီ!`
+          : onlyPartNumber
+            ? `✓ Part ${onlyPartNumber} (${generatedMap.size} Segments) အသံသွင်းပြီး ၁ မိနစ်အချိန်ကွက်အတွင်း ပြန်ညှိပြီးပါပြီ!`
+            : `✓ Single Narrator အသံ ${generatedMap.size} ခုလုံး ထုတ်ယူပြီး ၁ မိနစ်အပိုင်း (${totalMinuteBlocks} Blocks) အလိုက် အချိန်ကွက် ပြန်ညှိပြီးပါပြီ!`
+      );
+      setTimeout(() => setStatusText(null), 6000);
+    }
+  };
+
+  const handleAutoSyncFitAll = async () => {
+    const overflowingSegs = project.segments.filter((s) => {
+      const slot = Math.max(0.5, (s.originalEndTime ?? s.endTime) - (s.originalStartTime ?? s.startTime));
+      return Boolean(s.narratorTimingWarning) || Boolean(s.audioDuration && s.audioDuration / 1.18 > slot + 0.35);
+    });
+
+    if (overflowingSegs.length === 0) {
+      handleAutoRetimeAll();
+      return;
+    }
+
+    setIsSyncFitting(true);
+    setErrorMessage(null);
+    const updatedMap = new Map<string, { text: string; audioUrl: string; audioDuration: number }>();
+
+    try {
+      for (let i = 0; i < overflowingSegs.length; i++) {
+        const seg = overflowingSegs[i];
+        const slotDur = Math.max(1.0, (seg.originalEndTime ?? seg.endTime) - (seg.originalStartTime ?? seg.startTime));
+        setStatusText(`⚡ Sync-Fit (${i + 1}/${overflowingSegs.length}): ဗီဒီယိုအချိန် (${slotDur.toFixed(1)}s) နှင့် ကွက်တိဝင်ရန် စာတိုချုံ့ + အသံပြန်သွင်းနေသည်...`);
+
+        const condensed = await shortenBurmeseTextForDuration(
+          seg.myanmarTranslation || seg.originalText,
+          slotDur,
+          seg.originalText
+        );
+        const textToSpeak = condensed || seg.myanmarTranslation || seg.originalText;
+        const activeVoice = voiceMode === 'single' ? singleVoice : (seg.voice || speakerA);
+        const activeStyle = voiceStyle || seg.style || project.voiceStyle || 'recap';
+
+        const result = await synthesizeMyanmarVoice(textToSpeak, {
+          voice: activeVoice,
+          style: activeStyle,
+          emotion: seg.emotion,
+          speed: 1.0,
+          trimSilence,
+        });
+
+        updatedMap.set(seg.id, {
+          text: textToSpeak,
+          audioUrl: result.audioUrl,
+          audioDuration: result.duration,
+        });
+      }
+
+      setProject((prev) => {
+        const merged = prev.segments.map((s) => {
+          const hit = updatedMap.get(s.id);
+          return hit
+            ? {
+                ...s,
+                myanmarTranslation: hit.text,
+                subtitleText: hit.text,
+                audioUrl: hit.audioUrl,
+                audioDuration: hit.audioDuration,
+              }
+            : s;
+        });
+        const aligned = realignSegmentsByMinuteBlocks(
+          merged,
+          prev.videoDuration || MINUTE_BLOCK_SECONDS,
+          {
+            enforceSingleVoice: voiceMode === 'single' ? singleVoice : undefined,
+            enforceSingleSpeakerLabel: voiceMode === 'single',
+          }
+        );
+        return { ...prev, segments: aligned };
+      });
+
+      setStatusText(`✓ Sync-Fit ပြီးစီးပါပြီ: အချိန်ကျော်နေသော စာကြောင်း ${updatedMap.size} ခုကို Video Scene နှင့် ကွက်တိကိုက်အောင် ပြန်ညှိပြီးပါပြီ!`);
+      setTimeout(() => setStatusText(null), 6000);
+    } catch (err: any) {
+      setErrorMessage(`Auto Sync-Fit error: ${err?.message || 'Failed to sync-fit lines'}`);
+    } finally {
+      setIsSyncFitting(false);
+    }
   };
 
   const generatedCount = project.segments.filter((s) => !!s.audioUrl).length;
+  const missingCount = project.segments.filter((s) => !s.audioUrl && !!(s.myanmarTranslation || s.originalText)).length;
+  const overflowCount = project.segments.filter((s) => !!s.narratorTimingWarning).length;
   const currentHfKey = loadApiKeys().huggingFaceKey;
 
   const currentVoiceProfile = VOICE_PROFILES[singleVoice];
@@ -516,6 +843,45 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
 
   return (
     <div className="space-y-6">
+      {/* Step Header */}
+      <div className="ios-card p-5 sm:p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-2.5">
+            <span className="w-8 h-8 rounded-full bg-gradient-to-tr from-emerald-400 to-teal-400 text-zinc-950 font-black flex items-center justify-center text-xs shadow-lg">
+              4
+            </span>
+            <h2 className="text-base font-bold text-white font-display tracking-tight flex items-center gap-2">
+              <Mic className="w-4 h-4 text-emerald-400" />
+              <span>အဆင့် ၄ — Voice Clone Studio (Step 3 TTX စာသားများအား အသံသွင်းခြင်း)</span>
+            </h2>
+          </div>
+          <p className="text-xs text-zinc-400 font-myanmar mt-1">
+            အဆင့် ၃ မှ Video Analyzing ဖြင့် ထွက်ရှိလာသော Narrator TTX စာသား ({project.segments.length} Segments) များအား သဘာဝကျသော မြန်မာ Narrator အသံဖြင့် Voice Clone ပြုလုပ်ပါမည်။
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2.5 shrink-0">
+          {onPrevStep && (
+            <button
+              onClick={onPrevStep}
+              className="px-3.5 py-2 bg-white/5 hover:bg-white/10 text-zinc-300 text-xs font-semibold rounded-xl transition-all border border-white/10 flex items-center gap-1.5 cursor-pointer"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>အဆင့် ၃ (TTX စာသား) သို့</span>
+            </button>
+          )}
+          {onNextStep && (
+            <button
+              onClick={onNextStep}
+              className="px-5 py-2.5 bg-gradient-to-r from-emerald-400 to-teal-400 hover:opacity-90 text-zinc-950 font-black text-xs rounded-xl transition-all flex items-center gap-2 shadow-lg shadow-emerald-500/20 cursor-pointer active:scale-95"
+            >
+              <span>အဆင့် ၅ (Human Review) သို့</span>
+              <ArrowRight className="w-4 h-4 stroke-[2.5]" />
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* 7-STAGE DUBBING WORKFLOW TOP TAB SELECTOR */}
       <div className="flex flex-wrap items-center justify-between gap-3 p-2.5 rounded-2xl bg-black/60 border border-white/10 backdrop-blur-xl shadow-xl">
         <div className="flex items-center gap-2">
@@ -683,6 +1049,18 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
             >
               <span>🤗 Hugging Face AI Clone</span>
             </button>
+
+            <button
+              type="button"
+              onClick={() => setVoiceEngine('elevenlabs')}
+              className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                voiceEngine === 'elevenlabs'
+                  ? 'bg-violet-500/20 text-violet-300 border border-violet-500/40 font-black shadow'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              <span>🎙️ ElevenLabs Clone</span>
+            </button>
           </div>
 
           {/* VOICE CONFIGURATION CARDS BASED ON MODE */}
@@ -720,7 +1098,7 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                     <ChevronRight className="w-4 h-4" />
                   </span>
                 </div>
-              ) : (
+              ) : voiceEngine === 'huggingface' ? (
                 <div
                   onClick={() => {
                     setTargetSlot('single');
@@ -744,6 +1122,36 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
 
                   <span className="text-xs font-bold text-amber-400 group-hover:translate-x-1 transition-transform flex items-center gap-1 shrink-0">
                     <span>Flow Panel</span>
+                    <ChevronRight className="w-4 h-4" />
+                  </span>
+                </div>
+              ) : (
+                <div
+                  onClick={() => {
+                    setTargetSlot('single');
+                    setIsElevenLabsFlowOpen(true);
+                  }}
+                  className="p-4 rounded-2xl border border-violet-400/80 bg-gradient-to-r from-violet-500/20 via-purple-500/10 to-transparent hover:border-violet-300 transition-all cursor-pointer group shadow-xl flex items-center justify-between"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-violet-500 to-purple-500 text-white font-black flex items-center justify-center text-sm shadow-md">
+                      🎙️
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-black text-white font-display flex items-center gap-2">
+                        <span>{elevenLabsVoices.find((v) => v.voice_id === selectedElevenLabsVoiceId)?.name || 'ElevenLabs Burmese Clone'}</span>
+                        <span className="px-2 py-0.5 rounded-full bg-violet-500/30 text-violet-300 text-[10px] font-mono">
+                          {selectedElevenLabsVoiceId ? 'Active' : 'Select Voice'}
+                        </span>
+                      </h3>
+                      <p className="text-xs text-violet-300/90 font-medium mt-0.5 font-myanmar">
+                        ID: <span className="font-mono text-[11px] text-zinc-300">{selectedElevenLabsVoiceId || 'None'}</span> — အသံပြောင်းရန် / အသံနမူနာသွင်းရန် နှိပ်ပါ
+                      </p>
+                    </div>
+                  </div>
+
+                  <span className="text-xs font-bold text-violet-400 group-hover:translate-x-1 transition-transform flex items-center gap-1 shrink-0">
+                    <span>Voice Studio</span>
                     <ChevronRight className="w-4 h-4" />
                   </span>
                 </div>
@@ -816,12 +1224,12 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
             </div>
           )}
 
-          {/* Speed & Silence Controls */}
+          {/* Speed & Gentle 1-Minute Block Alignment Controls */}
           <div className="p-4 rounded-2xl bg-black/40 border border-white/10 space-y-3 backdrop-blur-xl">
             <div className="flex items-center justify-between text-xs">
               <span className="font-bold text-white flex items-center gap-2 font-display">
                 <Zap className="w-4 h-4 text-emerald-400" />
-                <span>Voice Clone Speed</span>
+                <span>Gentle Narrator Speed (0.90x – 1.15x)</span>
               </span>
               <span className="text-xs font-mono font-bold text-emerald-300 px-2.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20">
                 {(project.voicePlaybackRate || 1.0).toFixed(2)}x
@@ -829,13 +1237,13 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
             </div>
 
             <div className="flex items-center gap-3">
-              <span className="text-[10px] font-mono text-zinc-400 font-bold">0.5x</span>
+              <span className="text-[10px] font-mono text-zinc-400 font-bold">0.90x</span>
               <input
                 type="range"
-                min="0.5"
-                max="2.0"
-                step="0.05"
-                value={project.voicePlaybackRate || 1.0}
+                min="0.90"
+                max="1.15"
+                step="0.01"
+                value={clampGentleNarratorRate(project.voicePlaybackRate || 1.0)}
                 onChange={(e) => {
                   const val = parseFloat(e.target.value);
                   setProject((prev) => ({
@@ -845,7 +1253,7 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                 }}
                 className="flex-1 accent-emerald-400 h-2 bg-white/10 rounded-lg cursor-pointer"
               />
-              <span className="text-[10px] font-mono text-zinc-400 font-bold">2.0x</span>
+              <span className="text-[10px] font-mono text-zinc-400 font-bold">1.15x</span>
             </div>
 
             <div className="pt-2 border-t border-white/10 flex items-center justify-between gap-2 flex-wrap">
@@ -864,10 +1272,10 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                 type="button"
                 onClick={handleAutoRetimeAll}
                 className="px-2.5 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 rounded-xl text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 shadow"
-                title="Auto-adjust all generated segment audio speeds (atempo) to fit exact clip durations"
+                title="၁ မိနစ်စာ အပိုင်းတစ်ခုချင်းစီအတွင်း နောက်ပိုင်းအသံများ မရွေ့စေရန် အသာအယာ (0.90x-1.15x) ပြန်ညှိမည်"
               >
                 <Zap className="w-3 h-3 text-emerald-400" />
-                <span>⚡ Auto-Fit All Retime Speeds</span>
+                <span>⏱️ 1-Min Block Align (အချိန်ကွက် ညှိမည်)</span>
               </button>
 
               <span className="text-[10px] text-zinc-400 font-mono">
@@ -876,28 +1284,136 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
             </div>
           </div>
 
-          {/* Action Button: Batch Generate All Voices */}
-          <button
-            onClick={handleGenerateAll}
-            disabled={isBatchGenerating || project.segments.length === 0}
-            className={`w-full py-3.5 px-6 disabled:opacity-50 text-zinc-950 text-xs sm:text-sm font-black rounded-2xl transition-all flex items-center justify-center gap-2.5 shadow-2xl cursor-pointer ${
-              voiceEngine === 'huggingface'
-                ? 'bg-gradient-to-r from-amber-400 via-orange-400 to-rose-400 shadow-amber-500/25 hover:scale-[1.01]'
-                : 'bg-gradient-to-r from-emerald-400 via-teal-400 to-cyan-400 shadow-emerald-500/25 hover:scale-[1.01]'
-            }`}
-          >
-            {isBatchGenerating ? (
-              <>
-                <RotateCw className="w-4 h-4 animate-spin" />
-                <span>Generating ({batchProgress?.current}/{batchProgress?.total})...</span>
-              </>
-            ) : (
-              <>
-                <Volume2 className="w-4 h-4 stroke-[2.5]" />
-                <span>Generate All Voices ({project.segments.length} Segments)</span>
-              </>
+          {/* 1-Minute Block Selector & Drift Sync Monitor */}
+          <div className="p-3.5 rounded-2xl bg-black/40 border border-cyan-500/25 space-y-2.5">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-bold text-cyan-300 flex items-center gap-1.5 font-myanmar">
+                <Sliders className="w-3.5 h-3.5 text-cyan-400" />
+                <span>၁ မိနစ်စာ အချိန်ကွက်များ ({totalMinuteBlocks} Blocks)</span>
+              </span>
+              <span className="text-[10px] font-mono text-zinc-400">
+                Sync Lock / Minute
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setSelectedMinutePart('all')}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+                  selectedMinutePart === 'all'
+                    ? 'bg-cyan-400 text-zinc-950 shadow'
+                    : 'bg-white/5 text-zinc-400 hover:text-white border border-white/10'
+                }`}
+              >
+                All ({project.segments.length})
+              </button>
+
+              {minuteBlocks.map((part) => {
+                const isLast = part.partNumber === totalMinuteBlocks;
+                const partSegs = project.segments.filter((s) =>
+                  isLast
+                    ? s.startTime >= part.startSec && s.startTime <= part.endSec + 0.5
+                    : s.startTime >= part.startSec && s.startTime < part.endSec
+                );
+                const readyInPart = partSegs.filter((s) => !!s.audioUrl).length;
+                const hasWarn = partSegs.some((s) => !!s.narratorTimingWarning);
+
+                return (
+                  <button
+                    key={part.partNumber}
+                    type="button"
+                    onClick={() => {
+                      setSelectedMinutePart(part.partNumber);
+                      setProject((prev) => ({ ...prev, currentTime: part.startSec }));
+                    }}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all flex items-center gap-1 cursor-pointer ${
+                      selectedMinutePart === part.partNumber
+                        ? 'bg-cyan-400 text-zinc-950 font-bold shadow'
+                        : 'bg-white/5 text-zinc-300 hover:bg-white/10 border border-white/10'
+                    }`}
+                  >
+                    <span>P{part.partNumber} ({formatMinSec(part.startSec)}–{formatMinSec(part.endSec)})</span>
+                    <span className={`px-1 rounded text-[9px] font-mono ${hasWarn ? 'bg-amber-500/30 text-amber-200' : 'bg-black/40 text-emerald-300'}`}>
+                      {readyInPart}/{partSegs.length}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Action Buttons: Generate All, Retry Missing Voices, Auto Sync-Fit */}
+          <div className="space-y-2">
+            <div className="flex flex-col sm:flex-row gap-2">
+              <button
+                onClick={() => handleGenerateAll()}
+                disabled={isBatchGenerating || isSyncFitting || project.segments.length === 0}
+                className={`flex-1 py-3.5 px-5 disabled:opacity-50 text-zinc-950 text-xs sm:text-sm font-black rounded-2xl transition-all flex items-center justify-center gap-2 shadow-2xl cursor-pointer ${
+                  voiceEngine === 'huggingface'
+                    ? 'bg-gradient-to-r from-amber-400 via-orange-400 to-rose-400 shadow-amber-500/25 hover:scale-[1.01]'
+                    : 'bg-gradient-to-r from-emerald-400 via-teal-400 to-cyan-400 shadow-emerald-500/25 hover:scale-[1.01]'
+                }`}
+              >
+                {isBatchGenerating ? (
+                  <>
+                    <RotateCw className="w-4 h-4 animate-spin" />
+                    <span>Generating ({batchProgress?.current}/{batchProgress?.total})...</span>
+                  </>
+                ) : (
+                  <>
+                    <Volume2 className="w-4 h-4 stroke-[2.5]" />
+                    <span>Generate All Voices ({project.segments.length})</span>
+                  </>
+                )}
+              </button>
+
+              {selectedMinutePart !== 'all' && (
+                <button
+                  type="button"
+                  onClick={() => handleGenerateAll(selectedMinutePart)}
+                  disabled={isBatchGenerating || isSyncFitting || displayedSegments.length === 0}
+                  className="py-3.5 px-4 disabled:opacity-50 bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-200 border border-cyan-400/50 text-xs font-bold rounded-2xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shrink-0"
+                >
+                  <Zap className="w-3.5 h-3.5 text-cyan-300" />
+                  <span>Part {selectedMinutePart} Only ({displayedSegments.length})</span>
+                </button>
+              )}
+            </div>
+
+            {(missingCount > 0 || overflowCount > 0) && (
+              <div className="flex flex-wrap gap-2">
+                {missingCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => handleGenerateAll(selectedMinutePart === 'all' ? undefined : selectedMinutePart, true)}
+                    disabled={isBatchGenerating || isSyncFitting}
+                    className="flex-1 py-2.5 px-3.5 disabled:opacity-50 bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 border border-rose-400/50 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <RotateCw className={`w-3.5 h-3.5 text-rose-300 ${isBatchGenerating ? 'animate-spin' : ''}`} />
+                    <span>Retry Missing Voices ({missingCount} ခုကျန်)</span>
+                  </button>
+                )}
+
+                {overflowCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleAutoSyncFitAll}
+                    disabled={isBatchGenerating || isSyncFitting}
+                    className="flex-1 py-2.5 px-3.5 disabled:opacity-50 bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-400/50 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                    title="ဗီဒီယိုအချိန်ထက် ကျော်နေသော စာကြောင်းများကို AI ဖြင့် တိုချုံ့ပြီး Voice ပြန်ထုတ်၍ ဗီဒီယိုနှင့် ကွက်တိကိုက်ညှိပေးပါမည်"
+                  >
+                    <Zap className={`w-3.5 h-3.5 text-amber-300 ${isSyncFitting ? 'animate-spin' : ''}`} />
+                    <span>
+                      {isSyncFitting
+                        ? 'Sync-Fitting...'
+                        : `⚡ Auto Sync-Fit (${overflowCount} ခု ညှိရန်)`}
+                    </span>
+                  </button>
+                )}
+              </div>
             )}
-          </button>
+          </div>
 
           {/* Subtitle & Segment Voice List */}
           <div className="space-y-3 pt-2">
@@ -905,7 +1421,7 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
               <div className="flex items-center gap-2">
                 <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
                 <h3 className="text-xs font-bold text-white font-display">
-                  Segment Timing & Voice Clone Selection
+                  Segment Timing & Single Narrator Clips ({displayedSegments.length})
                 </h3>
               </div>
               <button
@@ -920,6 +1436,8 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                     originalText: 'New segment',
                     myanmarTranslation: 'စာသားအသစ် ထည့်ရန်...',
                     voice: singleVoice,
+                    speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
+                    minutePartIndex: Math.floor(newStart / MINUTE_BLOCK_SECONDS) + 1,
                   };
                   setProject((prev) => ({ ...prev, segments: [...prev.segments, newSeg] }));
                 }}
@@ -930,24 +1448,38 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
             </div>
 
             <div className="space-y-2.5 max-h-[340px] overflow-y-auto pr-1.5">
-              {project.segments.map((seg, idx) => {
+              {displayedSegments.map((seg, idx) => {
                 const isSegPlaying = playingAudioId === seg.id;
                 const segActiveVoice = seg.voice || (voiceMode === 'double' ? (idx % 2 === 0 ? speakerA : speakerB) : singleVoice);
                 const segActiveHfSpeaker = seg.hfSpeaker || (voiceMode === 'double' ? (idx % 2 === 0 ? hfSpeakerA : hfSpeakerB) : selectedHfSpeaker);
+                const isMissingVoice = !seg.audioUrl;
 
                 return (
                   <div
                     key={seg.id}
-                    className="p-3 rounded-2xl bg-black/40 border border-white/10 space-y-2.5 hover:border-emerald-500/40 transition-all shadow-md"
+                    className={`p-3 rounded-2xl bg-black/40 border space-y-2.5 transition-all shadow-md ${
+                      isMissingVoice
+                        ? 'border-rose-500/40 hover:border-rose-400/70'
+                        : 'border-white/10 hover:border-emerald-500/40'
+                    }`}
                   >
                     <div className="flex items-center justify-between gap-2 flex-wrap">
                       <div className="flex items-center gap-2">
-                        <span className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center justify-center font-mono text-[10px] font-bold">
+                        <span className={`w-5 h-5 rounded-full border flex items-center justify-center font-mono text-[10px] font-bold ${
+                          isMissingVoice
+                            ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                            : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                        }`}>
                           {idx + 1}
                         </span>
                         <span className="text-[11px] font-mono text-zinc-300">
                           {seg.startTime}s - {seg.endTime}s
                         </span>
+                        {isMissingVoice && (
+                          <span className="px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[9px] font-bold">
+                            No Voice
+                          </span>
+                        )}
                       </div>
 
                       {/* PER-SEGMENT VOICE CLONE DROPDOWN & QUICK A/B TOGGLE */}
@@ -963,6 +1495,39 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                                 {VOICE_PROFILES[v].name} ({VOICE_PROFILES[v].gender === 'male' ? 'M' : 'F'})
                               </option>
                             ))}
+                          </select>
+                        ) : voiceEngine === 'elevenlabs' ? (
+                          <select
+                            value={seg.elevenLabsVoiceId || selectedElevenLabsVoiceId || elevenLabsVoices[0]?.voice_id || ''}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              const voiceObj = elevenLabsVoices.find((v) => v.voice_id === val);
+                              setProject((prev) => ({
+                                ...prev,
+                                segments: prev.segments.map((s) =>
+                                  s.id === seg.id
+                                    ? {
+                                        ...s,
+                                        voiceProvider: 'elevenlabs',
+                                        elevenLabsVoiceId: val,
+                                        speaker: `ElevenLabs (${voiceObj?.name || 'Cloned Voice'})`,
+                                      }
+                                    : s
+                                ),
+                              }));
+                            }}
+                            className="px-2.5 py-1 bg-zinc-900 border border-violet-500/40 rounded-xl text-xs font-bold text-violet-300 focus:outline-none focus:border-violet-400 cursor-pointer max-w-[140px] truncate"
+                          >
+                            {elevenLabsVoices.map((v) => (
+                              <option key={v.voice_id} value={v.voice_id} className="bg-zinc-900 text-white font-sans">
+                                {v.name}
+                              </option>
+                            ))}
+                            {elevenLabsVoices.length === 0 && (
+                              <option value="" className="bg-zinc-900 text-zinc-400">
+                                No Voice Found
+                              </option>
+                            )}
                           </select>
                         ) : (
                           <select
@@ -1036,22 +1601,53 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                           )}
                           <span>{seg.audioUrl ? 'Play' : 'Gen'}</span>
                         </button>
+
+                        {seg.audioUrl && (
+                          <button
+                            type="button"
+                            onClick={() => handleGenerateSingle(seg)}
+                            disabled={seg.isGeneratingAudio}
+                            title="စာသား / Emotion အသစ်ဖြင့် Voice Clone ပြန်ထုတ်မည်"
+                            className="p-1 bg-white/5 hover:bg-amber-400/20 text-zinc-300 hover:text-amber-300 border border-white/10 rounded-lg transition-all cursor-pointer"
+                          >
+                            <RotateCw className={`w-3 h-3 ${seg.isGeneratingAudio ? 'animate-spin text-amber-400' : ''}`} />
+                          </button>
+                        )}
                       </div>
                     </div>
 
-                    <input
-                      type="text"
-                      value={seg.myanmarTranslation}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setProject((prev) => ({
-                          ...prev,
-                          segments: prev.segments.map((s) => (s.id === seg.id ? { ...s, myanmarTranslation: val } : s)),
-                        }));
-                      }}
-                      placeholder="မြန်မာဘာသာပြန်..."
-                      className="w-full px-3 py-1.5 bg-zinc-950/70 border border-white/10 rounded-xl text-xs font-myanmar text-white focus:outline-none focus:border-emerald-400"
-                    />
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <input
+                        type="text"
+                        value={seg.myanmarTranslation}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setProject((prev) => ({
+                            ...prev,
+                            segments: prev.segments.map((s) => (s.id === seg.id ? { ...s, myanmarTranslation: val } : s)),
+                          }));
+                        }}
+                        placeholder="မြန်မာဘာသာပြန်..."
+                        className="flex-1 px-3 py-1.5 bg-zinc-950/70 border border-white/10 rounded-xl text-xs font-myanmar text-white focus:outline-none focus:border-emerald-400"
+                      />
+
+                      <select
+                        value={seg.emotion || ''}
+                        onChange={(e) => handleSegmentEmotionChange(seg.id, e.target.value)}
+                        title="အသံနိမ့်မြင့် / ခံစားချက် (Vocal Emotion)"
+                        className="px-2 py-1.5 bg-zinc-900 border border-cyan-500/30 rounded-xl text-[11px] font-myanmar font-semibold text-cyan-200 focus:outline-none focus:border-cyan-400 cursor-pointer sm:w-48"
+                      >
+                        <option value="" className="bg-zinc-900 text-white">🎭 Auto (သဘာဝ စကားပြော)</option>
+                        <option value="happy, cheerful, warm" className="bg-zinc-900 text-white">😊 ပျော်ရွှင်နွေးထွေး (Happiness)</option>
+                        <option value="sad, gentle, sincere" className="bg-zinc-900 text-white">😢 ဝမ်းနည်းကြင်နာ (Sadness)</option>
+                        <option value="excited, energetic, enthusiastic" className="bg-zinc-900 text-white">⚡ တက်ကြွစိတ်လှုပ်ရှား (Excitement)</option>
+                        <option value="curious, questioning" className="bg-zinc-900 text-white">❓ စူးစမ်းမေးမြန်း (Curiosity)</option>
+                        <option value="empathetic, caring, comforting" className="bg-zinc-900 text-white">💛 စာနာနှစ်သိမ့် (Empathy)</option>
+                        <option value="surprised, amazed" className="bg-zinc-900 text-white">😮 အံ့ဩတုန်လှုပ် (Surprise)</option>
+                        <option value="mocking, smug" className="bg-zinc-900 text-white">😏 လှောင်ပြောင် (Mocking)</option>
+                        <option value="determined, fierce" className="bg-zinc-900 text-white">🔥 မာန်ပါ / ခိုင်မာ (Fierce)</option>
+                      </select>
+                    </div>
 
                     {/* Duration Alignment & Auto-Retime Speed Control */}
                     <div className="flex items-center justify-between text-[10px] text-zinc-400 pt-1 border-t border-white/5 flex-wrap gap-1">
@@ -1087,19 +1683,25 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                             onClick={() => {
                               const slotDur = Math.max(0.5, seg.endTime - seg.startTime);
                               const autoRate = seg.audioDuration! > slotDur
-                                ? Math.min(1.35, Math.max(1.0, parseFloat((seg.audioDuration! / slotDur).toFixed(2))))
+                                ? clampGentleNarratorRate(seg.audioDuration! / slotDur)
                                 : 1.0;
                               handleUpdateSegmentRate(seg.id, autoRate);
                             }}
                             className="px-2 py-0.5 bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 rounded-lg hover:bg-emerald-500/30 transition-all font-bold cursor-pointer flex items-center gap-1"
-                            title="Auto-Fit audio duration to video segment window"
+                            title="Gentle Auto-Fit (0.90x - 1.15x max)"
                           >
                             <Zap className="w-2.5 h-2.5 text-emerald-400" />
-                            <span>⚡ Auto-Fit</span>
+                            <span>⚡ Gentle Fit</span>
                           </button>
                         )}
                       </div>
                     </div>
+
+                    {seg.narratorTimingWarning && (
+                      <div className="px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/30 text-[10px] text-amber-300 font-myanmar">
+                        ⚠️ {seg.narratorTimingWarning}
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -1117,14 +1719,14 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
             className="px-5 py-2.5 bg-white/10 hover:bg-white/20 text-white font-bold text-xs rounded-xl transition-all border border-white/15 flex items-center gap-2 cursor-pointer active:scale-95 shadow-md"
           >
             <ArrowLeft className="w-4 h-4 stroke-[2.5]" />
-            <span>အဆင့် 4 သို့</span>
+            <span>အဆင့် ၃ သို့ (AI Script)</span>
           </button>
         ) : (
           <div />
         )}
 
         <span className="text-xs text-zinc-400 font-myanmar hidden sm:inline">
-          Voice Clone ပြီးပါက အဆင့် 6 (Subtitle Studio) သို့ သွားပါ
+          TTS အသံထုတ်ယူပြီးပါက အဆင့် ၅ (Human Review & Retiming) သို့ သွားပါ
         </span>
 
         {onNextStep && (
@@ -1132,7 +1734,7 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
             onClick={onNextStep}
             className="px-6 py-3 bg-gradient-to-r from-emerald-400 to-teal-400 hover:opacity-90 text-zinc-950 font-black text-xs rounded-xl transition-all flex items-center gap-2.5 shadow-xl shadow-emerald-500/25 cursor-pointer active:scale-95 shrink-0"
           >
-            <span>အဆင့် 6 သို့</span>
+            <span>အဆင့် ၅ သို့ (Human Review)</span>
             <ArrowRight className="w-4 h-4 stroke-[2.5]" />
           </button>
         )}
@@ -1655,6 +2257,225 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                 className="px-6 py-2.5 bg-gradient-to-r from-amber-400 to-orange-400 text-zinc-950 font-black text-xs rounded-xl shadow-lg hover:opacity-90 transition-all cursor-pointer"
               >
                 Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* FLOW PANEL 3: ELEVENLABS VOICE CLONE STUDIO (MODAL OVERLAY) */}
+      {/* ========================================================================= */}
+      {isElevenLabsFlowOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xl animate-fade-in">
+          <div className="w-full max-w-2xl bg-zinc-950 border border-violet-500/30 rounded-3xl p-6 sm:p-8 shadow-2xl flex flex-col max-h-[90vh] overflow-hidden relative">
+            <div className="absolute top-0 right-0 w-64 h-64 bg-violet-500/10 rounded-full blur-3xl pointer-events-none" />
+
+            {/* Header */}
+            <div className="flex items-center justify-between pb-4 border-b border-white/10 relative z-10">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 rounded-2xl bg-violet-500/20 text-violet-300 border border-violet-500/30 font-black">
+                  II
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-white font-display">
+                    ElevenLabs Voice Clone Studio
+                  </h3>
+                  <p className="text-xs text-zinc-400 font-myanmar">
+                    ElevenLabs API ဖြင့် အသံဖိုင်တင်ပြီး Instant Voice Clone ဖန်တီးခြင်း သို့မဟုတ် Premade Voices ရွေးချယ်ခြင်း
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setIsElevenLabsFlowOpen(false)}
+                className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-white transition-all cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Content */}
+            <div className="flex-1 overflow-y-auto space-y-6 py-4 pr-1 relative z-10">
+              {/* 1-Click Clone directly from User's Attached Sample Video */}
+              <div className="p-4 rounded-2xl bg-gradient-to-r from-violet-950/70 via-purple-950/40 to-zinc-950 border border-violet-500/50 space-y-3 shadow-xl">
+                <div className="flex items-center gap-2.5">
+                  <span className="w-8 h-8 rounded-xl bg-gradient-to-tr from-violet-500 to-fuchsia-500 text-white flex items-center justify-center font-bold text-sm shadow">
+                    🎬
+                  </span>
+                  <div>
+                    <h4 className="text-xs font-black text-white uppercase tracking-wider font-display">
+                      နမူနာ Video မှ Voice Clone တိုက်ရိုက်ရယူမည် (1-Click Instant Clone)
+                    </h4>
+                    <p className="text-[11px] text-zinc-400 font-myanmar mt-0.5">
+                      ပေးပို့ထားသော နမူနာဗီဒီယို (Sample Video) မှ စကားပြောသံကို ElevenLabs သို့ တိုက်ရိုက် Voice Clone ပြုလုပ်ပါမည်။
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  disabled={isCloningSampleVideo}
+                  onClick={async () => {
+                    setIsCloningSampleVideo(true);
+                    setStatusText('🎙️ နမူနာဗီဒီယိုမှ အသံလှိုင်းကို ElevenLabs သို့ ပေးပို့ပြီး Instant Voice Clone ပြုလုပ်နေပါသည်...');
+                    try {
+                      const res = await cloneElevenLabsFromSampleVideo('Sample Video Burmese Narrator');
+                      handleApplyElevenLabsAllocation(res.voice_id, res.name);
+                      setStatusText(`✓ နမူနာ Video မှ ElevenLabs Voice Clone အောင်မြင်စွာ ဖန်တီးပြီး TTX စာကြောင်းများသို့ သတ်မှတ်ပြီးပါပြီ! (${res.name})`);
+                      const updatedVoices = await fetchElevenLabsVoices();
+                      setElevenLabsVoices(updatedVoices);
+                    } catch (err: any) {
+                      setErrorMessage(`Sample Video Voice Clone မအောင်မြင်ပါ: ${err.message}`);
+                    } finally {
+                      setIsCloningSampleVideo(false);
+                    }
+                  }}
+                  className="w-full py-2.5 px-4 bg-gradient-to-r from-violet-500 to-fuchsia-500 hover:from-violet-400 hover:to-fuchsia-400 text-white font-black text-xs rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  {isCloningSampleVideo ? (
+                    <>
+                      <RotateCw className="w-4 h-4 animate-spin text-white" />
+                      <span>နမူနာ Video မှ Clone နေပါသည်...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-4 h-4 text-amber-300" />
+                      <span>🎬 နမူနာ Video မှ Voice Clone ရယူမည် (1-Click Clone)</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Instant Voice Clone Upload Box */}
+              <div className="p-4 rounded-2xl bg-violet-950/40 border border-violet-500/40 space-y-3">
+                <h4 className="text-xs font-black text-violet-300 uppercase tracking-wider font-display">
+                  ➕ Instant Voice Clone (အသံနမူနာ ဖိုင်တင်ပြီး အသံအသစ်ဖန်တီးရန်)
+                </h4>
+                <div className="space-y-2.5">
+                  <input
+                    type="text"
+                    value={cloneVoiceName}
+                    onChange={(e) => setCloneVoiceName(e.target.value)}
+                    placeholder="Voice Name (ဥပမာ- My Burmese Narrator Voice)"
+                    className="w-full px-3.5 py-2 bg-zinc-900 border border-white/10 rounded-xl text-xs text-white focus:outline-none focus:border-violet-400 font-myanmar"
+                  />
+
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="file"
+                      accept="audio/*"
+                      onChange={(e) => setCloneAudioFile(e.target.files?.[0] || null)}
+                      className="text-xs text-zinc-400 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-violet-600 file:text-white hover:file:bg-violet-500 cursor-pointer"
+                    />
+
+                    <button
+                      type="button"
+                      disabled={isCloningVoice || !cloneAudioFile}
+                      onClick={async () => {
+                        if (!cloneAudioFile) return;
+                        setIsCloningVoice(true);
+                        setStatusText('🎙️ ElevenLabs သို့ အသံဖိုင်တင်ပြီး Instant Voice Clone ပြုလုပ်နေပါသည်...');
+                        try {
+                          const res = await cloneElevenLabsVoice(cloneVoiceName, cloneAudioFile);
+                          handleApplyElevenLabsAllocation(res.voice_id, res.name);
+                          setStatusText(`✓ Voice Clone အောင်မြင်ပါသည်! (${res.name}) - TTX Segments အားလုံးသို့ သတ်မှတ်ပြီးပါပြီ`);
+                          const updatedVoices = await fetchElevenLabsVoices();
+                          setElevenLabsVoices(updatedVoices);
+                          setCloneAudioFile(null);
+                        } catch (err: any) {
+                          setErrorMessage(`Voice Clone failed: ${err.message}`);
+                        } finally {
+                          setIsCloningVoice(false);
+                        }
+                      }}
+                      className="px-4 py-2 bg-gradient-to-r from-violet-500 to-purple-500 hover:opacity-90 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-md transition-all cursor-pointer shrink-0"
+                    >
+                      {isCloningVoice ? 'Cloning...' : '🚀 Clone Voice'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Available Voices List */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-black text-violet-300 uppercase tracking-wider font-display">
+                    Voices List ({elevenLabsVoices.length} available)
+                  </h4>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      fetchElevenLabsVoices().then((v) => setElevenLabsVoices(v)).catch(() => {});
+                    }}
+                    className="px-2.5 py-1 bg-white/5 hover:bg-white/10 text-zinc-300 rounded-lg text-[10px] font-bold cursor-pointer"
+                  >
+                    🔄 Refresh
+                  </button>
+                </div>
+
+                <div className="space-y-2 max-h-[260px] overflow-y-auto pr-1">
+                  {elevenLabsVoices.map((v) => {
+                    const isSelected = selectedElevenLabsVoiceId === v.voice_id;
+                    return (
+                      <div
+                        key={v.voice_id}
+                        onClick={() => handleApplyElevenLabsAllocation(v.voice_id, v.name)}
+                        className={`p-3.5 rounded-2xl border transition-all flex items-center justify-between cursor-pointer ${
+                          isSelected
+                            ? 'bg-gradient-to-r from-violet-500/25 to-purple-500/10 border-violet-400 text-violet-200 shadow-lg ring-1 ring-violet-400/50'
+                            : 'bg-white/5 border-white/10 hover:bg-white/10 text-zinc-300'
+                        }`}
+                      >
+                        <div>
+                          <span className="text-xs font-black text-white block font-display">{v.name}</span>
+                          <span className="text-[10px] text-zinc-400 font-mono">Category: {v.category} | ID: {v.voice_id}</span>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          {v.preview_url && (
+                            <audio src={v.preview_url} controls className="h-6 w-28 opacity-75 hover:opacity-100" onClick={(e) => e.stopPropagation()} />
+                          )}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleApplyElevenLabsAllocation(v.voice_id, v.name);
+                            }}
+                            className={`px-3 py-1 rounded-xl text-xs font-bold transition-all ${isSelected ? 'bg-violet-400 text-zinc-950 font-black shadow' : 'bg-white/10 hover:bg-white/20 text-zinc-200'}`}
+                          >
+                            {isSelected ? '✓ Active Voice' : 'TTX အားလုံးတွင် သုံးမည်'}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {elevenLabsVoices.length === 0 && (
+                    <p className="text-xs text-zinc-500 text-center py-6 font-myanmar">
+                      ElevenLabs voices မတွေ့ရသေးပါ။ Step 1 တွင် ElevenLabs API Key ထည့်သွင်းထားခြင်း ရှိမရှိ စစ်ဆေးပါ။
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="pt-4 border-t border-white/10 flex items-center justify-between relative z-10">
+              <span className="text-xs text-zinc-400 font-myanmar">
+                Selected Voice: <strong className="text-violet-300 font-mono">{elevenLabsVoices.find((v) => v.voice_id === selectedElevenLabsVoiceId)?.name || selectedElevenLabsVoiceId || 'None'}</strong>
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectedElevenLabsVoiceId) {
+                    handleApplyElevenLabsAllocation(selectedElevenLabsVoiceId);
+                  }
+                  setIsElevenLabsFlowOpen(false);
+                }}
+                className="px-6 py-2.5 bg-gradient-to-r from-violet-500 to-purple-500 text-white font-black text-xs rounded-xl shadow-lg hover:opacity-90 transition-all cursor-pointer"
+              >
+                Done (အတည်ပြုမည်)
               </button>
             </div>
           </div>

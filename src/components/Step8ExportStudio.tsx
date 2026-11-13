@@ -14,11 +14,15 @@ import {
   VolumeX,
   Mic,
   Play,
+  Music,
+  Loader2,
 } from 'lucide-react';
 import { ProjectState, TranscriptSegment } from '../types';
 import { getInterpolatedKeyframe, getFilterCss, generateSrtContent, downloadFile } from '../utils/alightMotionRenderer';
 import { drawCanvasSubtitle } from '../utils/canvasSubtitleRenderer';
 import { VideoPlayerView } from './VideoPlayerView';
+import { clampGentleNarratorRate, getSegmentPlaybackWindow, findActiveSegmentForTime } from '../utils/timingSync';
+import { extractBackgroundMusicFromVideo } from '../utils/bgmExtractorClient';
 
 interface ExportHistoryItem {
   id: string;
@@ -57,6 +61,8 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
   
   const [currentExportUrl, setCurrentExportUrl] = useState<string | null>(null);
   const [currentExportFilename, setCurrentExportFilename] = useState<string>('');
+  const [isExtractingBgm, setIsExtractingBgm] = useState(false);
+  const [bgmExtractError, setBgmExtractError] = useState<string | null>(null);
 
   const [historyItems, setHistoryItems] = useState<ExportHistoryItem[]>([]);
 
@@ -273,7 +279,8 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
     }
 
     const activeSeg = project.segments.find((s) => {
-      const segEnd = Math.max(s.endTime, s.startTime + (s.audioDuration || 0));
+      const rate = clampGentleNarratorRate(s.atempoRate || s.playbackRate || project.voicePlaybackRate || 1.0);
+      const segEnd = Math.max(s.endTime, s.startTime + (s.audioDuration ? s.audioDuration / rate : 0));
       return currentTime >= s.startTime && currentTime <= segEnd;
     });
 
@@ -338,6 +345,30 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
     }
   };
 
+  const handleExtractBgmInExport = async () => {
+    if (!project.videoFile && !project.videoUrl) return;
+    setIsExtractingBgm(true);
+    setBgmExtractError(null);
+    try {
+      const res = await extractBackgroundMusicFromVideo(
+        project.videoFile,
+        project.videoUrl,
+        project.videoName || 'custom_video.mp4'
+      );
+      setProject((prev) => ({
+        ...prev,
+        extractedBgmUrl: res.bgmUrl,
+        useExtractedBgm: true,
+        bgmVolume: prev.bgmVolume ?? 0.35,
+        bgmEngineUsed: res.engineUsed,
+      }));
+    } catch (err: any) {
+      setBgmExtractError(err?.message || 'BGM extraction failed');
+    } finally {
+      setIsExtractingBgm(false);
+    }
+  };
+
   const handleExportMp4Video = async () => {
     if (!project.videoUrl) {
       alert('ဗီဒီယို ဖိုင် မရှိသေးပါ။ အဆင့် 2 တွင် Custom Video တင်သွင်းပါ။');
@@ -395,13 +426,14 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
       }
 
       const maxAudioEnd = project.segments.reduce((max, s) => {
-        const segEnd = Math.max(s.endTime, s.startTime + (s.audioDuration || 0));
+        const rate = clampGentleNarratorRate(s.atempoRate || s.playbackRate || project.voicePlaybackRate || 1.0);
+        const segEnd = Math.max(s.endTime, s.startTime + (s.audioDuration ? s.audioDuration / rate : 0) + 0.15);
         return Math.max(max, segEnd);
       }, 0);
 
       const videoSpeedMultiplier = project.playbackRate || 1.0;
       const effectiveVideoDuration = rawVideoDuration > 0 ? (rawVideoDuration / videoSpeedMultiplier) : 0;
-      const totalDuration = Math.max(effectiveVideoDuration, maxAudioEnd, project.videoDuration || 0, 3.0);
+      let totalDuration = Math.max(effectiveVideoDuration, maxAudioEnd, project.videoDuration || 0, 3.0);
 
       const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
       const audioCtx = new AudioCtxClass();
@@ -413,8 +445,9 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
       const dest = audioCtx.createMediaStreamDestination();
 
       // Original Video Audio Handling:
-      // USER REQUIREMENT: If original video sound is muted, original sound must be completely silenced (gain = 0)
-      const isOriginalMuted = project.isMuted || (project.volume !== undefined && project.volume === 0);
+      // If Original Video Sound is muted OR Vocal-Removed BGM Only mode is active, force original speech track to gain = 0
+      const useExtractedBgm = Boolean(project.useExtractedBgm && project.extractedBgmUrl);
+      const isOriginalMuted = project.isMuted || useExtractedBgm || (project.volume !== undefined && project.volume === 0);
       const effectiveVideoGain = isOriginalMuted ? 0 : (project.volume ?? 1.0);
 
       try {
@@ -425,6 +458,31 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
         videoGain.connect(dest);
       } catch (e) {
         console.warn('Video audio node connect notice:', e);
+      }
+
+      // Extracted Background Music & SFX Track (Original Human Vocals Removed)
+      let bgmSourceNode: AudioBufferSourceNode | null = null;
+      let bgmGainNode: GainNode | null = null;
+      const targetBgmVol = Math.max(0, Math.min(1, project.bgmVolume ?? 0.35));
+
+      if (useExtractedBgm && project.extractedBgmUrl && targetBgmVol > 0) {
+        try {
+          setExportStatusText('Loading Extracted Background Music (Vocals Removed)...');
+          const bgmRes = await fetch(project.extractedBgmUrl);
+          if (bgmRes.ok) {
+            const bgmArrayBuf = await bgmRes.arrayBuffer();
+            const decodedBgm = await audioCtx.decodeAudioData(bgmArrayBuf);
+            bgmSourceNode = audioCtx.createBufferSource();
+            bgmSourceNode.buffer = decodedBgm;
+            bgmSourceNode.playbackRate.value = videoSpeedMultiplier;
+            bgmGainNode = audioCtx.createGain();
+            bgmGainNode.gain.value = targetBgmVol;
+            bgmSourceNode.connect(bgmGainNode);
+            bgmGainNode.connect(dest);
+          }
+        } catch (bgmErr) {
+          console.warn('Extracted BGM load warning in export:', bgmErr);
+        }
       }
 
       // Voice Clone Audio Handling:
@@ -438,16 +496,20 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
         duration: number;
       }[] = [];
 
-      for (const seg of project.segments) {
+      const sortedExportSegs = [...project.segments].sort((a, b) => a.startTime - b.startTime);
+      let exportCursor = 0;
+      for (let i = 0; i < sortedExportSegs.length; i++) {
+        const seg = sortedExportSegs[i];
         if (seg.audioUrl) {
           try {
             const res = await fetch(seg.audioUrl);
             const arrayBuf = await res.arrayBuffer();
             const decoded = await audioCtx.decodeAudioData(arrayBuf);
 
+            const win = getSegmentPlaybackWindow(sortedExportSegs, i, project.voicePlaybackRate || 1.0);
+            const rate = clampGentleNarratorRate(seg.atempoRate || seg.playbackRate || project.voicePlaybackRate || 1.0);
             const source = audioCtx.createBufferSource();
             source.buffer = decoded;
-            const rate = seg.atempoRate || seg.playbackRate || project.voicePlaybackRate || 1.0;
             source.playbackRate.value = rate;
 
             const gain = audioCtx.createGain();
@@ -455,18 +517,25 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
             source.connect(gain);
             gain.connect(dest);
 
-            const effectiveDur = decoded.duration / rate;
+            // Play the ENTIRE decoded buffer cleanly so final syllables are NEVER truncated
+            const fullDur = decoded.duration / rate;
+            const scheduledStart = Math.max(exportCursor, Math.max(0, win.startTime));
+            exportCursor = scheduledStart + fullDur + 0.04;
+
             audioSources.push({
               node: source,
-              startTime: Math.max(0, seg.startTime),
+              startTime: scheduledStart,
               gainNode: gain,
-              duration: effectiveDur,
+              duration: fullDur,
             });
           } catch (audioErr) {
             console.warn('Voice segment load error:', audioErr);
           }
         }
       }
+
+      // Ensure video export runs until the very last narrator syllable finishes cleanly
+      totalDuration = Math.max(totalDuration, exportCursor + 0.15);
 
       const canvasStream = exportCanvas.captureStream(30);
       const combinedStream = new MediaStream([
@@ -516,17 +585,39 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
       }
 
       const startTimeReal = audioCtx.currentTime;
+      if (bgmSourceNode && bgmGainNode) {
+        try {
+          bgmGainNode.gain.setValueAtTime(targetBgmVol, startTimeReal);
+          if (effectiveVoiceGain > 0 && audioSources.length > 0) {
+            const duckedVol = Math.max(0.04, targetBgmVol * 0.35);
+            audioSources.forEach(({ startTime, duration }) => {
+              const tStart = startTimeReal + startTime;
+              const tEnd = tStart + duration;
+              bgmGainNode!.gain.setValueAtTime(targetBgmVol, Math.max(startTimeReal, tStart - 0.08));
+              bgmGainNode!.gain.linearRampToValueAtTime(duckedVol, tStart + 0.05);
+              bgmGainNode!.gain.setValueAtTime(duckedVol, Math.max(tStart + 0.05, tEnd - 0.05));
+              bgmGainNode!.gain.linearRampToValueAtTime(targetBgmVol, tEnd + 0.12);
+            });
+          }
+          bgmSourceNode.start(startTimeReal);
+          bgmSourceNode.stop(startTimeReal + totalDuration + 0.15);
+        } catch (bgmStartErr) {
+          console.warn('BGM schedule notice:', bgmStartErr);
+        }
+      }
+
       audioSources.forEach(({ node, startTime, gainNode, duration }) => {
         try {
           const tStart = startTimeReal + startTime;
           const tEnd = tStart + duration;
-          // Smooth 12ms linear attack and 15ms release envelope to eliminate pops and clicks
+          // Smooth 8ms linear attack and 12ms release envelope at end of full audio buffer
           gainNode.gain.setValueAtTime(0.0001, tStart);
-          gainNode.gain.linearRampToValueAtTime(effectiveVoiceGain, Math.min(tEnd, tStart + 0.012));
-          gainNode.gain.setValueAtTime(effectiveVoiceGain, Math.max(tStart + 0.012, tEnd - 0.015));
+          gainNode.gain.linearRampToValueAtTime(effectiveVoiceGain, Math.min(tEnd, tStart + 0.008));
+          gainNode.gain.setValueAtTime(effectiveVoiceGain, Math.max(tStart + 0.008, tEnd - 0.012));
           gainNode.gain.linearRampToValueAtTime(0.0001, tEnd);
 
           node.start(tStart);
+          node.stop(tEnd + 0.06);
         } catch (startErr) {
           console.warn('Audio node start notice:', startErr);
         }
@@ -845,7 +936,11 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
                   />
                 </div>
 
-                {project.isMuted ? (
+                {project.useExtractedBgm && project.extractedBgmUrl ? (
+                  <p className="text-[10px] text-amber-300 font-myanmar leading-tight flex items-center gap-1 bg-amber-500/10 p-1.5 rounded border border-amber-500/20">
+                    <span>✓ BGM Only (Vocals Removed) Mode ဖွင့်ထားသဖြင့် မူရင်းလူအသံများကို အလိုအလျောက် Mute လုပ်ထားပါသည်။</span>
+                  </p>
+                ) : project.isMuted ? (
                   <p className="text-[10px] text-amber-300 font-myanmar leading-tight flex items-center gap-1 bg-amber-500/10 p-1.5 rounded border border-amber-500/20">
                     <span>✓ မူရင်းအသံကို Mute ထားပါသည်။ Export ဗီဒီယိုတွင် မူရင်းအသံလုံးဝ မပါဘဲ Voice Clone အသံဖြင့်သာ ထွက်ရှိပါမည်။</span>
                   </p>
@@ -853,6 +948,103 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
                   <p className="text-[10px] text-zinc-400 font-myanmar leading-tight">
                     မူရင်းအသံနှင့် Voice Clone အသံ ၂ မျိုးစလုံးကို ရောနှော၍ Export ပြုလုပ်မည်ဖြစ်ပါသည်။
                   </p>
+                )}
+              </div>
+
+              {/* Vocal-Removed Original Background Music & SFX Extractor */}
+              <div className="space-y-2 p-2.5 rounded-lg bg-amber-950/20 border border-amber-500/30">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-1.5">
+                    <Music className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <span className="text-[11px] font-bold text-amber-200">
+                      Original BGM Only (လူအသံဖယ်ရှားပြီး နောက်ခံတီးလုံး)
+                    </span>
+                  </div>
+
+                  {project.extractedBgmUrl ? (
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setProject((prev) => ({
+                            ...prev,
+                            useExtractedBgm: !prev.useExtractedBgm,
+                          }))
+                        }
+                        className={`px-2 py-0.5 rounded-md text-[10px] font-bold border transition-all cursor-pointer ${
+                          project.useExtractedBgm
+                            ? 'bg-amber-400 text-zinc-950 border-amber-300 shadow'
+                            : 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:text-white'
+                        }`}
+                      >
+                        {project.useExtractedBgm ? '🎵 BGM Only: ON' : 'Use BGM Only'}
+                      </button>
+
+                      <a
+                        href={project.extractedBgmUrl}
+                        download={`${(project.videoName || 'video').replace(/\.[^/.]+$/, '')}_bgm_only.mp3`}
+                        className="px-2 py-0.5 rounded-md bg-white/10 hover:bg-white/20 text-zinc-200 text-[10px] font-bold transition-all"
+                        title="Download extracted background music MP3"
+                      >
+                        .MP3
+                      </a>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleExtractBgmInExport}
+                      disabled={isExtractingBgm || (!project.videoUrl && !project.videoFile)}
+                      className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-400/50 text-[10px] font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                    >
+                      {isExtractingBgm ? (
+                        <>
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          <span>ခွဲထုတ်နေသည်...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Music className="w-3 h-3" />
+                          <span>Extract BGM Only</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+                </div>
+
+                {bgmExtractError && (
+                  <p className="text-[10px] text-rose-300 font-myanmar">{bgmExtractError}</p>
+                )}
+
+                {project.extractedBgmUrl && (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-amber-300 shrink-0">BGM Vol:</span>
+                      <input
+                        type="range"
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        value={project.bgmVolume ?? 0.35}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value);
+                          setProject((prev) => ({
+                            ...prev,
+                            bgmVolume: val,
+                            useExtractedBgm: val > 0 ? true : prev.useExtractedBgm,
+                          }));
+                        }}
+                        className="flex-1 h-1.5 bg-zinc-800 rounded accent-amber-400 cursor-pointer"
+                      />
+                      <span className="text-[10px] font-mono font-bold text-amber-300 w-8 text-right">
+                        {Math.round((project.bgmVolume ?? 0.35) * 100)}%
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-amber-200/80 font-myanmar leading-tight">
+                      {project.useExtractedBgm
+                        ? '✓ Narrator စကားပြောနေစဉ် BGM အသံကို အလိုအလျောက် တိုးချပေးပြီး မူရင်းလူအသံ 0% ပိတ်ပေးပါမည်။'
+                        : 'BGM Only ကို နှိပ်ဖွင့်ပါက မူရင်းလူအသံမပါဘဲ တီးလုံးသီးသန့် Export ထုတ်ပေးပါမည်။'}
+                    </p>
+                  </div>
                 )}
               </div>
 
@@ -1027,10 +1219,12 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
               project={project}
               setProject={setProject}
               activeSegment={
-                project.segments.find((s) => {
-                  const effectiveEnd = Math.max(s.endTime, s.startTime + (s.audioDuration || 0));
-                  return project.currentTime >= s.startTime && project.currentTime <= effectiveEnd;
-                }) || null
+                findActiveSegmentForTime(
+                  project.segments,
+                  project.currentTime,
+                  project.voicePlaybackRate || 1.0,
+                  false
+                )?.segment || null
               }
             />
           </div>

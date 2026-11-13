@@ -279,7 +279,7 @@ export async function synthesizeHuggingFaceVoice(
   const mappedVoice = voiceMapping[speakerId] || 'Thiha';
   return await synthesizeMyanmarVoice(cleanText, {
     voice: mappedVoice,
-    style: 'conversational',
+    style: 'recap',
     speed: options.speed || 1.0,
     onStatusUpdate: options.onStatusUpdate,
   });
