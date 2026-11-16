@@ -5,7 +5,7 @@ import { Step1GeminiKeys } from './components/Step1GeminiKeys';
 import { Step3CanvasCrop } from './components/Step3CanvasCrop';
 import { AiRecapStudio } from './components/AiRecapStudio';
 import { VoiceCloneStudio } from './components/VoiceCloneStudio';
-import { HumanReviewDubbingStudio } from './components/HumanReviewDubbingStudio';
+import { Step5StudioEditor } from './components/Step5StudioEditor';
 import { Step8AlightMotion } from './components/Step8AlightMotion';
 import { Step8ExportStudio } from './components/Step8ExportStudio';
 import { VideoPlayerView } from './components/VideoPlayerView';
@@ -97,7 +97,13 @@ const initialProjectState: ProjectState = {
   isPlaying: false,
   playbackRate: 1.0,
   voicePlaybackRate: 1.0,
+  narrationMode: 'dialogue_dub',
+  step3ScriptStyle: 'narrator',
+  recapSlotSeconds: 30,
   voiceStyle: 'recap',
+  voiceTone: 'natural',
+  voicePitch: 0,
+  lockedVoice: 'Thiha',
   smartSyncFrameLock: true,
   volume: 0.8,
   isMuted: false,
@@ -159,10 +165,22 @@ export default function App() {
       const saved = localStorage.getItem('motion_recap_project_state');
       if (saved) {
         const parsed = JSON.parse(saved);
+        const hasDeadBlobVideo = typeof parsed.videoUrl === 'string' && parsed.videoUrl.startsWith('blob:');
+        const hasDeadBlobBgm = typeof parsed.extractedBgmUrl === 'string' && parsed.extractedBgmUrl.startsWith('blob:');
+        const cleanedSegments = Array.isArray(parsed.segments)
+          ? parsed.segments.map((s: any) => ({
+              ...s,
+              audioUrl: typeof s?.audioUrl === 'string' && s.audioUrl.startsWith('blob:') ? undefined : s?.audioUrl,
+            }))
+          : initialProjectState.segments;
         return {
           ...initialProjectState,
           ...parsed,
           videoFile: null, // File object cannot be serialized
+          videoUrl: hasDeadBlobVideo ? null : (parsed.videoUrl ?? null),
+          videoDuration: hasDeadBlobVideo ? 0 : (parsed.videoDuration ?? 0),
+          extractedBgmUrl: hasDeadBlobBgm ? null : (parsed.extractedBgmUrl ?? null),
+          segments: cleanedSegments,
         };
       }
     } catch (e) {
@@ -182,7 +200,7 @@ export default function App() {
     } catch (e) {
       console.warn('Failed to cache project state:', e);
     }
-  }, [project.videoName, project.aspectRatio, project.frameCrop, project.segments, project.keyframes, project.subtitleSettings, project.blurBoxes, project.logoConfig, project.globalColorFilter, project.useExtractedBgm, project.bgmVolume]);
+  }, [project.videoName, project.aspectRatio, project.frameCrop, project.segments, project.keyframes, project.subtitleSettings, project.blurBoxes, project.logoConfig, project.globalColorFilter, project.extractedBgmUrl, project.useExtractedBgm, project.bgmVolume, project.bgmEngineUsed]);
 
   // Handle Seek
   const handleSeekTo = (time: number) => {
@@ -231,27 +249,20 @@ export default function App() {
       number: 5,
       id: 'review',
       title: 'အဆင့် ၅',
-      subtitle: 'Human Review & Retiming',
-      isComplete: project.segments.some((s) => s.isHumanReviewed),
+      subtitle: 'Video Editor & Pro Edition',
+      isComplete: project.segments.some((s) => !!s.audioUrl || s.isHumanReviewed),
     },
     {
       number: 6,
-      id: 'canvas',
-      title: 'အဆင့် ၆',
-      subtitle: 'Canvas & Platform Crop',
-      isComplete: Boolean(project.aspectRatio),
-    },
-    {
-      number: 7,
       id: 'motion',
-      title: 'အဆင့် ၇',
+      title: 'အဆင့် ၆',
       subtitle: 'Alight Motion Studio',
       isComplete: project.keyframes.length > 0,
     },
     {
-      number: 8,
+      number: 7,
       id: 'export',
-      title: 'အဆင့် ၈',
+      title: 'အဆင့် ၇',
       subtitle: 'Export Studio (MP4)',
       isComplete: false,
     },
@@ -350,6 +361,7 @@ export default function App() {
                 setProject={setProject}
                 activeSegment={activeSegment}
                 selectedSegmentName={activeSegment ? activeSegment.myanmarTranslation : undefined}
+                showLalalBgmGenerator={true}
               />
             </div>
           </div>
@@ -362,6 +374,7 @@ export default function App() {
             onSeekTo={handleSeekTo}
             onNextStep={() => setCurrentStep(4)}
             onPrevStep={() => setCurrentStep(2)}
+            onJumpToStep={(st) => setCurrentStep(st)}
             stepNumber={3}
           />
         )}
@@ -376,56 +389,33 @@ export default function App() {
         )}
 
         {currentStep === 5 && (
-          <div className="space-y-6">
-            <div className="flex items-center justify-between pb-2">
-              <button
-                onClick={() => setCurrentStep(4)}
-                className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-zinc-300 text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
-              >
-                <ArrowLeft className="w-3.5 h-3.5" />
-                <span>အဆင့် ၄ သို့ ပြန်သွားမည်</span>
-              </button>
-              <button
-                onClick={() => setCurrentStep(6)}
-                className="px-5 py-2 rounded-xl bg-gradient-to-r from-cyan-400 to-teal-400 text-zinc-950 text-xs font-black transition-all flex items-center gap-1.5 cursor-pointer shadow-lg shadow-cyan-500/20 hover:opacity-90 active:scale-95"
-              >
-                <span>အဆင့် ၆ (Canvas Crop)</span>
-                <ArrowRight className="w-3.5 h-3.5 stroke-[2.5]" />
-              </button>
-            </div>
-            <HumanReviewDubbingStudio
-              project={project}
-              setProject={setProject}
-              onSeekTo={handleSeekTo}
-            />
-          </div>
-        )}
-
-        {currentStep === 6 && (
-          <Step3CanvasCrop
+          <Step5StudioEditor
             project={project}
             setProject={setProject}
-            onNextStep={() => setCurrentStep(7)}
-            onPrevStep={() => setCurrentStep(5)}
+            onSeekTo={handleSeekTo}
+            onPrevStep={() => setCurrentStep(4)}
+            onNextStep={() => setCurrentStep(6)}
+            onJumpToStep={(st) => setCurrentStep(st)}
+            onOpenKeysModal={() => setIsKeysModalOpen(true)}
           />
         )}
 
-        {currentStep === 7 && (
+        {currentStep === 6 && (
           <Step8AlightMotion
             project={project}
             setProject={setProject}
             onSeekTo={handleSeekTo}
-            onPrevStep={() => setCurrentStep(6)}
-            onNextStep={() => setCurrentStep(8)}
+            onPrevStep={() => setCurrentStep(5)}
+            onNextStep={() => setCurrentStep(7)}
             onOpenExportModal={() => setIsExportModalOpen(true)}
           />
         )}
 
-        {currentStep === 8 && (
+        {currentStep === 7 && (
           <Step8ExportStudio
             project={project}
             setProject={setProject}
-            onPrevStep={() => setCurrentStep(7)}
+            onPrevStep={() => setCurrentStep(6)}
           />
         )}
       </main>

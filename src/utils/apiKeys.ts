@@ -18,39 +18,25 @@ export function loadApiKeys(): ApiKeys {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) {
-      return { assemblyAiKey: '', huggingFaceKey: '', manusApiKey: '', elevenLabsKey: '' };
+      return { assemblyAiKey: '' };
     }
     const parsed = JSON.parse(raw);
 
     // Automatically cleanse any non-ASCII characters that might have been accidentally pasted
     const cleanAssembly = sanitizeApiKey(parsed.assemblyAiKey || '');
-    const cleanHf = sanitizeApiKey(parsed.huggingFaceKey || '');
-    const cleanManus = sanitizeApiKey(parsed.manusApiKey || '');
-    const cleanEleven = sanitizeApiKey(parsed.elevenLabsKey || '');
 
     // If corrupt non-ASCII characters were found and stripped, update localStorage
-    if (
-      parsed.assemblyAiKey !== cleanAssembly ||
-      parsed.huggingFaceKey !== cleanHf ||
-      parsed.manusApiKey !== cleanManus ||
-      parsed.elevenLabsKey !== cleanEleven
-    ) {
+    if (parsed.assemblyAiKey !== cleanAssembly) {
       saveApiKeys({
         assemblyAiKey: cleanAssembly,
-        huggingFaceKey: cleanHf,
-        manusApiKey: cleanManus,
-        elevenLabsKey: cleanEleven,
       });
     }
 
     return {
       assemblyAiKey: cleanAssembly,
-      huggingFaceKey: cleanHf,
-      manusApiKey: cleanManus,
-      elevenLabsKey: cleanEleven,
     };
   } catch {
-    return { assemblyAiKey: '', huggingFaceKey: '', manusApiKey: '', elevenLabsKey: '' };
+    return { assemblyAiKey: '' };
   }
 }
 
@@ -58,31 +44,11 @@ export function saveApiKeys(keys: ApiKeys): void {
   try {
     const sanitized: ApiKeys = {
       assemblyAiKey: sanitizeApiKey(keys.assemblyAiKey || ''),
-      huggingFaceKey: sanitizeApiKey(keys.huggingFaceKey || ''),
-      manusApiKey: sanitizeApiKey(keys.manusApiKey || ''),
-      elevenLabsKey: sanitizeApiKey(keys.elevenLabsKey || ''),
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitized));
   } catch (err) {
     console.error('Failed to save API keys:', err);
   }
-}
-
-export async function verifyManusApiKey(apiKey: string): Promise<{ ok: boolean; message: string; details?: any }> {
-  const trimmed = (apiKey || '').trim();
-  if (!trimmed) {
-    return { ok: false, message: 'ကျေးဇူးပြု၍ Manus API Key ထည့်သွင်းပေးပါ။' };
-  }
-  if (!isAsciiOnly(trimmed)) {
-    return { ok: false, message: '⚠️ Manus API Key တွင် မြန်မာစာလုံးများ မပါဝင်ရပါ။ အင်္ဂလိပ် API Key အစစ်ကိုသာ ထည့်သွင်းပေးပါ။' };
-  }
-  const cleanKey = sanitizeApiKey(trimmed);
-  // Simulate or verify Manus API connection for video analysis
-  await new Promise((r) => setTimeout(r, 800));
-  if (cleanKey.length >= 10) {
-    return { ok: true, message: '✓ Manus API Key ချိတ်ဆက်မှု အောင်မြင်ပါသည်! (Custom Video VLM Analysis အဆင်သင့်ဖြစ်ပါပြီ)' };
-  }
-  return { ok: false, message: 'Manus API Key အရှည် မလုံလောက်ပါ။ ကျေးဇူးပြု၍ သေချာစစ်ဆေးပေးပါ။' };
 }
 
 export async function verifyAssemblyAiKey(apiKey: string): Promise<{ ok: boolean; message: string; details?: any }> {
@@ -142,7 +108,7 @@ export async function verifyAssemblyAiKey(apiKey: string): Promise<{ ok: boolean
         details: directData,
       };
     } else if (directRes.status === 401 || directRes.status === 403) {
-      return { ok: false, message: 'AssemblyAI API Key မမှန်ကන්ပါ (401 Invalid Key)။ ကျေးဇူးပြု၍ AssemblyAI Dashboard မှ Token အမှန်ကို ပြန်လည်စစ်ဆေးပေးပါ။' };
+      return { ok: false, message: 'AssemblyAI API Key မမှန်ကန်ပါ (401 Invalid Key)။ ကျေးဇူးပြု၍ AssemblyAI Dashboard မှ Token အမှန်ကို ပြန်လည်စစ်ဆေးပေးပါ။' };
     }
   } catch (directErr) {
     console.warn('Direct AssemblyAI fetch notice:', directErr);
@@ -166,7 +132,7 @@ export async function verifyAssemblyAiKey(apiKey: string): Promise<{ ok: boolean
         details: corsData,
       };
     } else if (corsRes.status === 401 || corsRes.status === 403) {
-      return { ok: false, message: 'AssemblyAI API Key မမှန်ကන්ပါ (401 Invalid Key)။ ကျေးဇူးပြု၍ AssemblyAI Dashboard မှ Token အမှန်ကို ပြန်လည်စစ်ဆေးပေးပါ။' };
+      return { ok: false, message: 'AssemblyAI API Key မမှန်ကန်ပါ (401 Invalid Key)။ ကျေးဇူးပြု၍ AssemblyAI Dashboard မှ Token အမှန်ကို ပြန်လည်စစ်ဆေးပေးပါ။' };
     }
   } catch (corsErr) {
     console.warn('CORS proxy AssemblyAI fetch notice:', corsErr);
@@ -182,148 +148,6 @@ export async function verifyAssemblyAiKey(apiKey: string): Promise<{ ok: boolean
 
   return {
     ok: false,
-    message: 'AssemblyAI API Key မမှန်ကන්ပါ သို့မဟုတ် ကွန်ရက် ချိတ်ဆက်မှု အမှားဖြစ်နေပါသည်။ AssemblyAI Dashboard မှ Token ကို စစ်ဆေးပေးပါ။',
+    message: 'AssemblyAI API Key မမှန်ကန်ပါ သို့မဟုတ် ကွန်ရက် ချိတ်ဆက်မှု အမှားဖြစ်နေပါသည်။ AssemblyAI Dashboard မှ Token ကို စစ်ဆေးပေးပါ။',
   };
-}
-
-export async function verifyHuggingFaceKey(apiKey: string): Promise<{ ok: boolean; message: string; username?: string }> {
-  const trimmed = (apiKey || '').trim();
-  if (!trimmed) {
-    return { ok: false, message: 'ကျေးဇူးပြု၍ Hugging Face API Key (Token) ထည့်သွင်းပေးပါ။' };
-  }
-
-  if (!isAsciiOnly(trimmed)) {
-    return {
-      ok: false,
-      message: '⚠️ Hugging Face API Token မမှန်ကန်ပါ (မြန်မာစာလုံးများ ပါဝင်နေပါသည်)။ ကျေးဇူးပြု၍ Hugging Face settings မှ အင်္ဂလိပ် Access Token (hf_...) ကိုသာ ထည့်သွင်းပေးပါ။',
-    };
-  }
-
-  const cleanKey = sanitizeApiKey(trimmed);
-  const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
-
-  // 1. Try server proxy endpoint (/api/huggingface/verify) - ONLY on localhost Express
-  if (isLocalhost) {
-    try {
-      const res = await fetch('/api/huggingface/verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: cleanKey }),
-      });
-
-      if (res.ok) {
-        const data = await res.json().catch(() => ({}));
-        if (data.ok) {
-          return {
-            ok: true,
-            message: data.message || '✓ Hugging Face ချိတ်ဆက်မှု အောင်မြင်ပါသည်! (Voice Clone အဆင်သင့်ဖြစ်ပါပြီ)',
-            username: data.username,
-          };
-        }
-      } else if (res.status === 401 || res.status === 403) {
-        return {
-          ok: false,
-          message: 'Hugging Face API Token မမှန်ကන්ပါ (401 Invalid Token)။ ကျေးဇူးပြု၍ https://huggingface.co/settings/tokens မှ hf_... Token အစစ်ကို ပြန်စစ်ပေးပါ။',
-        };
-      }
-    } catch (serverErr) {
-      console.warn('Server proxy verify notice:', serverErr);
-    }
-  }
-
-  // 2. Try direct browser fetch to Hugging Face WHOAMI endpoint
-  try {
-    const directRes = await fetch('https://huggingface.co/api/whoami-v2', {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${cleanKey}`,
-      },
-    });
-
-    if (directRes.ok) {
-      const directData = await directRes.json().catch(() => ({}));
-      const username = directData.name || directData.id || 'User';
-      return {
-        ok: true,
-        message: `✓ Hugging Face ချိတ်ဆက်မှု အောင်မြင်ပါသည်! (${username}) (Direct Connection Active)`,
-        username,
-      };
-    } else if (directRes.status === 401 || directRes.status === 403) {
-      return {
-        ok: false,
-        message: 'Hugging Face API Token မမှန်ကන්ပါ (401 Invalid Token)။ ကျေးဇူးပြု၍ https://huggingface.co/settings/tokens မှ hf_... Token အစစ်ကို ပြန်စစ်ပေးပါ။',
-      };
-    }
-  } catch (directErr) {
-    console.warn('Direct HF whoami fetch notice:', directErr);
-  }
-
-  // 3. Try CORS Proxy wrapper fallback
-  try {
-    const corsProxyUrl = `https://corsproxy.io/?${encodeURIComponent('https://huggingface.co/api/whoami-v2')}`;
-    const corsRes = await fetch(corsProxyUrl, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${cleanKey}`,
-      },
-    });
-
-    if (corsRes.ok) {
-      const corsData = await corsRes.json().catch(() => ({}));
-      const username = corsData.name || corsData.id || 'User';
-      return {
-        ok: true,
-        message: `✓ Hugging Face ချိတ်ဆက်မှု အောင်မြင်ပါသည်! (${username}) (CORS Proxy Active)`,
-        username,
-      };
-    } else if (corsRes.status === 401 || corsRes.status === 403) {
-      return {
-        ok: false,
-        message: 'Hugging Face API Token မမှန်ကන්ပါ (401 Invalid Token)။ ကျေးဇူးပြု၍ https://huggingface.co/settings/tokens မှ hf_... Token အစစ်ကို ပြန်စစ်ပေးပါ။',
-      };
-    }
-  } catch (corsErr) {
-    console.warn('CORS proxy HF whoami fetch notice:', corsErr);
-  }
-
-  // 4. Token Format Validation Fallback: Standard Hugging Face Access Token starts with hf_ and is >= 20 chars
-  if (cleanKey.startsWith('hf_') && cleanKey.length >= 20) {
-    return {
-      ok: true,
-      message: '✓ Hugging Face Token သိမ်းဆည်းပြီးပါပြီ! (Vercel/CORS Proxy Mode - Voice Clone အသုံးပြုနိုင်ပါပြီ)',
-    };
-  }
-
-  return {
-    ok: false,
-    message: 'Hugging Face API Token မမှန်ကන්ပါ သို့မဟုတ် ကွန်ရက် ချိတ်ဆက်မှု အမှားဖြစ်နေပါသည်။ Hugging Face Dashboard မှ Token (hf_...) ကို စစ်ဆေးပေးပါ။',
-  };
-}
-
-export async function verifyElevenLabsKey(apiKey?: string): Promise<{ ok: boolean; message: string; voiceCount?: number }> {
-  const cleanKey = sanitizeApiKey(apiKey || '');
-  if (apiKey && !isAsciiOnly(apiKey)) {
-    return { ok: false, message: '⚠️ ElevenLabs API Key တွင် မြန်မာစာလုံးများ မပါဝင်ရပါ။' };
-  }
-  try {
-    const res = await fetch('/api/elevenlabs/verify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey: cleanKey || undefined }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (res.ok && data.ok) {
-      return {
-        ok: true,
-        message: data.message || '✓ ElevenLabs Voice Clone API ချိတ်ဆက်မှု အောင်မြင်ပါသည်!',
-        voiceCount: data.voiceCount,
-      };
-    }
-    return {
-      ok: false,
-      message: data.error || data.message || `ElevenLabs Key စစ်ဆေးမှု မအောင်မြင်ပါ (HTTP ${res.status})`,
-    };
-  } catch (err: any) {
-    return { ok: false, message: `ElevenLabs ချိတ်ဆက်မှု အမှား: ${err.message || 'Network error'}` };
-  }
 }

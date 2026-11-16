@@ -120,10 +120,11 @@ export const REALITY_VOICE_CONFIGS: Record<string, CharacterVoiceProfile> = {
 export interface SynthesizeOptions {
   voice?: string;
   style?: string;
+  tone?: string;
   emotion?: string;
   speed?: number;
   rateOffset?: string;
-  pitchOffset?: string;
+  pitchOffset?: number | string;
 }
 
 export function formatMyanmarSpeechText(rawText: string): string {
@@ -153,12 +154,46 @@ function escapeXml(str: string): string {
     .replace(/'/g, '&apos;');
 }
 
+function parsePitchOffsetPct(pitchOffset?: number | string): number {
+  if (typeof pitchOffset === 'number' && isFinite(pitchOffset)) {
+    return Math.max(-15, Math.min(15, Math.round(pitchOffset)));
+  }
+  if (typeof pitchOffset === 'string' && pitchOffset.trim()) {
+    const cleaned = pitchOffset.replace(/hz|%/gi, '').trim();
+    const num = parseFloat(cleaned);
+    if (isFinite(num)) {
+      return Math.max(-15, Math.min(15, Math.round(num)));
+    }
+  }
+  return 0;
+}
+
+function getToneAdjustments(tone?: string): { pitchPct: number; ratePct: number; volPct: number } {
+  switch ((tone || 'natural').toLowerCase()) {
+    case 'warm':
+      return { pitchPct: -2, ratePct: -2, volPct: 2 };
+    case 'deep':
+      return { pitchPct: -8, ratePct: -4, volPct: 4 };
+    case 'bright':
+      return { pitchPct: 6, ratePct: 4, volPct: 3 };
+    case 'calm':
+      return { pitchPct: -4, ratePct: -6, volPct: -2 };
+    case 'dramatic':
+      return { pitchPct: -3, ratePct: 2, volPct: 6 };
+    case 'soft':
+      return { pitchPct: 2, ratePct: -5, volPct: -6 };
+    case 'natural':
+    default:
+      return { pitchPct: 0, ratePct: 0, volPct: 0 };
+  }
+}
+
 /**
  * Splits a Burmese line into AT MOST 2 cohesive halves so Edge WS runs in ONE single stream
  * with consistent vocal identity (zero mid-sentence voice switching or double-voice artifacts).
  */
 function splitIntoTwoBalancedClauses(text: string): string[] {
-  if (text.length < 30) return [text];
+  if (text.length < 36) return [text];
 
   // Prefer natural punctuation midpoint
   const punctMatches = [...text.matchAll(/[။.!?\n၊,]\s+/g)];
@@ -185,7 +220,7 @@ function splitIntoTwoBalancedClauses(text: string): string[] {
 
   // Otherwise try natural Burmese clause particles near midpoint
   const words = text.split(/\s+/);
-  if (words.length >= 4) {
+  if (words.length >= 5) {
     const midWord = Math.ceil(words.length / 2);
     return [words.slice(0, midWord).join(' '), words.slice(midWord).join(' ')];
   }
@@ -199,7 +234,8 @@ function computeNaturalSingleVoiceProsody(
   idx: number,
   total: number,
   basePitchPct: number,
-  baseRatePct: number
+  baseRatePct: number,
+  baseVolPct: number
 ): { pitchStr: string; rateStr: string; volStr: string } {
   const hint = (emotionHint || '').toLowerCase();
   const isLast = idx === total - 1;
@@ -229,60 +265,50 @@ function computeNaturalSingleVoiceProsody(
     /(?:မပေးဘူး|သေချာပေါက်|ယူရမယ်|မခံဘူး|လုပ်ရမယ်|ဝယ်လိုက်)[။.!?]?$/.test(clause);
   const isSad = /sad|sorrow|melanchol|grief|cry|pain|ဝမ်းနည်း|ငို|နာကျင်|မျက်ရည်/.test(combined);
 
-  // Subtle single-speaker inflection (keeps exact same voice identity, zero two-voice pitch splitting!)
+  // Subtle single-speaker inflection (strictly preserves the exact same speaker voice pitch without mid-sentence jumps)
   if (isQuestion) {
-    pitchDelta = isLast ? 14 : 2;
-    rateDelta = 3;
-    volDelta = 6;
+    pitchDelta = isLast ? 5 : 2;
+    rateDelta = 2;
+    volDelta = 3;
   } else if (isSurprise) {
-    pitchDelta = isLast ? 15 : 3;
-    rateDelta = 6;
-    volDelta = 10;
-  } else if (isHappiness) {
-    pitchDelta = isLast ? 8 : 5;
-    rateDelta = 5;
+    pitchDelta = isLast ? 6 : 3;
+    rateDelta = 4;
     volDelta = 6;
+  } else if (isHappiness) {
+    pitchDelta = 4;
+    rateDelta = 3;
+    volDelta = 4;
   } else if (isEmpathy) {
-    pitchDelta = isLast ? -3 : 1;
-    rateDelta = -3;
+    pitchDelta = -2;
+    rateDelta = -2;
     volDelta = 0;
   } else if (isExcitement) {
-    pitchDelta = isLast ? 12 : 6;
-    rateDelta = 8;
-    volDelta = 10;
+    pitchDelta = 5;
+    rateDelta = 5;
+    volDelta = 6;
   } else if (isMocking) {
-    pitchDelta = idx === 0 && total > 1 ? 10 : -4;
-    rateDelta = 4;
-    volDelta = 8;
+    pitchDelta = 2;
+    rateDelta = 3;
+    volDelta = 4;
   } else if (isDetermined) {
-    pitchDelta = -6;
-    rateDelta = 4;
-    volDelta = 12;
+    pitchDelta = -4;
+    rateDelta = 3;
+    volDelta = 8;
   } else if (isSad) {
-    pitchDelta = -6;
-    rateDelta = -8;
-    volDelta = -6;
+    pitchDelta = -4;
+    rateDelta = -5;
+    volDelta = -4;
   } else {
-    // Gentle conversational Burmese cadence within ONE consistent speaker's natural range
+    // Smooth single-speaker cadence with minimal natural shift
     const warmEnd = /(?:ပြီ|ပဲ|မယ်|နော်|!)[။.!?]?$/.test(clause);
-    if (total === 1) {
-      pitchDelta = warmEnd ? 6 : 2;
-      rateDelta = 3;
-      volDelta = 4;
-    } else if (idx === 0) {
-      pitchDelta = 1;
-      rateDelta = 2;
-      volDelta = 2;
-    } else {
-      pitchDelta = warmEnd ? 8 : -4;
-      rateDelta = 3;
-      volDelta = 4;
-    }
+    pitchDelta = total === 1 ? (warmEnd ? 2 : 0) : idx === 0 ? 1 : (warmEnd ? 2 : -1);
+    rateDelta = 2;
+    volDelta = 2;
   }
 
-  const finalPitch = Math.max(-20, Math.min(24, basePitchPct + pitchDelta));
+  const finalPitch = Math.max(-22, Math.min(22, basePitchPct + pitchDelta));
   const finalRate = Math.max(-25, Math.min(40, baseRatePct + rateDelta));
-  const finalVol = Math.max(-15, Math.min(20, volDelta));
+  const finalVol = Math.max(-15, Math.min(20, baseVolPct + volDelta));
 
   return {
     pitchStr: `${finalPitch >= 0 ? '+' : ''}${finalPitch}%`,
@@ -333,7 +359,7 @@ async function polishSingleVoiceStream(rawMp3: Buffer): Promise<Buffer> {
 
 /**
  * Synthesizes ONE cohesive, recognizable Myanmar voice stream (single speaker identity,
- * natural Burmese cadence, zero double-voice artifacts).
+ * natural Burmese cadence, explicit Voice Tone & pitch support, zero double-voice artifacts).
  */
 export async function synthesizeNeuralRealityMyanmar(
   text: string,
@@ -345,35 +371,38 @@ export async function synthesizeNeuralRealityMyanmar(
   const emotionHint = options.emotion || '';
 
   let pitchShiftPct = 0;
-  let rateShiftPct = 12;
+  let rateShiftPct = 10;
 
   switch (style) {
     case 'recap':
-      pitchShiftPct = 1;
-      rateShiftPct = 14;
-      break;
-    case 'broadcast':
-      pitchShiftPct = 3;
+      pitchShiftPct = 0;
       rateShiftPct = 12;
       break;
+    case 'broadcast':
+      pitchShiftPct = 2;
+      rateShiftPct = 10;
+      break;
     case 'energetic':
-      pitchShiftPct = 6;
-      rateShiftPct = 18;
+      pitchShiftPct = 4;
+      rateShiftPct = 16;
       break;
     case 'soothing':
-      pitchShiftPct = -3;
+      pitchShiftPct = -2;
       rateShiftPct = -4;
       break;
     case 'affectionate':
-      pitchShiftPct = 2;
+      pitchShiftPct = 1;
       rateShiftPct = 4;
       break;
     case 'conversational':
     default:
-      pitchShiftPct = 1;
-      rateShiftPct = 10;
+      pitchShiftPct = 0;
+      rateShiftPct = 8;
       break;
   }
+
+  const toneAdj = getToneAdjustments(options.tone);
+  const finePitchPct = parsePitchOffsetPct(options.pitchOffset);
 
   let userSpeedPercent = 0;
   if (typeof options.speed === 'number' && options.speed > 0) {
@@ -382,8 +411,9 @@ export async function synthesizeNeuralRealityMyanmar(
     userSpeedPercent = parseInt(options.rateOffset.replace('%', ''), 10) || 0;
   }
 
-  const totalBasePitchPct = profile.basePitchPct + pitchShiftPct;
-  const totalBaseRatePct = Math.min(42, Math.max(-30, profile.baseRatePct + rateShiftPct + userSpeedPercent));
+  const totalBasePitchPct = profile.basePitchPct + pitchShiftPct + toneAdj.pitchPct + finePitchPct;
+  const totalBaseRatePct = Math.min(42, Math.max(-30, profile.baseRatePct + rateShiftPct + toneAdj.ratePct + userSpeedPercent));
+  const totalBaseVolPct = toneAdj.volPct;
 
   const cleanSpeechText = formatMyanmarSpeechText(text);
   if (!cleanSpeechText || !/[က-႟a-zA-Z0-9]/.test(cleanSpeechText)) {
@@ -400,7 +430,8 @@ export async function synthesizeNeuralRealityMyanmar(
         idx,
         clauses.length,
         totalBasePitchPct,
-        totalBaseRatePct
+        totalBaseRatePct,
+        totalBaseVolPct
       );
       return `<prosody pitch="${p.pitchStr}" rate="${p.rateStr}" volume="${p.volStr}">${escapeXml(clause)}</prosody>`;
     })

@@ -28,7 +28,7 @@ import {
 import { ProjectState, TranscriptSegment, AlightKeyframe } from '../types';
 import { getMotionPresets } from '../utils/alightMotionRenderer';
 
-export type AlightSettingsTab = 'audio_ttx' | 'motion_fx' | 'subtitle_style' | 'logo_config' | 'timeline_edit';
+export type AlightSettingsTab = 'motion_fx' | 'subtitle_style' | 'logo_config' | 'timeline_edit';
 
 interface Step8AlightMotionSettingsProps {
   project: ProjectState;
@@ -67,7 +67,7 @@ export const Step8AlightMotionSettings: React.FC<Step8AlightMotionSettingsProps>
   activeTab: propActiveTab,
   onTabChange,
 }) => {
-  const [internalActiveTab, setInternalActiveTab] = useState<AlightSettingsTab>('audio_ttx');
+  const [internalActiveTab, setInternalActiveTab] = useState<AlightSettingsTab>('motion_fx');
   const activeTab = propActiveTab !== undefined ? propActiveTab : internalActiveTab;
   const setActiveTab = (tab: AlightSettingsTab) => {
     if (onTabChange) {
@@ -253,20 +253,8 @@ export const Step8AlightMotionSettings: React.FC<Step8AlightMotionSettingsProps>
           </span>
         </div>
 
-        {/* 5 Main Setting Tabs including Logo Watermark & Edit Timeline */}
-        <div className="grid grid-cols-5 gap-1 p-1 bg-zinc-900 border border-zinc-800 rounded-lg">
-          <button
-            type="button"
-            onClick={() => setActiveTab('audio_ttx')}
-            className={`py-1.5 px-1 rounded text-[11px] font-medium transition-all flex items-center justify-center gap-1 ${
-              activeTab === 'audio_ttx'
-                ? 'bg-emerald-600 text-white font-semibold shadow-sm'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            <MapPin className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
-            <span className="truncate">အသံ & TTX</span>
-          </button>
+        {/* 4 Main Setting Tabs */}
+        <div className="grid grid-cols-4 gap-1 p-1 bg-zinc-900 border border-zinc-800 rounded-lg">
 
           <button
             type="button"
@@ -322,240 +310,6 @@ export const Step8AlightMotionSettings: React.FC<Step8AlightMotionSettingsProps>
           </button>
         </div>
       </div>
-
-      {/* Tab 1: Audio & TTX Catch-Up & Placement Controls */}
-      {activeTab === 'audio_ttx' && (
-        <div className="p-4 space-y-4 overflow-y-auto max-h-[580px] text-xs">
-          {/* USER REQUESTED FEATURE: UNDO & REDO BUTTONS ABOVE TTX & VOICE CLONE AREA */}
-          <div className="flex items-center justify-between p-2.5 rounded-xl bg-zinc-950 border border-cyan-800/60 shadow-md">
-            <span className="text-zinc-300 font-semibold text-[11px] font-myanmar">
-              ↩️ Undo / ↪️ Redo (TTX & Voice Clone တည်းဖြတ်မှု):
-            </span>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={onUndo}
-                disabled={!canUndo}
-                className={`px-3 py-1 text-xs font-bold rounded-lg transition-all flex items-center gap-1 ${
-                  canUndo
-                    ? 'bg-cyan-500 hover:bg-cyan-400 text-zinc-950 cursor-pointer shadow-sm active:scale-95'
-                    : 'bg-zinc-800 text-zinc-600 cursor-not-allowed border border-zinc-700/50'
-                }`}
-                title="Undo last edit (တစ်ခုချင်း ပြန်သွားမည်)"
-              >
-                <Undo className="w-3.5 h-3.5" />
-                <span>Undo</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={onRedo}
-                disabled={!canRedo}
-                className={`px-3 py-1 text-xs font-bold rounded-lg transition-all flex items-center gap-1 ${
-                  canRedo
-                    ? 'bg-amber-500 hover:bg-amber-400 text-zinc-950 cursor-pointer shadow-sm active:scale-95'
-                    : 'bg-zinc-800 text-zinc-600 cursor-not-allowed border border-zinc-700/50'
-                }`}
-                title="Redo next edit (တစ်ခုချင်း ရှေ့သို့ပြန်သွားမည်)"
-              >
-                <Redo className="w-3.5 h-3.5" />
-                <span>Redo</span>
-              </button>
-            </div>
-          </div>
-
-          {/* USER REQUESTED FEATURE: VIDEO SPEED ONLY CONTROL (ADJUST VIDEO PLAYBACK SPEED WITHOUT AFFECTING VOICE AUDIO) */}
-
-          <div className="p-3.5 rounded-xl bg-gradient-to-r from-cyan-950/70 via-zinc-950 to-blue-950/50 border border-cyan-500/60 space-y-2.5 shadow-lg">
-            <div className="flex items-center justify-between">
-              <span className="font-bold text-xs text-cyan-300 flex items-center gap-1.5">
-                <FastForward className="w-4 h-4 text-cyan-400" />
-                <span>🎬 Video Speed Only (ဗီဒီယို အရှိန် သီးသန့် ချိန်ညှိရန်)</span>
-              </span>
-              <span className="text-[10px] px-2 py-0.5 rounded bg-cyan-900/80 border border-cyan-500/60 text-cyan-200 font-mono font-bold">
-                Video: {project.playbackRate.toFixed(2)}x
-              </span>
-            </div>
-
-            <p className="text-[11px] text-zinc-300 font-myanmar leading-relaxed">
-              ဗီဒီယို ရွေ့လျားမှုကို အနှေး (Slow Motion) သို့မဟုတ် အမြန် (Fast) ချိန်ညှိနိုင်ပါသည်။ <strong>အသံ (Voice Clone) အရှိန် မပြောင်းဘဲ သီးသန့် ပုံသေ ထိန်းသိမ်းပေးပါသည်။</strong>
-            </p>
-
-            <div className="space-y-1 pt-1">
-              <input
-                type="range"
-                min={0.25}
-                max={2.5}
-                step={0.05}
-                value={project.playbackRate}
-                onChange={(e) => {
-                  const val = parseFloat(e.target.value);
-                  setProject((prev) => ({ ...prev, playbackRate: val }));
-                }}
-                className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-cyan-400"
-              />
-              <div className="flex justify-between text-[10px] font-mono text-zinc-400">
-                <span>0.25x (Slow)</span>
-                <span>1.0x (Normal)</span>
-                <span>2.5x (Fast)</span>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-6 gap-1 pt-0.5">
-              {[0.5, 0.75, 0.9, 1.0, 1.25, 1.5].map((spd) => (
-                <button
-                  key={spd}
-                  type="button"
-                  onClick={() => setProject((prev) => ({ ...prev, playbackRate: spd }))}
-                  className={`py-1 rounded text-[11px] font-bold font-mono transition-all cursor-pointer ${
-                    project.playbackRate === spd
-                      ? 'bg-cyan-500 text-zinc-950 shadow-md ring-1 ring-cyan-300'
-                      : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
-                  }`}
-                >
-                  {spd}x
-                </button>
-              ))}
-            </div>
-
-            <div className="p-2 rounded bg-zinc-900/80 border border-zinc-800 text-[10px] text-emerald-300 font-myanmar flex items-center gap-1.5">
-              <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-              <span>အသံအရှိန် (Voice Audio Speed) သည် 1.0x မူရင်းအတိုင်း တည်ရှိနေပြီး ဗီဒီယို တစ်ခုတည်းသာ အနှေး/အမြန် ပြောင်းပါမည်။</span>
-            </div>
-          </div>
-
-          {/* Segment Selector Dropdown */}
-          <div className="space-y-1.5">
-            <label className="text-zinc-300 font-medium flex items-center justify-between">
-              <span>ရွေးချယ်ထားသော စာသား & အသံအပိုင်း:</span>
-              <span className="text-[11px] text-emerald-400 font-mono-num">
-                {currentSeg ? `${currentSeg.startTime.toFixed(2)}s - ${currentSeg.endTime.toFixed(2)}s` : 'None'}
-              </span>
-            </label>
-            <select
-              value={currentSeg?.id || ''}
-              onChange={(e) => {
-                setSelectedSegmentId(e.target.value);
-                const s = project.segments.find((seg) => seg.id === e.target.value);
-                if (s) onSeekTo(s.startTime);
-              }}
-              className="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded-lg text-xs font-myanmar text-zinc-100 focus:outline-none focus:border-emerald-500"
-            >
-              {project.segments.map((seg, idx) => (
-                <option key={seg.id} value={seg.id}>
-                  #{idx + 1} [{seg.startTime.toFixed(1)}s - {seg.endTime.toFixed(1)}s] {seg.voice} voice: {seg.myanmarTranslation?.slice(0, 32)}...
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {currentSeg ? (
-            <>
-              {/* PRIMARY CATCH-UP ACTION: Move to Playhead */}
-              <div className="p-3 rounded-xl bg-emerald-950/60 border border-emerald-500/60 space-y-2.5 shadow-md">
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold text-emerald-300 flex items-center gap-1.5">
-                    <MapPin className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Catch-Up: Video နေရာသို့ ကွက်တိရွှေ့မည်</span>
-                  </span>
-                  <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-900 border border-emerald-700 text-emerald-200 font-mono">
-                    Playhead: {project.currentTime.toFixed(2)}s
-                  </span>
-                </div>
-
-                <p className="text-[11px] text-zinc-300 font-myanmar leading-relaxed">
-                  ဗီဒီယိုကို လိုချင်သည့် အချိန်နေရာသို့ ရွှေ့ပြီး ဤခလုတ်ကို နှိပ်ပါက အသံနှင့် မြန်မာစာတန်းထိုး (TTX) သည် ထိုနေရာသို့ ချက်ချင်း ကွက်တိ ပြောင်းရွှေ့ရောက်ရှိပါမည်။
-                </p>
-
-                <button
-                  onClick={handleCatchUpToPlayhead}
-                  className="w-full py-2.5 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold rounded-lg transition-all flex items-center justify-center gap-2 shadow-md shadow-emerald-500/20"
-                >
-                  <MapPin className="w-4 h-4" />
-                  <span>Move Audio & TTX to {project.currentTime.toFixed(2)}s</span>
-                </button>
-              </div>
-
-              {/* Quick switch to Edit tab for Fine-Tune Nudge */}
-              <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between">
-                <span className="text-[11px] text-amber-300 font-myanmar">
-                  အသံနှင့် စာတန်းထိုး ရှေ့တိုး/နောက်ဆုတ် အသေးစိတ်ချိန်ရန် (Fine-Tune Nudge)
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('timeline_edit')}
-                  className="px-2.5 py-1 rounded-lg bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-zinc-950 font-bold text-[11px] transition-all flex items-center gap-1 shadow-sm cursor-pointer"
-                >
-                  <Sliders className="w-3 h-3" />
-                  <span>Edit 🎬 သို့ သွားမည်</span>
-                </button>
-              </div>
-
-              {/* EDIT BURMESE SUBTITLE TEXT */}
-              <div className="space-y-1.5">
-                <label className="text-zinc-300 font-medium">
-                  မြန်မာစာတန်းထိုး ပြင်ဆင်ရန် (Edit TTX Subtitle):
-                </label>
-                <textarea
-                  rows={2}
-                  value={currentSeg.myanmarTranslation}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setProject((prev) => ({
-                      ...prev,
-                      segments: prev.segments.map((s) =>
-                        s.id === currentSeg.id ? { ...s, myanmarTranslation: val } : s
-                      ),
-                    }));
-                  }}
-                  className="w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded-lg text-xs font-myanmar text-zinc-100 focus:outline-none focus:border-cyan-500"
-                />
-              </div>
-
-              {/* SUBTITLE SCREEN POSITION ON VIDEO */}
-              <div className="space-y-1.5">
-                <span className="text-zinc-300 font-medium">ဗီဒီယိုပေါ် စာတန်းထိုး တင်မည့်နေရာ (Screen Position):</span>
-                <div className="grid grid-cols-3 gap-2">
-                  {(['top', 'center', 'bottom'] as const).map((pos) => (
-                    <button
-                      key={pos}
-                      onClick={() =>
-                        setProject((prev) => ({
-                          ...prev,
-                          subtitleSettings: { ...prev.subtitleSettings, positionY: pos },
-                        }))
-                      }
-                      className={`py-1.5 rounded-lg border text-xs font-medium capitalize transition-all ${
-                        project.subtitleSettings.positionY === pos
-                          ? 'bg-cyan-950 border-cyan-400 text-cyan-200'
-                          : 'bg-zinc-950 border-zinc-800 text-zinc-400 hover:text-zinc-200'
-                      }`}
-                    >
-                      {pos === 'top' ? 'အပေါ် (Top)' : pos === 'center' ? 'အလယ် (Center)' : 'အောက် (Bottom)'}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* TEST PLAY BUTTON */}
-              <button
-                onClick={() => {
-                  onSeekTo(currentSeg.startTime);
-                  setProject((prev) => ({ ...prev, isPlaying: true }));
-                }}
-                className="w-full py-2 bg-zinc-800 hover:bg-zinc-700 text-cyan-300 font-medium rounded-lg transition-colors flex items-center justify-center gap-1.5 border border-zinc-700/60"
-              >
-                <Play className="w-3.5 h-3.5 fill-current" />
-                <span>Test Play Segment ({currentSeg.startTime.toFixed(1)}s - {currentSeg.endTime.toFixed(1)}s)</span>
-              </button>
-            </>
-          ) : (
-            <div className="p-4 text-center text-zinc-500 font-myanmar">
-              စာသားများ မရှိသေးပါ။ အဆင့် 4 တွင် Transcript ထုတ်ယူပေးပါ။
-            </div>
-          )}
-        </div>
-      )}
 
       {/* Tab 2: Alight Motion Keyframe FX Controls */}
       {activeTab === 'motion_fx' && (
@@ -633,7 +387,7 @@ export const Step8AlightMotionSettings: React.FC<Step8AlightMotionSettingsProps>
                   step={0.05}
                   value={currentKf.scale}
                   onChange={(e) => handleUpdateKeyframe(currentKf.id, { scale: parseFloat(e.target.value) })}
-                  className="w-full h-1.5 bg-zinc-800 rounded accent-amber-400"
+                  className="w-full h-2.5 bg-zinc-700 rounded-lg accent-amber-400 cursor-pointer shadow-inner"
                 />
                 <div className="flex gap-1.5 pt-0.5">
                   {[1.0, 1.2, 1.5, 2.0].map((s) => (
@@ -816,20 +570,20 @@ export const Step8AlightMotionSettings: React.FC<Step8AlightMotionSettingsProps>
           <div className="space-y-1.5">
             <div className="flex justify-between">
               <span className="text-zinc-300">စာလုံးအရွယ်အစား (Font Size):</span>
-              <span className="font-mono text-cyan-400 font-bold">{project.subtitleSettings.fontSize}px</span>
+              <span className="font-mono text-cyan-400 font-bold">{Math.max(12, project.subtitleSettings.fontSize)}px</span>
             </div>
             <input
               type="range"
-              min={1}
+              min={12}
               max={72}
               step={1}
-              value={project.subtitleSettings.fontSize}
+              value={Math.max(12, project.subtitleSettings.fontSize)}
               onChange={(e) =>
                 setProject((prev) => ({
                   ...prev,
                   subtitleSettings: {
                     ...prev.subtitleSettings,
-                    fontSize: parseInt(e.target.value) || 1,
+                    fontSize: Math.max(12, parseInt(e.target.value) || 28),
                   },
                 }))
               }
@@ -905,6 +659,77 @@ export const Step8AlightMotionSettings: React.FC<Step8AlightMotionSettingsProps>
                   {bg.label}
                 </button>
               ))}
+            </div>
+          </div>
+
+          {/* Subtitle Free Positioning (OffsetX / OffsetY) */}
+          <div className="space-y-3 pt-2 border-t border-zinc-800">
+            <div className="flex items-center justify-between">
+              <span className="text-zinc-300 font-semibold text-[11px]">
+                📍 Subtitle Free Position (စာတန်းထိုး လွတ်လပ်စွာ ရွှေ့ရန်):
+              </span>
+              <button
+                type="button"
+                onClick={() =>
+                  setProject((prev) => ({
+                    ...prev,
+                    subtitleSettings: {
+                      ...prev.subtitleSettings,
+                      offsetX: 0,
+                      offsetY: 0,
+                    },
+                  }))
+                }
+                className="px-2 py-0.5 text-[10px] bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded transition-colors"
+              >
+                Reset Position
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <div className="flex justify-between text-[10px]">
+                  <span className="text-zinc-400">Position X (ဘယ်/ညာ):</span>
+                  <span className="font-mono text-cyan-400">{project.subtitleSettings.offsetX || 0}px</span>
+                </div>
+                <input
+                  type="range"
+                  min={-150}
+                  max={150}
+                  step={2}
+                  value={project.subtitleSettings.offsetX || 0}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value, 10);
+                    setProject((prev) => ({
+                      ...prev,
+                      subtitleSettings: { ...prev.subtitleSettings, offsetX: val },
+                    }));
+                  }}
+                  className="w-full h-1 bg-zinc-800 rounded accent-cyan-400"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <div className="flex justify-between text-[10px]">
+                  <span className="text-zinc-400">Position Y (အပေါ်/အောက်):</span>
+                  <span className="font-mono text-cyan-400">{project.subtitleSettings.offsetY || 0}px</span>
+                </div>
+                <input
+                  type="range"
+                  min={-150}
+                  max={150}
+                  step={2}
+                  value={project.subtitleSettings.offsetY || 0}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value, 10);
+                    setProject((prev) => ({
+                      ...prev,
+                      subtitleSettings: { ...prev.subtitleSettings, offsetY: val },
+                    }));
+                  }}
+                  className="w-full h-1 bg-zinc-800 rounded accent-cyan-400"
+                />
+              </div>
             </div>
           </div>
 

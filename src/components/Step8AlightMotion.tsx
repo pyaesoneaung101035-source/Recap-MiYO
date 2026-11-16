@@ -36,7 +36,7 @@ export const Step8AlightMotion: React.FC<Step8AlightMotionProps> = ({
     project.keyframes[0]?.id || null
   );
   const [isCatchUpModeActive, setIsCatchUpModeActive] = useState<boolean>(false);
-  const [activeSettingsTab, setActiveSettingsTab] = useState<AlightSettingsTab>('audio_ttx');
+  const [activeSettingsTab, setActiveSettingsTab] = useState<AlightSettingsTab>('motion_fx');
 
   // Undo / Redo History Stack
   const [historyStack, setHistoryStack] = useState<TranscriptSegment[][]>([]);
@@ -201,7 +201,7 @@ export const Step8AlightMotion: React.FC<Step8AlightMotionProps> = ({
                 </div>
                 <button
                   type="button"
-                  onClick={() => setActiveSettingsTab('audio_ttx')}
+                  onClick={() => setActiveSettingsTab('motion_fx')}
                   className="text-[11px] text-zinc-400 hover:text-white px-2.5 py-1 rounded-lg hover:bg-zinc-800 transition-colors flex items-center gap-1 cursor-pointer"
                   title="Close Edit Panel"
                 >

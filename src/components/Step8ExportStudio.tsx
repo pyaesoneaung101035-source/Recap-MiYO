@@ -280,8 +280,12 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
 
     const activeSeg = project.segments.find((s) => {
       const rate = clampGentleNarratorRate(s.atempoRate || s.playbackRate || project.voicePlaybackRate || 1.0);
-      const segEnd = Math.max(s.endTime, s.startTime + (s.audioDuration ? s.audioDuration / rate : 0));
-      return currentTime >= s.startTime && currentTime <= segEnd;
+      const subStart = s.subtitleStartTime ?? s.startTime;
+      const baseSubEnd = s.subtitleEndTime ?? s.endTime;
+      const segEnd = s.subtitleEndTime !== undefined
+        ? baseSubEnd
+        : Math.max(baseSubEnd, subStart + (s.audioDuration ? s.audioDuration / rate : 0));
+      return currentTime >= subStart && currentTime <= segEnd;
     });
 
     if (activeSeg) {
@@ -445,10 +449,19 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
       const dest = audioCtx.createMediaStreamDestination();
 
       // Original Video Audio Handling:
-      // If Original Video Sound is muted OR Vocal-Removed BGM Only mode is active, force original speech track to gain = 0
+      // Mute original video dialogue automatically whenever Cloned Voices are active (and unmuted),
+      // OR Original Mute is on, OR Vocal-Removed BGM Only mode is active, so TWO VOICES NEVER overlap in exported MP4!
       const useExtractedBgm = Boolean(project.useExtractedBgm && project.extractedBgmUrl);
-      const isOriginalMuted = project.isMuted || useExtractedBgm || (project.volume !== undefined && project.volume === 0);
+      const hasClonedVoices = project.segments.some((s) => Boolean(s.audioUrl));
+      const isVoiceMuted = project.isVoiceMuted ?? false;
+      const isOriginalMuted = Boolean(
+        project.isMuted ||
+        useExtractedBgm ||
+        (hasClonedVoices && !isVoiceMuted) ||
+        (project.volume !== undefined && project.volume === 0)
+      );
       const effectiveVideoGain = isOriginalMuted ? 0 : (project.volume ?? 1.0);
+      renderVideo.muted = isOriginalMuted;
 
       try {
         const videoSourceNode = audioCtx.createMediaElementSource(renderVideo);
@@ -486,7 +499,6 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
       }
 
       // Voice Clone Audio Handling:
-      const isVoiceMuted = project.isVoiceMuted ?? false;
       const effectiveVoiceGain = isVoiceMuted ? 0 : (project.voiceVolume ?? 1.0);
 
       const audioSources: {
@@ -940,13 +952,13 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
                   <p className="text-[10px] text-amber-300 font-myanmar leading-tight flex items-center gap-1 bg-amber-500/10 p-1.5 rounded border border-amber-500/20">
                     <span>✓ BGM Only (Vocals Removed) Mode ဖွင့်ထားသဖြင့် မူရင်းလူအသံများကို အလိုအလျောက် Mute လုပ်ထားပါသည်။</span>
                   </p>
-                ) : project.isMuted ? (
-                  <p className="text-[10px] text-amber-300 font-myanmar leading-tight flex items-center gap-1 bg-amber-500/10 p-1.5 rounded border border-amber-500/20">
-                    <span>✓ မူရင်းအသံကို Mute ထားပါသည်။ Export ဗီဒီယိုတွင် မူရင်းအသံလုံးဝ မပါဘဲ Voice Clone အသံဖြင့်သာ ထွက်ရှိပါမည်။</span>
+                ) : project.isMuted || (project.segments.some((s) => Boolean(s.audioUrl)) && !project.isVoiceMuted) ? (
+                  <p className="text-[10px] text-emerald-300 font-myanmar leading-tight flex items-center gap-1 bg-emerald-500/10 p-1.5 rounded border border-emerald-500/20">
+                    <span>✓ Voice Clone ဖွင့်ထားသဖြင့် အသံ ၂ သံမထပ်စေရန် မူရင်းဗီဒီယိုအသံကို အလိုအလျောက် Mute ထားပါသည် (တစ်သံတည်းသာ ထွက်ပါမည်)။</span>
                   </p>
                 ) : (
                   <p className="text-[10px] text-zinc-400 font-myanmar leading-tight">
-                    မူရင်းအသံနှင့် Voice Clone အသံ ၂ မျိုးစလုံးကို ရောနှော၍ Export ပြုလုပ်မည်ဖြစ်ပါသည်။
+                    မူရင်းဗီဒီယိုအသံဖြင့် Export ပြုလုပ်မည်ဖြစ်ပါသည်။
                   </p>
                 )}
               </div>

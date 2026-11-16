@@ -21,10 +21,18 @@ import {
   X,
   Volume2,
   Scissors,
+  Mic,
+  BookOpen,
+  Languages,
+  Layers,
+  Upload,
+  ScanText,
 } from 'lucide-react';
-import { ProjectState, TranscriptSegment, AiMode } from '../types';
+import { ProjectState, TranscriptSegment, Step3ScriptStyle, VoiceOption } from '../types';
 import {
   generateTimestampedTranscript,
+  generateSceneRecapNarration,
+  generateShortBridgeLineForSlot,
   exportToDubbingPlanJSON,
   generateBurmeseDubbingSRT,
   shortenBurmeseTextForDuration,
@@ -35,7 +43,17 @@ import {
 import { transcribeVideoWithAssemblyAi } from '../utils/assemblyAi';
 import { loadApiKeys } from '../utils/apiKeys';
 import { downloadFile } from '../utils/alightMotionRenderer';
-import { getMinuteBlocks, formatMinSec, realignSegmentsByMinuteBlocks } from '../utils/timingSync';
+import {
+  getMinuteBlocks,
+  getRecapSlots,
+  RECAP_SLOT_SECONDS,
+  formatMinSec,
+  realignSegmentsByMinuteBlocks,
+  MINUTE_BLOCK_SECONDS,
+} from '../utils/timingSync';
+import { registerPreviewAudio } from '../utils/audioPreviewManager';
+import { inspectVideoFile } from '../utils/audioExtractor';
+import { VOICE_PROFILES } from '../utils/edgeTtsClient';
 
 interface AiRecapStudioProps {
   project: ProjectState;
@@ -43,6 +61,7 @@ interface AiRecapStudioProps {
   onSeekTo: (time: number) => void;
   onPrevStep?: () => void;
   onNextStep?: () => void;
+  onJumpToStep?: (step: number) => void;
   stepNumber?: number;
 }
 
@@ -52,6 +71,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
   onSeekTo,
   onPrevStep,
   onNextStep,
+  onJumpToStep,
   stepNumber = 3,
 }) => {
   const [isGenerating, setIsGenerating] = useState(false);
@@ -61,14 +81,67 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [editingSegId, setEditingSegId] = useState<string | null>(null);
   const [shorteningSegId, setShorteningSegId] = useState<string | null>(null);
+  const [bridgingSegId, setBridgingSegId] = useState<string | null>(null);
   const [isPolishing, setIsPolishing] = useState(false);
   const [selectedPartFilter, setSelectedPartFilter] = useState<number | 'all'>('all');
-  const [selectedEngine, setSelectedEngine] = useState<'assemblyai' | 'gemini' | 'faster_whisper'>('gemini');
+  const narrationMode = project.narrationMode || 'scene_recap_30s';
+  const scriptStyle: Step3ScriptStyle = project.step3ScriptStyle || 'narrator';
+  const slotSeconds = project.recapSlotSeconds || RECAP_SLOT_SECONDS;
+  const [selectedEngine, setSelectedEngine] = useState<'assemblyai' | 'videosubfinder_paddleocr' | 'faster_whisper' | 'gemini'>('videosubfinder_paddleocr');
   const [hasAssemblyAiKey, setHasAssemblyAiKey] = useState(false);
   const [selectedGeminiModel, setSelectedGeminiModel] = useState<string>('gemini-3.1-flash-lite');
   const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
   const [showDubbingPlanModal, setShowDubbingPlanModal] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
+  const [generateStage, setGenerateStage] = useState<1 | 2 | 3 | 4 | 5 | null>(null);
+
+  // Auto-inspect uploaded custom video when entering Step 3 if metadata missing
+  useEffect(() => {
+    const source = project.videoFile || project.videoUrl;
+    if (!source || project.videoInspection) return;
+    let cancelled = false;
+    inspectVideoFile(source, project.videoName || 'custom_video.mp4')
+      .then((info) => {
+        if (cancelled) return;
+        setProject((prev) => ({
+          ...prev,
+          videoDuration: prev.videoDuration > 1 ? prev.videoDuration : info.duration,
+          videoInspection: info,
+        }));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [project.videoFile, project.videoUrl, project.videoInspection, project.videoName, setProject]);
+
+  const handleManualRealignMinuteBlocks = () => {
+    if (!project.segments.length) return;
+    const aligned = realignSegmentsByMinuteBlocks(
+      project.segments,
+      project.videoDuration || project.videoInspection?.duration || 360,
+      {
+        enforceSingleVoice: project.lockedVoice || 'Thiha',
+        enforceSingleSpeakerLabel: true,
+      }
+    );
+    setProject((prev) => ({
+      ...prev,
+      narrationMode: 'dialogue_dub',
+      segments: aligned,
+    }));
+    setStatusMessage(
+      `✓ ၃၀ စက္ကန့်စီ (0:00-0:30, 0:30-1:00...) အပိုင်းအလိုက် (${getMinuteBlocks(project.videoDuration || 360).length} Parts) အသံ + Subtitle အချိန်ကွက် ပြန်ညှိပြီးပါပြီ (No Drift)!`
+    );
+  };
+
+  const selectStep3Style = (style: Step3ScriptStyle) => {
+    setSelectedPartFilter('all');
+    setProject((prev) => ({
+      ...prev,
+      step3ScriptStyle: style,
+    }));
+  };
 
   const handlePolishNarrationStyle = async () => {
     if (!project.segments.length || isPolishing || isGenerating) return;
@@ -135,6 +208,63 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
     downloadFile(srtStr, `${project.videoName || 'video'}_burmese_subtitles.srt`, 'text/plain;charset=utf-8');
   };
 
+  const parseSRTTimeToSeconds = (timeStr: string): number => {
+    try {
+      const clean = timeStr.replace(',', '.');
+      const parts = clean.split(':');
+      if (parts.length === 3) {
+        const hrs = parseFloat(parts[0]);
+        const mins = parseFloat(parts[1]);
+        const secs = parseFloat(parts[2]);
+        return hrs * 3600 + mins * 60 + secs;
+      }
+      return parseFloat(clean) || 0;
+    } catch {
+      return 0;
+    }
+  };
+
+  const handleImportDubbingPlanJson = () => {
+    const inputJson = prompt('တရုတ်/အင်္ဂလိပ်-မြန်မာ Dubbing Plan JSON စာသားကို ဤနေရာတွင် Paste လုပ်ပါ:');
+    if (!inputJson || !inputJson.trim()) return;
+    try {
+      const parsed = JSON.parse(inputJson);
+      if (!Array.isArray(parsed)) {
+        throw new Error('Invalid JSON array format');
+      }
+      const importedSegments: TranscriptSegment[] = parsed.map((item: any, idx: number) => {
+        const startSec = parseSRTTimeToSeconds(item.start_timestamp || '00:00:00,000');
+        const endSec = parseSRTTimeToSeconds(item.end_timestamp || '00:00:05,000');
+        return {
+          id: String(item.segment_index || idx + 1),
+          startTime: startSec,
+          endTime: endSec,
+          duration: item.target_duration_seconds || parseFloat((endSec - startSec).toFixed(2)),
+          speaker: item.speaker_identity || 'Translator (ဘာသာပြန်)',
+          originalText: item.original_chinese_dialogue || '',
+          myanmarTranslation: item.natural_conversational_burmese || '',
+          subtitleText: item.burmese_subtitle_text || item.natural_conversational_burmese || '',
+          emotion: item.speaking_emotion_and_delivery || 'Natural conversational',
+          isOnScreen: item.is_speaker_on_screen !== false,
+          lipSyncNote: item.lip_sync_note || 'Imported from translation plan',
+          scriptStyle: 'translation' as const,
+          voice: project.lockedVoice || 'Thiha',
+          tone: project.voiceTone || 'natural',
+          pitch: project.voicePitch ?? 0,
+        };
+      });
+      setProject((prev) => ({
+        ...prev,
+        segments: importedSegments,
+        step3ScriptStyle: 'translation',
+      }));
+      setCopyFeedback('Dubbing Plan JSON အောင်မြင်စွာ Import လုပ်ပြီးပါပြီ!');
+      setTimeout(() => setCopyFeedback(null), 3500);
+    } catch (err: any) {
+      alert('JSON format မမှန်ကန်ပါ။ ကျေးဇူးပြု၍ JSON array အမှန်ကို ထည့်သွင်းပါ။ (' + err.message + ')');
+    }
+  };
+
   // Track live elapsed seconds while Step 3 pipeline is running
   useEffect(() => {
     if (!isGenerating) {
@@ -148,17 +278,57 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
     return () => clearInterval(timer);
   }, [isGenerating]);
 
+  const handleGenerateShortBridge = async (seg: TranscriptSegment) => {
+    if (bridgingSegId) return;
+    const mainText = (seg.mainNarration || seg.myanmarTranslation || '').trim();
+    if (!mainText) return;
+
+    const slotDur = Math.max(8, seg.endTime - seg.startTime);
+    const estMainSec = countBurmeseSyllables(mainText) / 3.5;
+    const remainingSec = Math.max(4.0, slotDur - estMainSec - (seg.pauseBetweenParts ?? 0.18));
+
+    setBridgingSegId(seg.id);
+    setStatusMessage(`✨ Slot (${formatMinSec(seg.startTime)}–${formatMinSec(seg.endTime)}) အတွက် 0.18s Pause နောက်ဆက်တွဲ ဆက်စကားတို ဖန်တီးနေသည်...`);
+    try {
+      const bridge = await generateShortBridgeLineForSlot(
+        mainText,
+        remainingSec,
+        seg.originalText || seg.sceneTitle || '',
+        seg.bridgeNarration || ''
+      );
+      const combined = bridge ? `${mainText} ${bridge}`.trim() : mainText;
+      handleUpdateSegment(seg.id, {
+        slotMode: 'scene_recap_30s',
+        mainNarration: mainText,
+        bridgeNarration: bridge,
+        pauseBetweenParts: seg.pauseBetweenParts ?? 0.18,
+        myanmarTranslation: combined,
+        subtitleText: combined,
+        syllableCount: countBurmeseSyllables(combined),
+        audioUrl: undefined,
+        audioDuration: undefined,
+      });
+      setStatusMessage('✓ မြင်ကွင်းနှင့်ကိုက်ညီသော ဆက်စကားတို (0.18s Pause) ထပ်ဖြည့်ပြီးပါပြီ!');
+    } catch (err) {
+      console.warn('Bridge generation error:', err);
+    } finally {
+      setBridgingSegId(null);
+    }
+  };
+
   useEffect(() => {
     const keys = loadApiKeys();
     setHasAssemblyAiKey(Boolean(keys.assemblyAiKey));
-    if (keys.assemblyAiKey) {
+    if (keys.assemblyAiKey && narrationMode === 'dialogue_dub') {
       setSelectedEngine('assemblyai');
     } else {
       setSelectedEngine('gemini');
     }
-  }, []);
+  }, [narrationMode]);
 
-  const videoParts = getMinuteBlocks(project.videoDuration || 60);
+  const videoParts = narrationMode === 'scene_recap_30s'
+    ? getRecapSlots(project.videoDuration || 360, slotSeconds)
+    : getMinuteBlocks(project.videoDuration || 60);
   const totalParts = videoParts.length;
 
   const displayedSegments = project.segments.filter((s) => {
@@ -171,33 +341,130 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
       : s.startTime >= part.startSec && s.startTime < part.endSec;
   });
 
-  const handleGenerateScript = async () => {
-    if (!project.videoFile && !project.videoUrl) {
+  const handleGenerateScript = async (
+    overrideStyle?: Step3ScriptStyle,
+    overrideTimingMode?: 'scene_recap_30s' | 'dialogue_dub'
+  ) => {
+    const activeStyle: Step3ScriptStyle = overrideStyle || scriptStyle;
+    const activeTimingMode: 'scene_recap_30s' | 'dialogue_dub' =
+      overrideTimingMode || narrationMode;
+
+    if (overrideStyle) {
+      setSelectedPartFilter('all');
+      setProject((prev) => ({
+        ...prev,
+        step3ScriptStyle: activeStyle,
+        narrationMode: activeTimingMode,
+      }));
+    }
+
+    const videoSource = project.videoFile || project.videoUrl;
+    if (!videoSource) {
       setErrorMessage('ကျေးဇူးပြု၍ စာသားထုတ်ယူလိုသော Custom Video ကို အရင် တင်ပေးပါ။');
       return;
     }
 
-    if (selectedEngine === 'assemblyai' && !hasAssemblyAiKey) {
+    if (activeTimingMode === 'dialogue_dub' && selectedEngine === 'assemblyai' && !hasAssemblyAiKey && activeStyle !== 'translation') {
       const msg = 'AssemblyAI API Key မတွေ့ရှိပါ။ ကျေးဇူးပြု၍ Step 1 တွင် AssemblyAI Key (32-digit Token) ကို ထည့်သွင်းပေးပါ။';
       setErrorMessage(msg);
       return;
     }
 
+    const modeBadgeLabel =
+      activeStyle === 'narrator'
+        ? '1. Narrator (တကယ့် စကားပြောအသံထွက် Voiceover)'
+        : activeStyle === 'story'
+          ? '2. Story (Story ပြောပြသလို ဇာတ်လမ်းစာသား)'
+          : '3. Translation (Video Subtitle + Voice ဘာသာပြန်)';
+
     setIsGenerating(true);
-    setProgressPercent(5);
-    setStatusMessage('အသံလှိုင်းနှင့် မြင်ကွင်းများ စစ်ဆေးနေပါသည်...');
+    setGenerateStage(1);
+    setProgressPercent(4);
+    setStatusMessage('၁. မူရင်းဗီဒီယို ကြာချိန်၊ ရုပ်ထွက်နှင့် အသံဖိုင်ကို စစ်ဆေးနေပါသည်...');
     setErrorMessage(null);
 
+    const lockedVoice = project.lockedVoice || 'Thiha';
+    const narratorTone = project.voiceTone || 'natural';
+    const narratorPitch = project.voicePitch ?? 0;
+
     try {
+      // STAGE 1: Inspect original video (duration, resolution, audio track)
+      const inspection = await inspectVideoFile(
+        videoSource,
+        project.videoName || 'custom_video.mp4'
+      );
+      const totalDuration = Math.max(
+        inspection.duration || project.videoDuration || MINUTE_BLOCK_SECONDS,
+        1
+      );
+      setProject((prev) => ({
+        ...prev,
+        videoDuration: totalDuration,
+        videoInspection: inspection,
+      }));
+
+      setProgressPercent(12);
+      setStatusMessage(
+        `၁. Video စစ်ပြီး (${inspection.resolution} · ${formatMinSec(totalDuration)} · Audio ${inspection.hasAudio ? 'OK ✓' : 'Visual'}) — စကားပြောစာသား ထုတ်နေပါသည်...`
+      );
+
+      if (activeTimingMode === 'scene_recap_30s') {
+        const recapSlots = await generateSceneRecapNarration(
+          project.videoName || 'Uploaded Video',
+          totalDuration,
+          customPrompt,
+          project.videoFile,
+          project.videoUrl,
+          (msg, pct = 20) => {
+            const st: 1 | 2 | 3 = pct < 35 ? 1 : pct < 75 ? 2 : 3;
+            setGenerateStage(st);
+            setStatusMessage(msg);
+            setProgressPercent(Math.min(92, Math.round(12 + (pct / 100) * 80)));
+          },
+          selectedGeminiModel,
+          slotSeconds,
+          activeStyle
+        );
+
+        setGenerateStage(3);
+        setProgressPercent(96);
+        const scriptSlots: TranscriptSegment[] = recapSlots.map((s) => ({
+          ...s,
+          voice: lockedVoice,
+          speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
+          scriptStyle: activeStyle,
+          tone: narratorTone,
+          pitch: narratorPitch,
+          audioUrl: undefined,
+          audioDuration: undefined,
+        }));
+
+        setProgressPercent(100);
+        setProject((prev) => ({
+          ...prev,
+          narrationMode: 'scene_recap_30s',
+          step3ScriptStyle: activeStyle,
+          lockedVoice,
+          segments: scriptSlots,
+        }));
+
+        setStatusMessage(
+          `🎉 [${modeBadgeLabel}] အဆင့် (၁→၃) ပြီးစီးပါပြီ — Slot ${scriptSlots.length} ပိုင်း Narrator စာသား ထုတ်ယူပြီးပါပြီ! အဆင့် ၄ (Generate All Voices) တွင် အသံ + 0:30 Sync ဆက်လုပ်နိုင်ပါသည်။`
+        );
+        return;
+      }
+
+      // STAGE 1 (STT) + STAGE 2 (Timestamps, Sequential Translation, Scene Tracking) + STAGE 3 (Single-Narrator Script)
       let rawSegments: TranscriptSegment[] = [];
 
-      if (selectedEngine === 'assemblyai') {
+      if (selectedEngine === 'assemblyai' && activeStyle !== 'translation') {
         try {
           if (!hasAssemblyAiKey) {
             throw new Error('AssemblyAI Key မတွေ့ရှိပါ။ ကျေးဇူးပြု၍ Step 1 တွင် AssemblyAI Key (32-digit Token) ထည့်သွင်းပေးပါ။');
           }
-          setStatusMessage('🎙️ [Assembly Generator] အသံလှိုင်း စစ်ဆေးနေပါသည်...');
-          setProgressPercent(25);
+          setGenerateStage(2);
+          setStatusMessage('၂. [Assembly Generator] စကားပြောစာသား + အချိန်မှတ်တမ်း ဘာသာပြန်နေပါသည်...');
+          setProgressPercent(45);
           rawSegments = await transcribeVideoWithAssemblyAi(
             project.videoFile || project.videoUrl!,
             {
@@ -209,76 +476,112 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
           const errMsg = `AssemblyAI Error: ${assemblyErr.message || 'AssemblyAI ချိတ်ဆက်မှု အဆင်မပြေပါ'}။`;
           setErrorMessage(errMsg);
           setIsGenerating(false);
+          setGenerateStage(null);
           return;
         }
       } else {
         rawSegments = await generateTimestampedTranscript(
           project.videoName || 'Uploaded Video',
-          project.videoDuration || 30,
-          customPrompt,
+          totalDuration,
+          selectedEngine === 'videosubfinder_paddleocr'
+            ? `${customPrompt ? customPrompt + ' | ' : ''}VideoSubFinder + PaddleOCR Hardsub Extraction: Perform OCR-level text detection on all on-screen burnt-in subtitles, captions, and text overlays in the video frames. Extract the exact text shown on screen with frame timestamps (start/end), transcribe original subtitle text into originalText, and translate into Burmese in text.`
+            : `${customPrompt ? customPrompt + ' | ' : ''}Single Burmese Narrator storytelling retelling across chronological 0:30 parts (no multi-character voice splitting).`,
           project.videoFile,
           project.videoUrl,
-          (msg, pct) => {
-            setStatusMessage(msg);
-            if (typeof pct === 'number') {
-              setProgressPercent(pct);
+          (msg, pct = 20) => {
+            if (activeStyle === 'translation') {
+              const st = pct < 50 ? 1 : 2;
+              setGenerateStage(st);
+            } else {
+              const st = pct < 20 ? 1 : pct < 45 ? 2 : pct < 70 ? 3 : pct < 90 ? 4 : 5;
+              setGenerateStage(st);
             }
+            setStatusMessage(msg);
+            setProgressPercent(Math.min(92, Math.round(12 + (pct / 100) * 80)));
           },
-          selectedGeminiModel
+          selectedGeminiModel,
+          activeStyle,
+          selectedEngine
         );
       }
 
+      setGenerateStage(activeStyle === 'translation' ? 2 : 5);
       setProgressPercent(96);
       const sorted = [...rawSegments].sort((a, b) => a.startTime - b.startTime);
-      const segments = sorted.map((s) => {
+      const scriptSegments: TranscriptSegment[] = sorted.map((s, idx) => {
         const start = Math.max(0, s.startTime);
         const end = Math.max(start + 0.5, s.endTime);
         const dur = parseFloat((end - start).toFixed(2));
+        const blockPart = Math.floor(start / MINUTE_BLOCK_SECONDS) + 1;
         return {
           ...s,
           startTime: parseFloat(start.toFixed(2)),
           endTime: parseFloat(end.toFixed(2)),
+          originalStartTime: s.originalStartTime ?? parseFloat(start.toFixed(2)),
+          originalEndTime: s.originalEndTime ?? parseFloat(end.toFixed(2)),
           duration: s.duration || dur,
+          slotMode: 'dialogue_dub' as const,
+          scriptStyle: activeStyle,
+          voice: lockedVoice,
+          tone: narratorTone,
+          pitch: narratorPitch,
+          speaker: activeStyle !== 'translation' ? 'Narrator (ဇာတ်ကြောင်းပြောသူ)' : (s.speaker || 'Narrator (ဇာတ်ကြောင်းပြောသူ)'),
+          minutePartIndex: blockPart,
+          sceneShotId: s.sceneShotId || `Part ${blockPart} · Shot ${idx + 1}`,
+          syllableCount: countBurmeseSyllables(s.myanmarTranslation || ''),
+          audioUrl: undefined,
+          audioDuration: undefined,
         };
       });
-
-      const alignedSegments = realignSegmentsByMinuteBlocks(
-        segments.map((seg) => ({
-          ...seg,
-          syllableCount: countBurmeseSyllables(seg.myanmarTranslation || ''),
-        })),
-        project.videoDuration || 60,
-        { enforceSingleVoice: 'Thiha', enforceSingleSpeakerLabel: true }
-      );
 
       setProgressPercent(100);
       setProject((prev) => ({
         ...prev,
-        segments: alignedSegments,
+        narrationMode: 'dialogue_dub',
+        step3ScriptStyle: activeStyle,
+        lockedVoice,
+        segments: scriptSegments,
       }));
 
-      setStatusMessage(`🎉 [အောင်မြင်ပါသည်] ၁ မိနစ်စာ အပိုင်း (${totalParts} Parts) အလိုက် မြင်ကွင်းနှင့် စကားပြော တိုက်ဆိုင်စစ်ဆေးပြီး Single-Narrator ဇာတ်ကြောင်းပြော စာသား (${alignedSegments.length} Segments) ထုတ်ယူပြီးပါပြီ။ အဆင့် ၄ သို့သွား၍ Narrator အသံသွင်းနိုင်ပါသည်။`);
+      const minuteBlocks = getMinuteBlocks(totalDuration);
+      setStatusMessage(
+        `🎉 [${modeBadgeLabel}] အဆင့် (၁→၃) ပြီးစီးပါပြီ! 0:30 Parts ${minuteBlocks.length} ပိုင်း (${scriptSegments.length} Segments) Narrator စာသား ထုတ်ယူပြီးပါပြီ — အဆင့် ၄ (Generate All Voices) တွင် အသံ + 0:30 Sync ဆက်လုပ်ပါ။`
+      );
     } catch (err: any) {
       console.error('Failed to generate auto dubbing:', err);
       setErrorMessage(err.message || 'AI စာသားထုတ်လုပ်မှု မအောင်မြင်ပါ။ API Key ကို စစ်ဆေးပါ။');
     } finally {
       setProgressPercent(100);
       setIsGenerating(false);
+      setGenerateStage(null);
     }
   };
 
   const handleAddSegment = () => {
     const lastSeg = project.segments[project.segments.length - 1];
-    const newStart = lastSeg ? lastSeg.endTime + 0.2 : 0;
-    const newEnd = newStart + 4;
+    const newStart = lastSeg ? lastSeg.endTime : 0;
+    const newEnd = narrationMode === 'scene_recap_30s' ? newStart + slotSeconds : newStart + 4;
 
     const newSeg: TranscriptSegment = {
       id: `seg_${Date.now()}`,
       startTime: parseFloat(newStart.toFixed(1)),
       endTime: parseFloat(newEnd.toFixed(1)),
-      originalText: 'New dialogue',
+      originalStartTime: parseFloat(newStart.toFixed(1)),
+      originalEndTime: parseFloat(newEnd.toFixed(1)),
+      originalText: narrationMode === 'scene_recap_30s' ? 'မြင်ကွင်းအပိုင်းသစ်' : 'New dialogue',
       myanmarTranslation: 'စာသားအသစ် ထည့်ရန်...',
-      voice: 'Thiha',
+      mainNarration: narrationMode === 'scene_recap_30s' ? 'စာသားအသစ် ထည့်ရန်...' : undefined,
+      bridgeNarration: narrationMode === 'scene_recap_30s' ? '' : undefined,
+      pauseBetweenParts: narrationMode === 'scene_recap_30s' ? 0.18 : undefined,
+      slotMode: narrationMode,
+      scriptStyle,
+      voice: project.lockedVoice || 'Thiha',
+      speaker:
+        scriptStyle === 'story'
+          ? 'Storyteller (ဇာတ်လမ်းပြောသူ)'
+          : scriptStyle === 'translation'
+            ? 'Translator (ဘာသာပြန်)'
+            : 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
     };
 
     setProject((prev) => ({
@@ -321,7 +624,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
               </span>
             </div>
             <p className="text-xs text-zinc-400 font-myanmar mt-0.5">
-              ဗီဒီယိုမှ စကားပြောများကို Gemini API ဖြင့် သဘာဝကျပြီး တိကျမှန်ကန်သော မြန်မာ ဇာတ်ကြောင်းပြော (Narrator Voiceover) စာသားအဖြစ် ထုတ်ယူပါ (Auto Voice Clone မပါဘဲ စာသားကို သီးသန့်ထုတ်ပေးပါသည်)။
+              Custom Upload Video ကို အဆင့် (၁ မှ ၃) အတိုင်း စစ်ဆေး + 0:30 AI/Whisper Parts ဖြင့် တိကျစွာ ဘာသာပြန် + Single Narrator စာသား ထုတ်ပေးပါမည်။ (Narrator အသံညှိ & 0:30 Part Sync ကို အဆင့် ၄ Generate All Voices တွင် ဆက်လုပ်ပါမည်။)
             </p>
           </div>
         </div>
@@ -348,12 +651,229 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
         </div>
       </div>
 
-      {/* 1-Minute Part Breakdown Filter Buttons */}
+      {/* CORE 3 FUNCTIONS FOR STEP 3: 1. NARRATOR | 2. STORY | 3. TRANSLATION */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-black text-white font-display flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-cyan-400" />
+            <span>အဆင့် ၃ — အဓိက စာသားထုတ်လုပ်မှု စနစ် ၃ မျိုး (Narrator / Story / Translation)</span>
+          </span>
+          <span className="text-[10px] font-mono px-2.5 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+            Active: {scriptStyle.toUpperCase()}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          {/* 1. NARRATOR */}
+          <div
+            onClick={() => selectStep3Style('narrator')}
+            className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
+              scriptStyle === 'narrator'
+                ? 'bg-gradient-to-br from-cyan-500/20 via-teal-500/10 to-black/60 border-cyan-400 shadow-xl ring-1 ring-cyan-400/50'
+                : 'bg-black/40 border-white/10 hover:border-white/25'
+            }`}
+          >
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="w-7 h-7 rounded-xl bg-cyan-400/20 text-cyan-300 border border-cyan-400/40 flex items-center justify-center">
+                    <Mic className="w-3.5 h-3.5" />
+                  </span>
+                  <span className="text-sm font-black text-white font-display">
+                    1. Narrator
+                  </span>
+                </div>
+                {scriptStyle === 'narrator' && (
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-cyan-400 text-zinc-950">
+                    Active
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-zinc-300 font-myanmar leading-relaxed">
+                Video ကို စာသားအနေနဲ့မထုတ်ဘဲ အပြင်မှာ စကားပြောနေတဲ့အတိုင်း တကယ့် Narrator အသံထွက်စေဖို့ စာသားထုတ်ပေးပါမည်။
+              </p>
+            </div>
+            <button
+              type="button"
+              disabled={isGenerating}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleGenerateScript('narrator');
+              }}
+              className={`w-full py-2 px-3 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 ${
+                scriptStyle === 'narrator'
+                  ? 'bg-gradient-to-r from-cyan-400 to-teal-400 text-zinc-950 shadow-lg'
+                  : 'bg-white/10 hover:bg-cyan-400/20 text-cyan-200 border border-white/10'
+              }`}
+            >
+              <Mic className="w-3.5 h-3.5" />
+              <span>1. Narrator စာသားထုတ်မည်</span>
+            </button>
+          </div>
+
+          {/* 2. STORY */}
+          <div
+            onClick={() => selectStep3Style('story')}
+            className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
+              scriptStyle === 'story'
+                ? 'bg-gradient-to-br from-emerald-500/20 via-teal-500/10 to-black/60 border-emerald-400 shadow-xl ring-1 ring-emerald-400/50'
+                : 'bg-black/40 border-white/10 hover:border-white/25'
+            }`}
+          >
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="w-7 h-7 rounded-xl bg-emerald-400/20 text-emerald-300 border border-emerald-400/40 flex items-center justify-center">
+                    <BookOpen className="w-3.5 h-3.5" />
+                  </span>
+                  <span className="text-sm font-black text-white font-display">
+                    2. Story
+                  </span>
+                </div>
+                {scriptStyle === 'story' && (
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-400 text-zinc-950">
+                    Active
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-zinc-300 font-myanmar leading-relaxed">
+                Video တစ်ခုလုံးကို လူတစ်ယောက် Story ပြောနေသလိုမျိုး ဇာတ်အိမ်ဖွဲ့ပြီး ဆွဲဆောင်မှုရှိတဲ့ စာသားထုတ်ပေးပါမည်။
+              </p>
+            </div>
+            <button
+              type="button"
+              disabled={isGenerating}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleGenerateScript('story');
+              }}
+              className={`w-full py-2 px-3 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 ${
+                scriptStyle === 'story'
+                  ? 'bg-gradient-to-r from-emerald-400 to-teal-400 text-zinc-950 shadow-lg'
+                  : 'bg-white/10 hover:bg-emerald-400/20 text-emerald-200 border border-white/10'
+              }`}
+            >
+              <BookOpen className="w-3.5 h-3.5" />
+              <span>2. Story စာသားထုတ်မည်</span>
+            </button>
+          </div>
+
+          {/* 3. TRANSLATION */}
+          <div
+            onClick={() => selectStep3Style('translation')}
+            className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
+              scriptStyle === 'translation'
+                ? 'bg-gradient-to-br from-amber-500/20 via-orange-500/10 to-black/60 border-amber-400 shadow-xl ring-1 ring-amber-400/50'
+                : 'bg-black/40 border-white/10 hover:border-white/25'
+            }`}
+          >
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="w-7 h-7 rounded-xl bg-amber-400/20 text-amber-300 border border-amber-400/40 flex items-center justify-center">
+                    <Languages className="w-3.5 h-3.5" />
+                  </span>
+                  <span className="text-sm font-black text-white font-display">
+                    3. Translation
+                  </span>
+                </div>
+                {scriptStyle === 'translation' && (
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-400 text-zinc-950">
+                    Active
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-zinc-300 font-myanmar leading-relaxed">
+                Video ထဲက On-screen Subtitle နှင့် Voice အသံတွေကို ဖတ်ရှုပြီး တိကျတဲ့ မြန်မာဘာသာပြန် စာသားထုတ်ပေးပါမည်။
+              </p>
+            </div>
+            <button
+              type="button"
+              disabled={isGenerating}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleGenerateScript('translation', 'dialogue_dub');
+              }}
+              className={`w-full py-2 px-3 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 ${
+                scriptStyle === 'translation'
+                  ? 'bg-gradient-to-r from-amber-400 to-orange-400 text-zinc-950 shadow-lg'
+                  : 'bg-white/10 hover:bg-amber-400/20 text-amber-200 border border-white/10'
+              }`}
+            >
+              <Languages className="w-3.5 h-3.5" />
+              <span>3. Translation ဘာသာပြန်ထုတ်မည်</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Narration Architecture Selector: 30s Scene-Recap Slots vs Dialogue Dubbing */}
+      <div className="p-3.5 rounded-2xl bg-black/50 border border-cyan-500/30 space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div>
+            <span className="text-xs font-black text-cyan-300 font-display block">
+              Timing Structure (အချိန်ပိုင်း ချိန်ညှိပုံ)
+            </span>
+              <p className="text-[11px] text-zinc-400 font-myanmar mt-0.5">
+              {narrationMode === 'scene_recap_30s'
+                ? '၃၀ စက္ကန့် မြင်ကွင်း Slot စီ (+ 0.18s Pause ဆက်စကားတို) ဖြင့် ချိန်ညှိထုတ်ပေးပါမည်။'
+                : 'AI/Whisper ကို 0:30 (0:00-0:30, 0:30-1:00...) Parts များခွဲ၍ တိကျစွာ ထုတ်ယူပြီး Single Narrator စာသား/အသံ/Subtitle များကို အချိန်မရွေ့စေရန် ပြန်ညှိထားပါမည်။'}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5 bg-zinc-900 p-1 rounded-xl border border-white/10 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedPartFilter('all');
+                setProject((prev) => ({ ...prev, narrationMode: 'scene_recap_30s', recapSlotSeconds: 30 }));
+              }}
+              className={`px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+                narrationMode === 'scene_recap_30s'
+                  ? 'bg-gradient-to-r from-cyan-400 to-emerald-400 text-zinc-950 font-black shadow'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              🎬 30s Scene Slots (+0.18s)
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedPartFilter('all');
+                setProject((prev) => ({ ...prev, narrationMode: 'dialogue_dub' }));
+              }}
+              className={`px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+                narrationMode === 'dialogue_dub'
+                  ? 'bg-cyan-500/30 text-cyan-200 border border-cyan-400/50 font-black'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              ⏱️ 0:30 Parts (Narrator Sync)
+            </button>
+            {project.segments.length > 0 && (
+              <button
+                type="button"
+                onClick={handleManualRealignMinuteBlocks}
+                className="px-2.5 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/40 text-emerald-200 text-[11px] font-bold cursor-pointer flex items-center gap-1"
+                title="၃၀ စက္ကန့်စီ (0:00-0:30) အပိုင်းအတွင်း နောက်ပိုင်းအသံ အချိန်မရွေ့စေရန် ပြန်ညှိမည်"
+              >
+                <Layers className="w-3 h-3" />
+                <span>Re-Align 0:30</span>
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Slot Breakdown Filter Buttons */}
       <div className="glass-card rounded-xl p-3.5 space-y-2.5">
         <div className="flex items-center justify-between text-xs">
           <span className="font-bold text-white flex items-center gap-1.5">
             <Zap className="w-3.5 h-3.5 text-cyan-400" />
-            <span>Video 1-Min Parts ({totalParts} Blocks — Single Narrator Storytelling)</span>
+            <span>
+              {narrationMode === 'scene_recap_30s'
+                ? `30-Second Scene Recap Slots (${totalParts} Slots × 30s — 0.18s Pause Alignment)`
+                : `Video 0:30 Parts (${totalParts} Parts × 30s — 0:00-0:30, 0:30-1:00...)`}
+            </span>
           </span>
           <span className="text-[11px] font-mono text-cyan-300">
             {Math.floor((project.videoDuration || 0) / 60)}m {Math.floor((project.videoDuration || 0) % 60)}s
@@ -369,7 +889,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
                 : 'bg-white/5 text-zinc-400 hover:text-zinc-200 border border-white/5'
             }`}
           >
-            All Parts ({project.segments.length})
+            All ({project.segments.length})
           </button>
 
           {videoParts.map((part) => {
@@ -417,7 +937,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
           <div className="flex items-center justify-between mb-1">
             <div className="flex items-center gap-1.5 font-bold text-xs">
               <Radio className="w-3.5 h-3.5 text-blue-400" />
-              <span>Assembly Generator</span>
+              <span>Assembly Generate</span>
             </div>
             {hasAssemblyAiKey && (
               <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
@@ -432,24 +952,24 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
 
         <button
           type="button"
-          onClick={() => setSelectedEngine('gemini')}
+          onClick={() => setSelectedEngine('videosubfinder_paddleocr')}
           className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
-            selectedEngine === 'gemini'
+            selectedEngine === 'videosubfinder_paddleocr'
               ? 'bg-cyan-500/15 border-cyan-400/50 text-cyan-200 shadow-lg ring-1 ring-cyan-400/30'
               : 'bg-white/5 border-white/5 text-zinc-400 hover:text-zinc-200'
           }`}
         >
           <div className="flex items-center justify-between mb-1">
             <div className="flex items-center gap-1.5 font-bold text-xs">
-              <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-              <span>Whisper Generator</span>
+              <ScanText className="w-3.5 h-3.5 text-cyan-400" />
+              <span>VideoSubFinder + PaddleOCR</span>
             </div>
             <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
-              Rotation Pool
+              Hardsub OCR
             </span>
           </div>
           <p className="text-[11px] text-zinc-400 font-myanmar">
-            Whisper ဖြင့် Speech-to-Text ပြုလုပ်ပြီး Gemini API မှ မြန်မာဘာသာပြန်ဆို၍ TTX ထုတ်ပေးမည်
+            Custom Upload Video မှ Subtitle စာတန်းထိုးများကို OCR ဖြင့် ရှာဖွေဖတ်ယူပြီး Transcript အပြည့်အစုံနှင့် မြန်မာဘာသာပြန် ထုတ်ပေးမည်
           </p>
         </button>
 
@@ -465,7 +985,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
           <div className="flex items-center justify-between mb-1">
             <div className="flex items-center gap-1.5 font-bold text-xs">
               <Zap className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Faster-Whisper (CPU int8)</span>
+              <span>Faster-Whisper Generate</span>
             </div>
             <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
               High-Speed CPU
@@ -479,14 +999,34 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
 
       {/* Prompt input & Action button */}
       <div className="space-y-3">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <input
             type="text"
             value={customPrompt}
             onChange={(e) => setCustomPrompt(e.target.value)}
             placeholder="အထူး ညွှန်ကြားချက်များ (ဥပမာ- ဟာသဆန်ဆန် ပြန်ဆိုပေးပါ)..."
-            className="glass-input flex-1 px-4 py-2.5 rounded-xl text-xs font-myanmar placeholder-zinc-500"
+            className="glass-input flex-1 min-w-[200px] px-4 py-2.5 rounded-xl text-xs font-myanmar placeholder-zinc-500"
           />
+
+          {/* Single Narrator Voice Selector right beside Generate */}
+          <select
+            value={project.lockedVoice || 'Thiha'}
+            onChange={(e) =>
+              setProject((prev) => ({ ...prev, lockedVoice: e.target.value as VoiceOption }))
+            }
+            className="px-3 py-2.5 bg-zinc-900 border border-emerald-500/30 rounded-xl text-xs text-emerald-300 font-semibold focus:outline-none cursor-pointer shrink-0"
+            title="Single Burmese Narrator Voice"
+          >
+            {Object.keys(VOICE_PROFILES).map((vKey) => {
+              const prof = VOICE_PROFILES[vKey as VoiceOption];
+              return (
+                <option key={vKey} value={vKey} className="bg-zinc-900 text-white">
+                  🎙️ {prof.myanmarName} ({prof.name})
+                </option>
+              );
+            })}
+          </select>
+
           <select
             value={selectedGeminiModel}
             onChange={(e) => setSelectedGeminiModel(e.target.value)}
@@ -500,36 +1040,24 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
 
           <div className="flex items-center gap-2 shrink-0">
             <button
-              onClick={handleGenerateScript}
+              onClick={() => handleGenerateScript()}
               disabled={isGenerating}
               className="px-5 py-2.5 bg-gradient-to-r from-sky-400 via-cyan-400 to-teal-400 hover:opacity-90 disabled:opacity-50 text-zinc-950 font-black text-xs rounded-xl transition-all shadow-xl shadow-cyan-500/25 flex items-center gap-2 cursor-pointer active:scale-95"
-              title="ဗီဒီယိုကို Analysis လုပ်ပြီး မြန်မာ Narrator TTX စာသားများကို အလိုအလျောက် ထုတ်ယူမည်"
+              title="အဆင့် ၁ (Video စစ် & 0:30 AI/Whisper Parts STT) → ၂ (အချိန်ခွဲ ဘာသာပြန်) → ၃ (Single Narrator စာသား) ကို ထုတ်ယူမည်"
             >
               {isGenerating ? (
                 <RotateCw className="w-4 h-4 animate-spin" />
               ) : (
                 <Sparkles className="w-4 h-4 text-zinc-950 stroke-[2.5]" />
               )}
-              <span>✨ TTX Generator (Narrator စာသားထုတ်မည်)</span>
-            </button>
-
-            <button
-              onClick={handleGenerateScript}
-              disabled={isGenerating}
-              className="px-5 py-2.5 bg-gradient-to-r from-emerald-400 via-teal-300 to-cyan-400 hover:opacity-90 disabled:opacity-50 text-zinc-950 font-black text-xs rounded-xl transition-all shadow-xl shadow-emerald-500/25 flex items-center gap-2 cursor-pointer active:scale-95"
-              title="Video Analyzing ဖြင့် Narrator TTX စာသား သီးသန့် ထုတ်ယူမည်"
-            >
-              {isGenerating ? (
-                <RotateCw className="w-4 h-4 animate-spin" />
-              ) : (
-                <FileText className="w-4 h-4 text-zinc-950 stroke-[2.5]" />
-              )}
-              <span>🎬 Video Analyzing TTX</span>
+              <span>
+                ✨ Generate ({scriptStyle === 'narrator' ? '1. Narrator' : scriptStyle === 'story' ? '2. Story' : '3. Translation'})
+              </span>
             </button>
           </div>
         </div>
 
-        {/* TTX Success & Proceed to Step 4 Voice Clone Card */}
+        {/* TTX Success & Proceed Card */}
         {project.segments.length > 0 && !isGenerating && (
           <div className="flex flex-wrap items-center justify-between gap-3 p-4 rounded-2xl bg-gradient-to-r from-emerald-950/40 via-zinc-900/60 to-cyan-950/40 border border-emerald-500/30 text-xs">
             <div className="flex items-center gap-3">
@@ -538,29 +1066,42 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
               </div>
               <div>
                 <span className="font-bold text-white font-myanmar text-sm block">
-                  ✓ Narrator TTX စာသား ({project.segments.length} Segments) အောင်မြင်စွာ ထွက်ရှိပါပြီ
+                  ✓ Narrator စာသား + 0:30 စီ {totalParts} ပိုင်း ({project.segments.length} Segments) အောင်မြင်စွာ ထွက်ရှိပါပြီ
                 </span>
                 <span className="text-[11px] text-zinc-300 font-myanmar">
-                  (အဆင့် ၃ တွင် Voice Clone မပါပါ။) အောက်ပါ Narrator TTX စာသားများအား အသံသွင်းရန်အတွက် "အဆင့် ၄ (Voice Clone)" သို့ ဆက်သွားပါ
+                  {project.videoInspection
+                    ? `Video: ${project.videoInspection.resolution} · ${formatMinSec(project.videoInspection.duration)} · အဆင့် ၄ (Generate All Voices) တွင် Narrator အသံ + 0:30 Sync ထုတ်နိုင်ပါသည်`
+                    : 'Narrator အသံထုတ်ရန်နှင့် 0:30 Part Sync ညှိရန် အဆင့် ၄ (TTS Studio) သို့ သွားပါ'}
                 </span>
               </div>
             </div>
 
-            {onNextStep && (
-              <button
-                onClick={onNextStep}
-                className="px-6 py-2.5 bg-gradient-to-r from-emerald-400 via-teal-300 to-cyan-400 hover:opacity-90 text-zinc-950 font-black rounded-xl transition-all flex items-center gap-2 cursor-pointer shadow-lg shadow-emerald-500/25 active:scale-95 shrink-0"
-              >
-                <span>အဆင့် ၄ (Voice Clone ပြုလုပ်မည်) သို့</span>
-                <ArrowRight className="w-4 h-4 stroke-[2.5]" />
-              </button>
-            )}
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {onNextStep && (
+                <button
+                  onClick={onNextStep}
+                  className="px-4 py-2.5 bg-gradient-to-r from-emerald-400 via-teal-300 to-cyan-400 hover:opacity-90 text-zinc-950 font-black rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shadow-lg shadow-emerald-500/25 active:scale-95"
+                >
+                  <span>အဆင့် ၄ (TTS Studio)</span>
+                  <ArrowRight className="w-4 h-4 stroke-[2.5]" />
+                </button>
+              )}
+              {onJumpToStep && (
+                <button
+                  onClick={() => onJumpToStep(5)}
+                  className="px-4 py-2.5 bg-violet-500 hover:bg-violet-400 text-white font-black rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shadow-lg shadow-violet-500/25 active:scale-95"
+                >
+                  <span>အဆင့် ၅ (Video Editor)</span>
+                  <ArrowRight className="w-4 h-4 stroke-[2.5]" />
+                </button>
+              )}
+            </div>
           </div>
         )}
 
-        {/* Live Percentage Progress Bar & Speed Status */}
+        {/* Live Percentage Progress Bar & 1-to-5 Stage Tracker */}
         {isGenerating && (
-          <div className="space-y-2 p-3.5 rounded-xl bg-cyan-950/40 border border-cyan-500/30 backdrop-blur-md">
+          <div className="space-y-2.5 p-3.5 rounded-xl bg-cyan-950/40 border border-cyan-500/30 backdrop-blur-md">
             <div className="flex items-center justify-between text-xs font-mono font-bold gap-2">
               <span className="text-cyan-300 flex items-center gap-1.5 font-myanmar">
                 <RotateCw className="w-3.5 h-3.5 animate-spin text-cyan-400 shrink-0" />
@@ -569,6 +1110,41 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
               <span className="text-cyan-400 shrink-0">
                 {Math.round(progressPercent)}% ({elapsedSeconds}s)
               </span>
+            </div>
+
+            {/* Inline Stage Indicators inside Step 3 Generate Progress */}
+            <div className={`grid grid-cols-1 ${scriptStyle === 'translation' ? 'sm:grid-cols-2' : 'sm:grid-cols-5'} gap-1.5 text-[10px] font-myanmar`}>
+              {(scriptStyle === 'translation'
+                ? [
+                    { id: 1 as const, label: selectedEngine === 'videosubfinder_paddleocr' ? '၁. VideoSubFinder + PaddleOCR' : '၁. Assembly or Whisper' },
+                    { id: 2 as const, label: '၂. Gemini Translate' },
+                  ]
+                : [
+                    { id: 1 as const, label: selectedEngine === 'videosubfinder_paddleocr' ? '၁. VideoSubFinder + PaddleOCR' : '၁. Assembly or Whisper' },
+                    { id: 2 as const, label: '၂. Gemini Translate' },
+                    { id: 3 as const, label: '၃. Video & STT' },
+                    { id: 4 as const, label: '၄. အချိန်ခွဲ ဘာသာပြန်' },
+                    { id: 5 as const, label: scriptStyle === 'story' ? '၅. Story စာသား' : '၅. Narrator စာသား' },
+                  ]
+              ).map((st) => {
+                const active = generateStage === st.id;
+                const done = generateStage !== null && generateStage > st.id;
+                return (
+                  <div
+                    key={st.id}
+                    className={`px-2 py-1 rounded-lg border flex items-center justify-between gap-1 ${
+                      done
+                        ? 'bg-emerald-500/20 border-emerald-400/50 text-emerald-200'
+                        : active
+                          ? 'bg-cyan-500/25 border-cyan-400 text-white font-bold animate-pulse'
+                          : 'bg-black/35 border-white/10 text-zinc-400'
+                    }`}
+                  >
+                    <span className="truncate">{st.label}</span>
+                    {done && <Check className="w-3 h-3 text-emerald-400 shrink-0" />}
+                  </div>
+                );
+              })}
             </div>
 
             {/* Progress Bar Track */}
@@ -580,7 +1156,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
             </div>
 
             <div className="flex items-center justify-between text-[10px] text-zinc-400 font-mono">
-              <span>⚡ {selectedGeminiModel} (Parallel 1-Min Visual + Dialogue Alignment)</span>
+              <span>⚡ {selectedGeminiModel} (0:30 AI/Whisper Parts · Script Stage 1→3)</span>
               <span>100% ရောက်ရှိလျှင် ပြီးဆုံးပါမည်</span>
             </div>
           </div>
@@ -623,7 +1199,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
             )}
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+          <div className="grid grid-cols-2 sm:grid-cols-6 gap-2">
             <button
               onClick={handlePolishNarrationStyle}
               disabled={isPolishing || isGenerating}
@@ -656,6 +1232,15 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
             >
               <FileText className="w-3.5 h-3.5" />
               <span>Download .SRT</span>
+            </button>
+
+            <button
+              onClick={handleImportDubbingPlanJson}
+              className="px-3 py-2 rounded-xl bg-violet-500/15 hover:bg-violet-500/25 text-violet-200 text-xs font-semibold flex items-center justify-center gap-1.5 border border-violet-500/30 transition-colors cursor-pointer active:scale-95"
+              title="Dubbing Plan JSON များကို Paste လုပ်၍ Segments များအဖြစ် တိုက်ရိုက်တင်သွင်းမည်"
+            >
+              <Upload className="w-3.5 h-3.5" />
+              <span>📥 Import JSON</span>
             </button>
 
             <button
@@ -721,6 +1306,23 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
                     <span className="px-2 py-0.5 rounded-md bg-sky-500/10 text-sky-300 text-[10px] font-semibold border border-sky-500/20">
                       {seg.speaker || 'Narrator (ဇာတ်ကြောင်းပြောသူ)'}
                     </span>
+                    {seg.scriptStyle && (
+                      <span
+                        className={`px-1.5 py-0.5 rounded text-[9px] font-bold border ${
+                          seg.scriptStyle === 'story'
+                            ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                            : seg.scriptStyle === 'translation'
+                              ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                              : 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
+                        }`}
+                      >
+                        {seg.scriptStyle === 'story'
+                          ? '📖 Story'
+                          : seg.scriptStyle === 'translation'
+                            ? '🌐 Translation'
+                            : '🎙️ Narrator'}
+                      </span>
+                    )}
                     {seg.isOnScreen !== undefined && (
                       <span className="px-1.5 py-0.5 rounded text-[9px] bg-zinc-800 text-zinc-400">
                         {seg.isOnScreen ? '👁️ On Screen' : '🎙️ Off Screen'}
@@ -731,9 +1333,12 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
                       <button
                         type="button"
                         onClick={() => {
+                          setProject((prev) => (prev.isPlaying ? { ...prev, isPlaying: false } : prev));
                           const audio = new Audio(seg.audioUrl);
                           audio.playbackRate = seg.atempoRate || seg.playbackRate || 1.0;
                           (audio as any).preservesPitch = true;
+                          (audio as any).webkitPreservesPitch = true;
+                          registerPreviewAudio(audio);
                           audio.play().catch(() => {});
                         }}
                         className="px-2 py-0.5 rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] font-bold flex items-center gap-1 cursor-pointer hover:bg-emerald-500/30 transition-all"
@@ -793,20 +1398,125 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
                   </div>
                 </div>
 
-                {/* Original dialogue (e.g. Chinese) */}
+                {/* Original scene note / plot summary */}
                 {seg.originalText && (
-                  <div className="mb-2 px-3 py-1.5 rounded-lg bg-zinc-900/60 border border-white/5 text-[11px] text-zinc-400 flex items-baseline gap-2">
-                    <span className="text-[10px] font-semibold text-zinc-500 uppercase shrink-0">Original:</span>
+                  <div className="mb-2 px-3 py-1.5 rounded-lg bg-zinc-900/60 border border-white/5 text-[11px] text-zinc-400 flex items-baseline gap-2 flex-wrap">
+                    <span className="text-[10px] font-semibold text-zinc-500 uppercase shrink-0">
+                      {seg.slotMode === 'scene_recap_30s' ? 'Scene Beat:' : 'Original:'}
+                    </span>
+                    {seg.sceneTitle && (
+                      <span className="px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-300 font-myanmar font-bold text-[10px]">
+                        {seg.sceneTitle}
+                      </span>
+                    )}
                     <span className="font-sans text-zinc-300">{seg.originalText}</span>
                   </div>
                 )}
 
-                {/* Natural Spoken Burmese Dialogue Input & 5-Second Syllable Brevity Indicator */}
+                {/* Natural Spoken Burmese Narration + 0.18s Pause Bridge Editor */}
                 {(() => {
                   const slotDur = Math.max(0.5, seg.endTime - seg.startTime);
                   const sylCount = countBurmeseSyllables(seg.myanmarTranslation || '');
                   const maxSyl = seg.maxAllowedSyllables || calculateMaxAllowedSyllables(slotDur);
+                  const isRecapSlot = seg.slotMode === 'scene_recap_30s' || slotDur >= 15;
+                  const minRecapSyl = Math.max(8, Math.floor(slotDur * 2.75));
+                  const isTooShortRecap = isRecapSlot && sylCount < minRecapSyl;
                   const isTooLong = sylCount > maxSyl;
+
+                  if (isRecapSlot) {
+                    const mainVal = seg.mainNarration ?? seg.myanmarTranslation;
+                    const bridgeVal = seg.bridgeNarration ?? '';
+                    const pauseGap = seg.pauseBetweenParts ?? 0.18;
+
+                    return (
+                      <div className="space-y-2 mb-2">
+                        <div className="flex items-center justify-between text-[10px] text-zinc-400 flex-wrap gap-1.5">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-myanmar font-semibold text-cyan-300">
+                              ဇာတ်လမ်းဖြစ်စဉ် Narration (Main + {pauseGap.toFixed(2)}s Pause + ဆက်စကားတို):
+                            </span>
+                            {seg.emotion && (
+                              <span className="text-zinc-500 italic text-[9px]">({seg.emotion})</span>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-1.5">
+                            {isTooShortRecap ? (
+                              <span className="px-2 py-0.5 rounded-md bg-amber-500/15 border border-amber-500/30 text-amber-300 font-semibold font-myanmar text-[9px]">
+                                ⏱️ စာတိုနေပါသည် ({sylCount}/{minRecapSyl}–{maxSyl} syls for {slotDur.toFixed(0)}s)
+                              </span>
+                            ) : isTooLong ? (
+                              <span className="px-2 py-0.5 rounded-md bg-rose-500/15 border border-rose-500/30 text-rose-300 font-semibold font-myanmar text-[9px]">
+                                ⚠️ ရှည်နေသည် ({sylCount}/{maxSyl} syls)
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-mono text-[9px]">
+                                ✓ {slotDur.toFixed(0)}s Slot Fit ({sylCount}/{maxSyl} syls)
+                              </span>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() => handleGenerateShortBridge(seg)}
+                              disabled={bridgingSegId === seg.id}
+                              className="px-2 py-0.5 rounded-md bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/40 text-emerald-200 text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 disabled:opacity-50"
+                              title="မြင်ကွင်းနဲ့ကိုက်ညီတဲ့ ဆက်စကားတိုတစ်ခု ဖန်တီးပြီး 0.18s Pause ခြား၍ Slot ပြည့်အောင် ဖြည့်ပေးမည်"
+                            >
+                              {bridgingSegId === seg.id ? (
+                                <RotateCw className="w-2.5 h-2.5 animate-spin" />
+                              ) : (
+                                <Sparkles className="w-2.5 h-2.5 text-emerald-300" />
+                              )}
+                              <span>{bridgingSegId === seg.id ? 'ဖြည့်နေသည်...' : '✨ ဆက်စကားတို ဖြည့် (+0.18s)'}</span>
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <textarea
+                            rows={2}
+                            value={mainVal}
+                            onChange={(e) => {
+                              const nextMain = e.target.value;
+                              const combined = bridgeVal.trim() ? `${nextMain.trim()} ${bridgeVal.trim()}` : nextMain.trim();
+                              handleUpdateSegment(seg.id, {
+                                slotMode: 'scene_recap_30s',
+                                mainNarration: nextMain,
+                                myanmarTranslation: combined,
+                                subtitleText: combined,
+                              });
+                            }}
+                            placeholder="Part 1: ဤ 30s မြင်ကွင်းအပိုင်း၏ အဓိက ဇာတ်လမ်းဖြစ်စဉ် Narration..."
+                            className="w-full px-3 py-1.5 glass-input rounded-lg text-xs font-myanmar text-white focus:ring-1 focus:ring-cyan-400"
+                          />
+
+                          <div className="flex items-center gap-2">
+                            <span className="px-2 py-1 rounded-md bg-cyan-500/15 border border-cyan-500/30 text-[10px] font-mono font-bold text-cyan-300 shrink-0">
+                              ⏸ {pauseGap.toFixed(2)}s Pause
+                            </span>
+                            <input
+                              type="text"
+                              value={bridgeVal}
+                              onChange={(e) => {
+                                const nextBridge = e.target.value;
+                                const combined = nextBridge.trim() ? `${mainVal.trim()} ${nextBridge.trim()}` : mainVal.trim();
+                                handleUpdateSegment(seg.id, {
+                                  slotMode: 'scene_recap_30s',
+                                  mainNarration: mainVal,
+                                  bridgeNarration: nextBridge,
+                                  pauseBetweenParts: pauseGap,
+                                  myanmarTranslation: combined,
+                                  subtitleText: combined,
+                                });
+                              }}
+                              placeholder="Part 2: မြင်ကွင်းနဲ့ကိုက်ညီတဲ့ ဆက်စကားတို (Slot 30s ပြည့်ရန်)..."
+                              className="flex-1 px-3 py-1.5 bg-zinc-950/80 border border-emerald-500/30 rounded-lg text-xs font-myanmar text-emerald-100 focus:outline-none focus:border-emerald-400"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }
 
                   return (
                     <div className="space-y-1 mb-2">
@@ -827,7 +1537,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
                             </span>
                           ) : (
                             <span className="px-2 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-mono text-[9px]">
-                              ✓ 5s Timing Fit ({sylCount}/{maxSyl} syllables, {slotDur.toFixed(1)}s)
+                              ✓ Timing Fit ({sylCount}/{maxSyl} syllables, {slotDur.toFixed(1)}s)
                             </span>
                           )}
                           <button

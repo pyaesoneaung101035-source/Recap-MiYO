@@ -123,8 +123,9 @@ export const VideoUploadSection: React.FC<VideoUploadSectionProps> = ({
 
   const handleLoadSample = async () => {
     try {
-      const sampleUrl = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4';
+      const sampleUrl = '/api/narrator/sample-video';
       const res = await fetch(sampleUrl);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const blob = await res.blob();
       const file = new File([blob], 'Sample_Cinematic_Action.mp4', { type: 'video/mp4' });
       handleInspectFile(file);

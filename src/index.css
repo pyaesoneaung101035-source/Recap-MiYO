@@ -144,3 +144,55 @@
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(56, 189, 248, 0.5);
 }
+
+/* Step 5 Recap-MiYO NLE Studio Styles */
+.studio-panel {
+  background: #13121e;
+  border: 1px solid #252339;
+}
+
+.studio-input {
+  background: #100f1a;
+  border: 1px solid #2c2a44;
+  color: #f8fafc;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.studio-input:focus {
+  border-color: #8b5cf6;
+  box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.25);
+  outline: none;
+}
+
+input[type='range'].studio-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 5px;
+  border-radius: 9999px;
+  background: #2b2842;
+  outline: none;
+  cursor: pointer;
+}
+
+input[type='range'].studio-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: #ffffff;
+  border: 2px solid #8b5cf6;
+  box-shadow: 0 0 10px rgba(139, 92, 246, 0.75);
+  cursor: pointer;
+}
+
+input[type='range'].studio-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: #ffffff;
+  border: 2px solid #8b5cf6;
+  box-shadow: 0 0 10px rgba(139, 92, 246, 0.75);
+  cursor: pointer;
+}
+

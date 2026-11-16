@@ -20,11 +20,11 @@ import {
   Smile,
   AlertTriangle,
 } from 'lucide-react';
-import { ProjectState, TranscriptSegment, VoiceOption } from '../types';
+import { ProjectState, TranscriptSegment, VoiceOption, VoiceToneOption, TtsEngineMode } from '../types';
 import { countBurmeseSyllables, calculateMaxAllowedSyllables, shortenBurmeseTextForDuration } from '../utils/geminiPool';
-import { synthesizeMyanmarVoice, VOICE_PROFILES } from '../utils/edgeTtsClient';
-import { synthesizeElevenLabsVoice } from '../utils/elevenLabsHumeClient';
-import { synthesizeHuggingFaceVoice } from '../utils/huggingFaceClient';
+import { synthesizeMyanmarVoice, VOICE_PROFILES, VOICE_TONE_PRESETS } from '../utils/edgeTtsClient';
+import { registerPreviewAudio, stopAllPreviewAudio } from '../utils/audioPreviewManager';
+import { stitchAudioPartsWithPause, DEFAULT_INTER_PART_PAUSE_SEC } from '../utils/audioStitcher';
 
 interface HumanReviewDubbingStudioProps {
   project: ProjectState;
@@ -62,6 +62,7 @@ export const HumanReviewDubbingStudio: React.FC<HumanReviewDubbingStudioProps> =
   // Stop audio on unmount
   useEffect(() => {
     return () => {
+      stopAllPreviewAudio();
       if (audioPlayerRef.current) {
         audioPlayerRef.current.pause();
         audioPlayerRef.current = null;
@@ -137,45 +138,81 @@ export const HumanReviewDubbingStudio: React.FC<HumanReviewDubbingStudioProps> =
     }
   };
 
-  // Generate / Regenerate Single Narrator Audio (supports Gemini, ElevenLabs, Hume AI, Hugging Face)
+  // Generate / Regenerate Single Narrator Audio (supports 2-part + 0.18s pause in 30s recap mode)
   const handleSynthesizeCurrent = async () => {
     if (!currentSeg || isSynthesizing) return;
     setIsSynthesizing(true);
     try {
-      let result: { audioUrl: string; duration: number };
+      const voiceToUse: VoiceOption = project.lockedVoice || currentSeg.voice || 'Thiha';
+      const toneToUse: VoiceToneOption = currentSeg.tone || project.voiceTone || 'natural';
+      const pitchToUse: number = currentSeg.pitch ?? project.voicePitch ?? 0;
+      const styleToUse = currentSeg.style || project.voiceStyle || 'recap';
+      const preferredEngine: TtsEngineMode = VOICE_PROFILES[voiceToUse]?.naraVoiceId
+        ? 'nara'
+        : (project.ttsEngine || 'auto');
 
-      if (currentSeg.voiceProvider === 'elevenlabs' && currentSeg.elevenLabsVoiceId) {
-        result = await synthesizeElevenLabsVoice(currentSeg.myanmarTranslation, {
-          voiceId: currentSeg.elevenLabsVoiceId,
-          emotion: currentSeg.emotion,
-        });
-      } else if (currentSeg.voiceProvider === 'huggingface' && currentSeg.hfSpeaker) {
-        result = await synthesizeHuggingFaceVoice(currentSeg.myanmarTranslation, {
-          model: currentSeg.hfModel || 'coqui/XTTS-v2',
-          speakerId: currentSeg.hfSpeaker,
-          speed: 1.0,
-        });
-      } else {
-        const voiceToUse: VoiceOption = currentSeg.voice || 'Thiha';
-        result = await synthesizeMyanmarVoice(currentSeg.myanmarTranslation, {
+      const isRecapSlot =
+        currentSeg.slotMode === 'scene_recap_30s' &&
+        Boolean(currentSeg.mainNarration?.trim()) &&
+        Boolean(currentSeg.bridgeNarration?.trim());
+
+      let finalAudioUrl: string;
+      let audioDur: number;
+      let usedProvider: 'gemini' | 'nara_mini_v1' = preferredEngine === 'nara' ? 'nara_mini_v1' : 'gemini';
+
+      if (isRecapSlot) {
+        const part1 = await synthesizeMyanmarVoice(currentSeg.mainNarration!.trim(), {
           voice: voiceToUse,
-          style: currentSeg.style || project.voiceStyle || 'recap',
+          style: styleToUse,
+          tone: toneToUse,
+          pitchOffset: pitchToUse,
           emotion: currentSeg.emotion,
           speed: 1.0,
+          preferredEngine,
         });
+        const part2 = await synthesizeMyanmarVoice(currentSeg.bridgeNarration!.trim(), {
+          voice: voiceToUse,
+          style: styleToUse,
+          tone: toneToUse,
+          pitchOffset: pitchToUse,
+          emotion: currentSeg.emotion,
+          speed: 1.0,
+          preferredEngine: part1.engineUsed,
+        });
+        const pauseSec = currentSeg.pauseBetweenParts ?? DEFAULT_INTER_PART_PAUSE_SEC;
+        const stitched = await stitchAudioPartsWithPause(part1.audioUrl, part2.audioUrl, pauseSec);
+        finalAudioUrl = stitched.audioUrl;
+        audioDur = stitched.duration;
+        usedProvider = part1.engineUsed === 'nara' ? 'nara_mini_v1' : 'gemini';
+      } else {
+        const result = await synthesizeMyanmarVoice(currentSeg.myanmarTranslation, {
+          voice: voiceToUse,
+          style: styleToUse,
+          tone: toneToUse,
+          pitchOffset: pitchToUse,
+          emotion: currentSeg.emotion,
+          speed: 1.0,
+          preferredEngine,
+        });
+        finalAudioUrl = result.audioUrl;
+        audioDur = result.duration;
+        usedProvider = result.engineUsed === 'nara' ? 'nara_mini_v1' : 'gemini';
       }
 
-      const audioDur = result.duration;
       const atempo = parseFloat(Math.min(1.15, Math.max(0.9, audioDur / slotDuration)).toFixed(2));
 
       handleUpdateCurrentSeg({
-        audioUrl: result.audioUrl,
+        audioUrl: finalAudioUrl,
         audioDuration: audioDur,
         atempoRate: atempo,
+        voice: voiceToUse,
+        voiceProvider: usedProvider,
+        tone: toneToUse,
+        pitch: pitchToUse,
+        speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
       });
     } catch (err: any) {
       console.error('TTS error:', err);
-      alert(`အသံသွင်းမှု မအောင်မြင်ပါ: ${err.message || 'Error'}`);
     } finally {
       setIsSynthesizing(false);
     }
@@ -184,6 +221,8 @@ export const HumanReviewDubbingStudio: React.FC<HumanReviewDubbingStudioProps> =
   // 1-Click "Listen & Inspect"
   const handleListenAndInspect = () => {
     if (!currentSeg) return;
+
+    stopAllPreviewAudio();
 
     if (audioPlayerRef.current) {
       audioPlayerRef.current.pause();
@@ -211,6 +250,7 @@ export const HumanReviewDubbingStudio: React.FC<HumanReviewDubbingStudioProps> =
       audio.onended = () => setIsPlayingSegment(false);
       audio.onerror = () => setIsPlayingSegment(false);
 
+      registerPreviewAudio(audio, () => setIsPlayingSegment(false));
       audioPlayerRef.current = audio;
       audio.play().then(() => {
         setAudioPlayer(audio);
@@ -594,15 +634,80 @@ export const HumanReviewDubbingStudio: React.FC<HumanReviewDubbingStudioProps> =
               </div>
 
               <select
-                value={currentSeg.voice || 'Thiha'}
-                onChange={(e) => handleUpdateCurrentSeg({ voice: e.target.value as VoiceOption })}
+                value={project.lockedVoice || currentSeg.voice || 'Thiha'}
+                onChange={(e) => {
+                  const chosen = e.target.value as VoiceOption;
+                  const nextEngine: TtsEngineMode = VOICE_PROFILES[chosen]?.naraVoiceId ? 'nara' : 'auto';
+                  setProject((prev) => ({
+                    ...prev,
+                    ttsEngine: nextEngine,
+                    lockedVoice: chosen,
+                    segments: prev.segments.map((s) => ({
+                      ...s,
+                      voice: chosen,
+                      speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
+                    })),
+                  }));
+                }}
                 className="w-full px-3 py-2 bg-zinc-900 border border-emerald-500/40 rounded-xl text-xs font-bold text-emerald-300 focus:outline-none cursor-pointer"
               >
                 <option value="Thiha">သီဟ / Thiha — နွေးထွေးခန့်ညားသော Adult Male (အနီးစပ်ဆုံး သဘာဝအသံ)</option>
                 <option value="KyawKyaw">ကျော်ကျော် / Kyaw Kyaw — သြဇာကြီးမား နက်နဲသော Bass Male</option>
                 <option value="MinThway">မင်းသွေး / Min Thway — အေးချမ်းတည်ကြည်သော Adult Male</option>
                 <option value="AungAung">အောင်အောင် / Aung Aung — တက်ကြွသွက်လက်သော Male</option>
+                <option value="NaraKoBanyar">🤗 ကိုဗညား / Ko Banyar — Nara Mini v1 Male (ko-banyar)</option>
+                <option value="NaraHtetMyat">🤗 ထက်မြတ် / Htet Myat — Nara Mini v1 Male (htet-myat)</option>
+                <option value="NaraShoon">🤗 ရွှန်း / Shoon — Nara Mini v1 Female (shoon)</option>
+                <option value="NaraThazin">🤗 သဇင် / Thazin — Nara Mini v1 Female (thazin)</option>
+                <option value="Nilar">နီလာ / Nilar — ကြည်လင်ပြတ်သားသော Natural Female</option>
+                <option value="MayThu">မေသူ / May Thu — ချိုသာနူးညံ့သော Female</option>
               </select>
+
+              {/* Voice Tone Preset & Pitch Controls */}
+              <div className="space-y-2 pt-2 border-t border-white/5">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-zinc-300 font-myanmar font-bold flex items-center gap-1.5">
+                    <Sliders className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>Voice Tone (အသံအနေအထား):</span>
+                  </span>
+                  <span className="font-mono text-cyan-300 font-bold text-[11px]">
+                    {((currentSeg.pitch ?? project.voicePitch ?? 0) > 0
+                      ? `+${currentSeg.pitch ?? project.voicePitch ?? 0}%`
+                      : `${currentSeg.pitch ?? project.voicePitch ?? 0}%`)}
+                  </span>
+                </div>
+
+                <select
+                  value={currentSeg.tone || project.voiceTone || 'natural'}
+                  onChange={(e) => {
+                    const nextTone = e.target.value as VoiceToneOption;
+                    const preset = VOICE_TONE_PRESETS.find((p) => p.id === nextTone);
+                    const nextPitch = preset ? preset.pitchPct : (currentSeg.pitch ?? project.voicePitch ?? 0);
+                    handleUpdateCurrentSeg({ tone: nextTone, pitch: nextPitch });
+                  }}
+                  className="w-full px-3 py-1.5 bg-zinc-900 border border-cyan-500/40 rounded-xl text-xs font-bold text-cyan-200 focus:outline-none cursor-pointer"
+                >
+                  {VOICE_TONE_PRESETS.map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.badge} {preset.label} — {preset.myanmarLabel}
+                    </option>
+                  ))}
+                </select>
+
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-mono text-zinc-400">-15%</span>
+                  <input
+                    type="range"
+                    min="-15"
+                    max="15"
+                    step="1"
+                    value={currentSeg.pitch ?? project.voicePitch ?? 0}
+                    onChange={(e) => handleUpdateCurrentSeg({ pitch: parseInt(e.target.value, 10) })}
+                    className="flex-1 accent-cyan-400 cursor-pointer"
+                  />
+                  <span className="text-[10px] font-mono text-zinc-400">+15%</span>
+                </div>
+              </div>
 
               {/* atempo Speed / Retiming Control */}
               <div className="space-y-1.5 pt-2 border-t border-white/5">
@@ -632,15 +737,21 @@ export const HumanReviewDubbingStudio: React.FC<HumanReviewDubbingStudioProps> =
               </div>
             </div>
 
-            {/* LIP-SYNC VISUAL ENGINE PREVIEW */}
+            {/* SCENE ALIGNMENT / LIP-SYNC VISUAL ENGINE PREVIEW */}
             <div className="p-4 rounded-2xl bg-zinc-950/90 border border-purple-500/30 space-y-3">
-              <div className="flex items-center justify-between text-xs">
+              <div className="flex items-center justify-between text-xs gap-2 flex-wrap">
                 <span className="font-bold text-purple-300 font-display flex items-center gap-1.5">
                   <Smile className="w-3.5 h-3.5 text-purple-400" />
-                  <span>Lip-Sync Engine (ပါးစပ်လှုပ်ရှားမှု ချိန်ညှိချက်)</span>
+                  <span>
+                    {currentSeg.slotMode === 'scene_recap_30s'
+                      ? 'Scene-by-Scene Sync (၃၀ စက္ကန့် မြင်ကွင်းအလိုက်)'
+                      : 'Lip-Sync Engine (ပါးစပ်လှုပ်ရှားမှု ချိန်ညှိချက်)'}
+                  </span>
                 </span>
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300">
-                  Viseme State: {visemeState.toUpperCase()}
+                  {currentSeg.slotMode === 'scene_recap_30s'
+                    ? `Pause: ${(currentSeg.pauseBetweenParts ?? 0.18).toFixed(2)}s`
+                    : `Viseme State: ${visemeState.toUpperCase()}`}
                 </span>
               </div>
 
@@ -666,10 +777,14 @@ export const HumanReviewDubbingStudio: React.FC<HumanReviewDubbingStudioProps> =
 
                 <div className="text-left text-[11px] space-y-0.5">
                   <span className="font-bold text-white block">
-                    {visemeState === 'rest' ? 'Mouth Rest (စကားနားချိန်)' : 'Mouth Speaking (အသံထွက်နေစဉ်)'}
+                    {currentSeg.slotMode === 'scene_recap_30s'
+                      ? (currentSeg.sceneTitle || '30s Story Summary Slot')
+                      : (visemeState === 'rest' ? 'Mouth Rest (စကားနားချိန်)' : 'Mouth Speaking (အသံထွက်နေစဉ်)')}
                   </span>
                   <span className="text-[10px] text-zinc-400 font-myanmar block">
-                    {currentSeg.lipSyncNote || 'မူရင်းစကားပြော timing နှင့် ကွက်တိ ကိုက်ညီမှု ရှိပါသည်'}
+                    {currentSeg.slotMode === 'scene_recap_30s'
+                      ? `တစ်လုံးချင်း Lip-Sync မဟုတ်ဘဲ ၃၀ စက္ကန့် မြင်ကွင်းအပိုင်းအလိုက် + ${(currentSeg.pauseBetweenParts ?? 0.18).toFixed(2)}s ခဏနားပြီး ချိန်ညှိထားပါသည်`
+                      : (currentSeg.lipSyncNote || 'မူရင်းစကားပြော timing နှင့် ကွက်တိ ကိုက်ညီမှု ရှိပါသည်')}
                   </span>
                 </div>
               </div>

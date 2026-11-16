@@ -1,6 +1,12 @@
-import { GeminiKeyInfo, TranscriptSegment, AiMode } from '../types';
+import { GeminiKeyInfo, TranscriptSegment, AiMode, Step3ScriptStyle } from '../types';
 import { extractAudioChunksFromVideo, extractAllVideoKeyframesBatch } from './audioExtractor';
-import { MINUTE_BLOCK_SECONDS, formatMinSec, realignSegmentsByMinuteBlocks } from './timingSync';
+import {
+  MINUTE_BLOCK_SECONDS,
+  ANALYSIS_CHUNK_SECONDS,
+  RECAP_SLOT_SECONDS,
+  formatMinSec,
+  realignSegmentsByMinuteBlocks,
+} from './timingSync';
 
 const STORAGE_KEY = 'motion_recap_gemini_keys';
 let currentKeyIndex = 0;
@@ -559,6 +565,52 @@ function isFatalGeminiError(err: any): boolean {
   return false;
 }
 
+function getStep3ScriptStyleConfig(style: Step3ScriptStyle): {
+  roleTitle: string;
+  modeDirective: string;
+  slotDirective: string;
+  speakerLabel: string;
+} {
+  if (style === 'story') {
+    return {
+      roleTitle: 'You are an Engaging Burmese Oral Storyteller ("လူတစ်ယောက် Story ပြောနေသလို ဇာတ်လမ်းပြောပြသူ").',
+      speakerLabel: 'Storyteller (ဇာတ်လမ်းပြောသူ)',
+      modeDirective: `STORYTELLING MODE ("2. STORY"):
+- Tell the events as if ONE real person is captivatingly telling a true story/movie story aloud to friends ("တစ်ယောက်ယောက်က Story ပြောပြနေသလို").
+- Build vivid emotional flow, narrative hooks, and suspense between scenes (e.g., "ဒီဇာတ်လမ်းက အစကတည်းက မထင်မှတ်ထားတဲ့အလှည့်အပြောင်းနဲ့ စတာ...", "အဲ့ဒီအချိန်မှာပဲ မထင်မှတ်ဘဲ...", "သူ့စိတ်ထဲမှာတော့...", "နောက်ဆုံးတော့...").
+- Keep smooth oral storytelling continuity across every cue—never dry bullet points or stiff literal translation.`,
+      slotDirective: `STORY MODE FOR THIS SLOT:
+- Tell what happens in this scene like a real human Storyteller gripping the listener with plot tension, character feelings, and vivid oral flow.`,
+    };
+  }
+
+  if (style === 'translation') {
+    return {
+      roleTitle: 'You are a Professional Video Subtitle & Spoken Dialogue Extraction & Translation Specialist ("Video ထဲက Source စာသား (Chinese/English) နှင့် စာတန်းထိုးများကို အကုန်အစင် ထုတ်ယူပြီး မြန်မာဘာသာပြန်ဆိုသူ").',
+      speakerLabel: 'Translator (ဘာသာပြန်)',
+      modeDirective: `TRUE TRANSLATION & SOURCE EXTRACTION MODE ("3. TRANSLATION"):
+- 100% COMPREHENSIVE SOURCE EXTRACTION & TRANSLATION (Source စာသားနှင့် စာတန်းထိုး အကုန်အစင် ထုတ်ယူပြီး ဘာသာပြန်ခြင်း):
+  1. Extract ALL source spoken dialogue (Chinese, English, or any language) and ALL burnt-in on-screen subtitles/captions visible in the video frames completely from start to finish. Put every extracted source sentence/subtitle into "originalText".
+  2. Translate every extracted source line faithfully, accurately, and directly into natural Burmese in "text" and "subtitleText".
+  3. Do NOT skip, omit, or leave out any dialogue, voice lines, or subtitles. Every single utterance or visible caption must be extracted and translated line-by-line.`,
+      slotDirective: `TRANSLATION MODE FOR THIS SLOT:
+- Extract all Chinese/English/source speech and visible subtitles in this time window into "originalText" and translate them directly and faithfully into Burmese into "text".`,
+    };
+  }
+
+  // Default: 'narrator'
+  return {
+    roleTitle: 'You are a Real-Life Spoken Burmese Voiceover Actor ("အပြင်မှာ စကားပြောနေတဲ့အတိုင်း တကယ့် Narrator အသံထွက်စေမယ့် Voiceover Director").',
+    speakerLabel: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
+    modeDirective: `SPOKEN NARRATOR MODE ("1. NARRATOR — REAL SPOKEN VOICEOVER"):
+- Write PURE REAL-LIFE SPOKEN BURMESE meant to be SPOKEN ALOUD by a real voice actor—NEVER stiff written/bookish prose ("စာသားဆန်ဆန် / စာတန်းဆန်ဆန် လုံးဝမရေးရ").
+- Format every line for natural spoken TTS breath & intonation: use lively everyday spoken expressions ("ဟာ ကြည့်စမ်း!", "တကယ်ကြီးလား?", "အဲ့ဒီတော့ သူ ဘာလုပ်လိုက်လဲဆိုတော့...", "ပြောရရင်တော့...", "ဟုတ်ပါ့မလား!"), varied colloquial endings ("...သွားပြီ", "...လိုက်မယ်", "...မဟုတ်ဘူး", "...ပဲနော်", "...လား?"), and natural punctuation ("!", "?", "—", "၊").
+- Strictly avoid flat repetitive "...နေပါသည် / ...ဖြစ်ပါသည် / ...ပါတယ်" textbook endings.`,
+    slotDirective: `SPOKEN NARRATOR MODE FOR THIS SLOT:
+- Write so it sounds 100% like a real person talking out loud naturally ("အပြင်မှာ တကယ်စကားပြောနေတဲ့အတိုင်း")—zero stiff bookish wording.`,
+  };
+}
+
 /**
  * Generate transcript & subtitles with timestamps from the custom uploaded video.
  * GUARANTEES ALL 1-MINUTE BLOCKS (Part 1, Part 2, Part 3...) ARE PROCESSED FAST AND ACCURATELY.
@@ -570,33 +622,30 @@ export async function generateTimestampedTranscript(
   videoFile?: File | null,
   videoUrl?: string | null,
   onProgress?: (msg: string, percent?: number) => void,
-  model = 'gemini-3.1-flash-lite'
+  model = 'gemini-3.1-flash-lite',
+  scriptStyle: Step3ScriptStyle = 'narrator',
+  engine: 'assemblyai' | 'videosubfinder_paddleocr' | 'faster_whisper' | 'gemini' = 'videosubfinder_paddleocr'
 ): Promise<TranscriptSegment[]> {
   if (!videoFile && !videoUrl) {
     throw new Error('ဗီဒီယိုဖိုင် မတွေ့ရှိပါ။ Step 2 တွင် Custom Video ကို အရင်တင်ပေးပါ။');
   }
 
-  const strictSystemInstruction = `You are an elite Burmese Movie-Recap Storyteller & Voice-Acting Director (နမူနာ YouTube/TikTok Recap ဇာတ်ကြောင်းပြောသူ).
-MANDATORY STEP 3 NARRATION & VOICE-EXPRESSION RULES:
-1. MATCH SAMPLE VIDEO BURMESE STYLE — BAN REPETITIVE "တယ် / ပါတယ်" ENDINGS:
-   - NEVER end consecutive sentences with robotic textbook forms like "...နေပါတယ်။", "...ဖြစ်ပါတယ်။", "...သွားပါတယ်။", "...လိုက်ပါတယ်။".
-   - Write crisp, natural SPOKEN Burmese storytelling (စကားပြောဇာတ်ကြောင်း) mixing varied endings:
-     • Surprise / realization: "...ပေါ်လာတော့ သူ အံ့ဩသွားတယ်!", "...ရတနာပွားခွက်ပဲ ဆိုတာ သူ နားလည်သွားတယ်"
-     • Readiness / turning point: "...ဒီခွက်နဲ့ လာမယ့်ပြိုင်ပွဲမှာ ဝင်ပြိုင်နိုင်ပြီ။"
-     • Intent / promise / forecast: "...သေချာပေါက် ဝင်ပြိုင်မယ်။", "...အရင်ဆုံး အတိုးယူရမယ်။", "...သန်းပေါင်းများစွာ ကုန်မယ်။"
-     • Defiance / refusal: "...သူ အလွတ်မပေးဘူး။"
-     • Punchy irony / taunts / questions: "...ငါ့နောက်လိုက်နေတဲ့သူပဲ။", "...သန်းနဲ့ချီ တန်မယ်နော်!", "...အောင်မြင်နေပြီပဲ။", "...တစ်ကီလို ရွှေတုံး ရှိလား?"
-   - Avoid "ပါတယ်" in narration (only use polite "ပါတယ်" when retelling a shop clerk's polite reply like "ရှိပါတယ်။ ခဏစောင့်ပါ။"). Never end more than 2 cues in a row with "တယ်".
-2. EXPRESSIVE VOCAL EMOTION & PUNCTUATION FOR VOICE CLONE:
-   - Use "!" on shocking/surprising reveals or threats, and "?" on questions so TTS raises/lowers vocal pitch expressively (အသံနိမ့်မြင့် ပါဝင်စေရန်) rather than reading flatly.
-   - Set specific "emotion" tags on EVERY segment matching the scene: e.g. "surprised, amazed", "determined, fierce", "curious, questioning", "smug, mocking", "urgent, tense", "calm storytelling", "sad, heartfelt".
-3. SCENE-BY-SCENE VISUAL + AUDIO ALIGNMENT:
-   - Inspect EVERY timestamped visual frame AND listen sequentially. Start each cue AT THE EXACT MOMENT that scene or exchange appears.
-   - Keep "speaker": "Narrator (ဇာတ်ကြောင်းပြောသူ)" on every segment. Preserve exact numbers, money, weights, and names faithfully.
-4. CONCISE SPEAKING-TIME BUDGET (~3.4 syllables/sec):
-   - Keep each 3.5s–5.5s cue concise (~10–18 Burmese syllables) so the narrator finishes cleanly inside [start, end] BEFORE the next scene cut.
-5. TIMESTAMPS & SUBTITLES:
-   - Return sequential non-overlapping chunk-relative timestamps ("00:00:00,000" to chunk end). Subtitles max 2 lines, <=35 chars/line, ZERO foreign/Chinese characters.`;
+  const styleCfg = getStep3ScriptStyleConfig(scriptStyle);
+  const strictSystemInstruction = `${styleCfg.roleTitle}
+${styleCfg.modeDirective}
+
+MANDATORY STEP 3 RULES:
+1. VOICE-EXPRESSION & NATURAL BURMESE:
+   - Never repeat stiff textbook suffixes ("...နေပါတယ်။ / ...ဖြစ်ပါတယ်။ / ...သွားပါတယ်။").
+   - Use "!" on surprises/reactions and "?" on questions so Step 4 Voice Clone renders lively vocal pitch variation.
+   - Set specific "emotion" tags on EVERY segment: e.g. "surprised, amazed", "determined, fierce", "curious, questioning", "smug, mocking", "urgent, tense", "calm storytelling", "sad, heartfelt".
+2. SCENE-BY-SCENE VISUAL (OCR + ACTION) + AUDIO ALIGNMENT:
+   - Inspect EVERY timestamped visual frame (read any on-screen subtitles/captions/text!) AND listen sequentially. Start each cue AT THE EXACT MOMENT that line or scene appears.
+   - Keep "speaker": "${styleCfg.speakerLabel}" on every segment. Preserve exact numbers, money, weights, and names faithfully.
+3. CONCISE SPEAKING-TIME BUDGET (~3.4 syllables/sec):
+   - Keep each cue concise for its [start, end] window so spoken voice fits cleanly before the next cut.
+4. TIMESTAMPS & SUBTITLES:
+   - Return sequential non-overlapping chunk-relative timestamps ("00:00:00,000" to chunk end). Subtitles max 2 lines, <=35 chars/line, ZERO foreign/Chinese characters in Burmese lines.`;
 
   const buildTimestampedFrameParts = (
     frames: Array<{ time: number; base64Jpeg: string }>,
@@ -625,12 +674,17 @@ MANDATORY STEP 3 NARRATION & VOICE-EXPRESSION RULES:
   }
 
   try {
-    onProgress?.('🎙️ [1/3] ဗီဒီယိုကို ၁ မိနစ်စာ အပိုင်းများခွဲ၍ အသံထုတ်ယူနေပါသည်...', 8);
+    onProgress?.(
+      engine === 'videosubfinder_paddleocr'
+        ? '🔍 [1/3] VideoSubFinder + PaddleOCR ဖြင့် Video ထဲမှ Subtitle စာတန်းထိုးများကို OCR ဖြင့် ရှာဖွေဖတ်ယူနေပါသည်...'
+        : '🎙️ [1/3] ဗီဒီယိုကို 0:30 (30s) AI/Whisper chunks များခွဲ၍ ပိုမိုတိကျစွာ အသံထုတ်ယူနေပါသည်...',
+      8
+    );
 
-    // Always process in 1-minute (60s) blocks for tight visual-to-timestamp grounding
+    // Process in 30-second (0:30) AI/Whisper chunks for maximum STT & narrator accuracy
     const chunks = await extractAudioChunksFromVideo(
       videoFile || videoUrl!,
-      MINUTE_BLOCK_SECONDS,
+      ANALYSIS_CHUNK_SECONDS,
       totalDuration
     );
     const totalParts = chunks.length;
@@ -638,12 +692,17 @@ MANDATORY STEP 3 NARRATION & VOICE-EXPRESSION RULES:
       throw new Error('ဗီဒီယို အပိုင်းများ ခွဲထုတ်၍မရပါ။ ဗီဒီယိုဖိုင် မှန်ကန်မှုကို စစ်ဆေးပါ။');
     }
 
+    const isSubFinderOcr = engine === 'videosubfinder_paddleocr' || scriptStyle === 'translation';
+    const framesPerBlock = isSubFinderOcr ? 14 : 6;
+
     onProgress?.(
-      `🎥 [2/3] မြင်ကွင်း Keyframes များကို (${totalParts} Parts — high density 4s/frame) ထုတ်ယူနေပါသည်...`,
+      isSubFinderOcr
+        ? `🎥 [2/3] VideoSubFinder ဖြင့် Subtitle Bounding Strips (${totalParts} × 0:30 Chunks · 14 Frames) ကို OCR အတွက် ထုတ်ယူနေပါသည်...`
+        : `🎥 [2/3] မြင်ကွင်း Keyframes များကို (${totalParts} × 0:30 AI Chunks — high precision) ထုတ်ယူနေပါသည်...`,
       20
     );
 
-    // Extract 15 aspect-preserved keyframes per 60s block (~every 4 seconds) so every scene cut is aligned cleanly
+    // Extract aspect-preserved keyframes per 30s AI chunk
     let keyframesByPart = new Map<number, Array<{ time: number; base64Jpeg: string }>>();
     if (videoUrlToUse) {
       try {
@@ -655,14 +714,16 @@ MANDATORY STEP 3 NARRATION & VOICE-EXPRESSION RULES:
             c.startTimeSeconds + c.durationSeconds
           ),
         }));
-        keyframesByPart = await extractAllVideoKeyframesBatch(videoUrlToUse, windows, 15);
+        keyframesByPart = await extractAllVideoKeyframesBatch(videoUrlToUse, windows, framesPerBlock, isSubFinderOcr);
       } catch (kfErr) {
         console.warn('Batch keyframe extraction skipped:', kfErr);
       }
     }
 
     onProgress?.(
-      `⚡ [3/3] Gemini AI ဖြင့် Part 1/${totalParts} မှ စတင် ခွဲခြမ်းနေပါသည်...`,
+      isSubFinderOcr
+        ? `⚡ [3/3] PaddleOCR ဖြင့် Subtitle စာတန်းထိုးများကို OCR ဖတ်ယူပြီး မြန်မာဘာသာပြန်ဆိုနေပါသည် (Chunk 1/${totalParts})...`
+        : `⚡ [3/3] Gemini AI ဖြင့် 0:30 Chunk 1/${totalParts} မှ စတင် ခွဲခြမ်းနေပါသည်...`,
       32
     );
 
@@ -684,16 +745,22 @@ MANDATORY STEP 3 NARRATION & VOICE-EXPRESSION RULES:
       const blockFrameParts = blockKfs.length > 0 ? buildTimestampedFrameParts(blockKfs, offsetSec) : [];
 
       const chunkPrompt = `
-YOU ARE PROCESSING 1-MINUTE BLOCK PART ${partNum} OF ${totalParts} FOR VIDEO "${videoTitle}".
+YOU ARE PROCESSING 30-SECOND (0:30) AI ANALYSIS CHUNK ${partNum} OF ${totalParts} FOR VIDEO "${videoTitle}".
+ACTIVE STEP 3 MODE: ${scriptStyle.toUpperCase()}
+ACTIVE ENGINE: ${engine.toUpperCase()}
 Block Window: ${formatMinSec(offsetSec)} to ${formatMinSec(chunkEndSec)} (Chunk Duration: ${chunk.durationSeconds.toFixed(1)}s).
-${chunk.hasAudio === false ? 'NOTE: No decodable audio track detected; describe chronological scenes visually from the timestamped frames.\n' : ''}Creator Context: ${customContext || 'Engaging Burmese recap storyteller with natural emotional pitch variation and varied spoken endings'}.
+${engine === 'videosubfinder_paddleocr' ? 'SPECIAL ENGINE INSTRUCTION (VideoSubFinder + PaddleOCR Hardsub Extraction):\n- Scan the bottom, top, and center regions of all video frames for burnt-in subtitles/captions.\n- Perform Optical Character Recognition (OCR) on every visible subtitle line, extract start and end timestamps, put the exact recognized subtitle characters into "originalText", and translate accurately into natural Burmese in "text".\n' : ''}${chunk.hasAudio === false ? 'NOTE: No decodable audio track detected; read on-screen subtitles/text & describe chronological scenes from the timestamped frames.\n' : ''}Creator Context: ${customContext || styleCfg.roleTitle}.
+${styleCfg.slotDirective}
 
-CRITICAL SCENE-LOCKED & NATURAL BURMESE RULES:
-1. BAN "တယ် / ပါတယ်" REPETITION: Write crisp colloquial Burmese movie-recap sentences ending naturally with "...ပြီ", "...မယ်", "...ဘူး", "...ပဲ", "...လား?", "...နော်!", "...သွားတယ်" — NEVER repeat "...ပါတယ် / ...နေပါတယ် / ...ဖြစ်ပါတယ်" like a textbook!
-2. EXPRESSIVE EMOTION + PUNCTUATION: Put "!" on shocking/surprised lines ("သူ အံ့ဩသွားတယ်!"), "?" on questions ("ရှိလား?"), and an accurate vocal "emotion" tag (e.g. "surprised, amazed", "determined, fierce", "mocking, smug", "curious, questioning", "calm storytelling").
-3. MATCH VISUAL FRAME TIMESTAMPS: Inspect "[Visual Frame @ ... | Chunk +Xs]" images (~every 4s) alongside the audio. Align every cue to exact scene/dialogue timing.
-4. CONCISE SPOKEN LENGTH: Keep each cue ~3.4 syllables/sec (~10–18 Burmese syllables per 3.5s–5.5s cue) so TTS finishes cleanly inside the scene slot.
-5. SINGLE NARRATOR STORYTELLING: Always set "speaker": "Narrator (ဇာတ်ကြောင်းပြောသူ)".
+CRITICAL RULES:
+1. STYLE FIDELITY (${scriptStyle.toUpperCase()}): Strictly follow the ${scriptStyle.toUpperCase()} mode instructions above!
+   ${scriptStyle === 'translation'
+     ? '- Read EVERY spoken voice sentence in the audio track AND EVERY on-screen subtitle/caption in the video frames; record original quote in "originalText" and translate accurately into natural Burmese in "text".'
+     : '- Write natural spoken Burmese meant to be read aloud (ban repetitive textbook "...ပါတယ် / ...နေပါတယ် / ...ဖြစ်ပါတယ်" endings).'}
+2. EXPRESSIVE EMOTION + PUNCTUATION: Put "!" on shocking/surprised lines, "?" on questions, and an accurate vocal "emotion" tag (e.g. "surprised, amazed", "determined, fierce", "mocking, smug", "curious, questioning", "calm storytelling").
+3. MATCH VISUAL FRAME TIMESTAMPS: Inspect "[Visual Frame @ ... | Chunk +Xs]" images alongside the audio. Align every cue to exact subtitle/dialogue/scene timing.
+4. CONCISE SPOKEN LENGTH: Keep each cue ~3.4 syllables/sec so TTS finishes cleanly inside the timestamp window.
+5. SPEAKER LABEL: Always set "speaker": "${styleCfg.speakerLabel}".
 6. CHUNK-RELATIVE TIMESTAMPS: Report "start" and "end" strictly between "00:00:00,000" and "${formatSecondsToSRT(chunk.durationSeconds)}" (sequential non-overlapping cues).
 7. Return ONLY a valid JSON array matching this exact schema:
 [
@@ -702,9 +769,9 @@ CRITICAL SCENE-LOCKED & NATURAL BURMESE RULES:
     "start": "00:00:00,000",
     "end": "00:00:04,500",
     "duration": 4.5,
-    "speaker": "Narrator (ဇာတ်ကြောင်းပြောသူ)",
-    "originalText": "Spoken dialogue or key on-screen event at this exact timestamp",
-    "text": "ရေဘူးတွေ အများကြီး ပေါ်လာတော့ သူ အံ့ဩသွားတယ်!",
+    "speaker": "${styleCfg.speakerLabel}",
+    "originalText": "${scriptStyle === 'translation' ? 'Exact voice dialogue or on-screen subtitle read from the video' : 'Spoken dialogue or key on-screen event at this exact timestamp'}",
+    "text": "Burmese spoken/translated line matching ${scriptStyle.toUpperCase()} mode...",
     "subtitleText": "စာတန်းထိုး (max 2 lines, <=35 chars/line)",
     "emotion": "surprised, amazed",
     "isOnScreen": false
@@ -720,7 +787,7 @@ CRITICAL SCENE-LOCKED & NATURAL BURMESE RULES:
       }
 
       let retries = 0;
-      while (retries < 2 && !fatalError) {
+      while (retries < 3 && !fatalError) {
         try {
           retries++;
           const { text: chunkResText } = await callGeminiWithRotation(
@@ -728,7 +795,7 @@ CRITICAL SCENE-LOCKED & NATURAL BURMESE RULES:
             strictSystemInstruction,
             model,
             chunkPayload,
-            { responseMimeType: 'application/json', timeoutMs: 45000 }
+            { responseMimeType: 'application/json', timeoutMs: 60000 }
           );
 
           const parsedChunk = parseChunkJsonArray(chunkResText);
@@ -771,6 +838,7 @@ CRITICAL SCENE-LOCKED & NATURAL BURMESE RULES:
             const sylCount = countBurmeseSyllables(myanmarText);
             const maxSyl = calculateMaxAllowedSyllables(dur);
 
+            const minutePart = Math.floor(adjustedStartSec / MINUTE_BLOCK_SECONDS) + 1;
             partSegments.push({
               id: `p${partNum}_${item.id || idx + 1}_${Date.now()}_${idx}`,
               startTime: parseFloat(adjustedStartSec.toFixed(2)),
@@ -779,19 +847,22 @@ CRITICAL SCENE-LOCKED & NATURAL BURMESE RULES:
               originalText: origText,
               myanmarTranslation: myanmarText,
               subtitleText: subText.replace(/[\u4e00-\u9fa5]/g, '').trim(),
-              speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
+              speaker: styleCfg.speakerLabel,
               emotion: item.emotion || item.speaking_emotion_and_delivery || 'Storytelling narrator, clear cadence',
               isOnScreen: false,
-              lipSyncNote: 'Aligned to 1-minute scene block timeline',
+              lipSyncNote: scriptStyle === 'translation'
+                ? 'Synced to original video voice & on-screen subtitle timing'
+                : 'Aligned to 0:30 part timeline (30s AI/Whisper chunks)',
               voice: 'Thiha',
+              scriptStyle,
               syllableCount: sylCount,
               maxAllowedSyllables: maxSyl,
               atempoRate: 1.0,
               playbackRate: 1.0,
               pauseLead: 0.1,
               pauseTrail: 0.15,
-              sceneShotId: `shot_p${partNum}_${idx + 1}`,
-              minutePartIndex: partNum,
+              sceneShotId: `shot_c${partNum}_${idx + 1}`,
+              minutePartIndex: minutePart,
               isHumanReviewed: false,
             });
           });
@@ -813,8 +884,8 @@ CRITICAL SCENE-LOCKED & NATURAL BURMESE RULES:
             fatalError = chunkErr;
             return;
           }
-          if (retries < 2) {
-            await new Promise((r) => setTimeout(r, 900));
+          if (retries < 3) {
+            await new Promise((r) => setTimeout(r, 1500));
           }
         }
       }
@@ -852,7 +923,7 @@ CRITICAL SCENE-LOCKED & NATURAL BURMESE RULES:
         enforceSingleSpeakerLabel: true,
       });
       onProgress?.(
-        `🎉 [အောင်မြင်ပါသည်] 1-Minute Block Part 1 မှ Part ${totalParts} အထိ Narrator ဇာတ်ကြောင်းပြော Segments ${finalSegments.length} ခု တိကျစွာ ထုတ်ယူပြီးပါပြီ။`,
+        `🎉 [အောင်မြင်ပါသည်] 0:30 AI/Whisper Parts (${totalParts} ခု) မှ Narrator Segments ${finalSegments.length} ခု တိကျစွာ ထုတ်ယူပြီးပါပြီ။`,
         100
       );
       return finalSegments;
@@ -1233,4 +1304,269 @@ ${JSON.stringify(payload, null, 2)}`;
       audioDuration: hit.text !== seg.myanmarTranslation ? undefined : seg.audioDuration,
     };
   });
+}
+
+/**
+ * Generates Chronological Story-Summary Narration in 30-second scene slots (Scene-by-Scene Recap Mode).
+ * Instead of translating Chinese lines word-for-word or lip-syncing individual mouths,
+ * each 30s slot summarizes what happens in the plot, plus a scene-matching short bridging line
+ * separated by a 0.18s pause so each slot fills ~30 seconds naturally.
+ */
+export async function generateSceneRecapNarration(
+  videoTitle: string,
+  durationSeconds: number,
+  customContext = '',
+  videoFile?: File | null,
+  videoUrl?: string | null,
+  onProgress?: (msg: string, percent?: number) => void,
+  model = 'gemini-3.1-flash-lite',
+  slotSeconds = RECAP_SLOT_SECONDS,
+  scriptStyle: Step3ScriptStyle = 'narrator'
+): Promise<TranscriptSegment[]> {
+  if (!videoFile && !videoUrl) {
+    throw new Error('ဗီဒီယိုဖိုင် မတွေ့ရှိပါ။ Step 2 တွင် Custom Video ကို အရင်တင်ပေးပါ။');
+  }
+
+  const slotStep = Math.max(15, slotSeconds || RECAP_SLOT_SECONDS);
+  const styleCfg = getStep3ScriptStyleConfig(scriptStyle);
+  const systemInstruction = `${styleCfg.roleTitle}
+${styleCfg.modeDirective}
+
+CORE SCENE-SLOT ARCHITECTURE (${slotStep}-SECOND SLOTS + 0.18s PAUSE):
+1. TWO-PART SLOT FILLING:
+   - "mainNarration": Core spoken script for this ${slotStep}-second window (~17–20s spoken = ~58–74 Burmese syllables, 2–3 smooth spoken sentences).
+   - "bridgeNarration": Concise, scene-matching follow-up / bridging continuation ("မြင်ကွင်းနဲ့ကိုက်ညီတဲ့ ဆက်စကားတို", ~7–10s spoken = ~24–36 Burmese syllables) so [mainNarration + 0.18s pause + bridgeNarration] fills the ${slotStep}s slot cleanly without awkward silence.
+   - Proportionally scale if final slot is shorter than ${slotStep}s (~3.45 syllables/sec).
+2. SINGLE CONSISTENT VOICE SCRIPT:
+   - Keep tone natural, spoken aloud, and coherent across every slot without repetitive stiff "ပါတယ် / ဖြစ်ပါသည်" endings.`;
+
+  const totalDuration = durationSeconds || slotStep;
+  let videoUrlToUse = videoUrl;
+  let createdObjectUrl = false;
+  if (!videoUrlToUse && videoFile && typeof window !== 'undefined' && window.URL) {
+    videoUrlToUse = URL.createObjectURL(videoFile);
+    createdObjectUrl = true;
+  }
+
+  try {
+    onProgress?.(`🎙️ [1/3] ဗီဒီယိုကို ${slotStep} စက္ကန့်စီ Slots များခွဲ၍ အသံထုတ်ယူနေပါသည်...`, 8);
+
+    const chunks = await extractAudioChunksFromVideo(
+      videoFile || videoUrl!,
+      slotStep,
+      totalDuration
+    );
+    const totalSlots = chunks.length;
+    if (totalSlots === 0) {
+      throw new Error('ဗီဒီယို အပိုင်းများ ခွဲထုတ်၍မရပါ။ ဗီဒီယိုဖိုင် မှန်ကန်မှုကို စစ်ဆေးပါ။');
+    }
+
+    onProgress?.(
+      `🎥 [2/3] ${slotStep}s Slot ${totalSlots} ခုစာ မြင်ကွင်း Keyframes များ ထုတ်ယူနေပါသည်...`,
+      22
+    );
+
+    let keyframesBySlot = new Map<number, Array<{ time: number; base64Jpeg: string }>>();
+    if (videoUrlToUse) {
+      try {
+        const windows = chunks.map((c) => ({
+          partIndex: c.partIndex,
+          startSec: c.startTimeSeconds,
+          endSec: Math.min(
+            totalDuration > 0 ? totalDuration : c.startTimeSeconds + c.durationSeconds,
+            c.startTimeSeconds + c.durationSeconds
+          ),
+        }));
+        keyframesBySlot = await extractAllVideoKeyframesBatch(videoUrlToUse, windows, 6);
+      } catch (kfErr) {
+        console.warn('Recap keyframe batch warning:', kfErr);
+      }
+    }
+
+    onProgress?.(
+      `🎬 [3/3] Gemini AI ဖြင့် ${slotStep}s Scene Recap (${totalSlots} Slots) ကို ဇာတ်ကြောင်းအစဉ်လိုက် ရေးသားနေသည်...`,
+      34
+    );
+
+    const slotsOut: TranscriptSegment[] = [];
+    let runningStorySummary = '';
+
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      const slotNum = chunk.partIndex;
+      const offsetSec = chunk.startTimeSeconds;
+      const slotDur = Math.max(2, chunk.durationSeconds);
+      const slotEndSec = parseFloat((offsetSec + slotDur).toFixed(2));
+      const frames = keyframesBySlot.get(slotNum) || [];
+
+      const totalTargetSyl = Math.max(14, Math.round(slotDur * 3.45));
+      const mainTargetSyl = Math.round(totalTargetSyl * 0.67);
+      const bridgeTargetSyl = Math.max(8, totalTargetSyl - mainTargetSyl);
+
+      const frameParts: Array<{ mimeType: string; data: string } | { text: string }> = [];
+      for (const f of frames) {
+        frameParts.push({ text: `[Scene @ ${formatMinSec(f.time)}]` });
+        frameParts.push({ mimeType: 'image/jpeg', data: f.base64Jpeg });
+      }
+      if (chunk.hasAudio !== false && chunk.base64Wav) {
+        frameParts.push({ mimeType: chunk.mimeType, data: chunk.base64Wav });
+      }
+
+      const slotPrompt = `
+GENERATE SCENE-BY-SCENE BURMESE SCRIPT FOR SLOT ${slotNum} OF ${totalSlots} IN "${scriptStyle.toUpperCase()}" MODE.
+Video Title: "${videoTitle}"
+Slot Time Window: ${formatMinSec(offsetSec)} to ${formatMinSec(slotEndSec)} (${slotDur.toFixed(1)} seconds)
+${customContext ? `Creator Instructions: ${customContext}\n` : ''}${runningStorySummary ? `Previous Scene Context (continue chronologically without repeating): ${runningStorySummary}\n` : 'Opening Scene: Start naturally from the opening beat.\n'}
+${styleCfg.slotDirective}
+
+STRICT SLOT LENGTH & STRUCTURE:
+- Aim for ~${totalTargetSyl} Burmese syllables total (~3.45 syllables/sec) so the spoken voice fills ${slotDur.toFixed(1)}s cleanly with a 0.18s pause between Part 1 & Part 2:
+  1) "mainNarration": ~${mainTargetSyl} Burmese syllables (${scriptStyle === 'translation' ? 'faithful Burmese translation of audio & on-screen subtitles' : scriptStyle === 'story' ? 'vivid human Storyteller plot narration' : 'real-life spoken Narrator voiceover line'}).
+  2) "bridgeNarration": ~${bridgeTargetSyl} Burmese syllables (a short scene-matching continuation/bridging line filling the slot cleanly after 0.18s pause).
+- Return ONLY a single valid JSON object matching this exact schema:
+{
+  "sceneTitle": "Short 2-5 word Burmese plot label",
+  "sceneEventSummary": "${scriptStyle === 'translation' ? 'Source dialogue/on-screen subtitle text observed in this slot' : `Brief summary of what occurred in this ${slotDur.toFixed(0)}s slot`}",
+  "mainNarration": "Primary Burmese ${scriptStyle} script...",
+  "bridgeNarration": "Short scene-matching bridging continuation sentence in Burmese...",
+  "emotion": "Surprised / Tense / Calm Storytelling / Determined / Playful"
+}
+`;
+
+      let parsedObj: any = null;
+      let attempts = 0;
+      while (attempts < 2) {
+        attempts++;
+        try {
+          const { text: rawRes } = await callGeminiWithRotation(
+            slotPrompt,
+            systemInstruction,
+            model,
+            frameParts,
+            { responseMimeType: 'application/json', timeoutMs: 45000 }
+          );
+          const cleaned = rawRes.replace(/```json/gi, '').replace(/```/g, '').trim();
+          const objMatch = cleaned.match(/\{[\s\S]*\}/);
+          parsedObj = JSON.parse(objMatch ? objMatch[0] : cleaned);
+          if (Array.isArray(parsedObj)) parsedObj = parsedObj[0];
+          if (parsedObj?.mainNarration) break;
+        } catch (slotErr: any) {
+          console.warn(`Slot ${slotNum} attempt ${attempts} warning:`, slotErr);
+          if (isFatalGeminiError(slotErr)) throw slotErr;
+          if (attempts < 2) await new Promise((r) => setTimeout(r, 700));
+        }
+      }
+
+      const mainText = String(parsedObj?.mainNarration || parsedObj?.text || '').replace(/[\u4e00-\u9fa5]/g, '').trim();
+      const bridgeText = String(parsedObj?.bridgeNarration || '').replace(/[\u4e00-\u9fa5]/g, '').trim();
+      const combinedText = bridgeText ? `${mainText} ${bridgeText}`.trim() : mainText;
+      const sceneTitle = String(parsedObj?.sceneTitle || `အပိုင်း ${slotNum}`).trim();
+      const eventNote = String(parsedObj?.sceneEventSummary || `Scene ${formatMinSec(offsetSec)}–${formatMinSec(slotEndSec)}`).trim();
+      const emotionTag = String(parsedObj?.emotion || 'Storytelling narrator, clear cadence').trim();
+
+      if (combinedText) {
+        runningStorySummary = `${sceneTitle}: ${mainText.slice(0, 140)}`;
+        const sylCount = countBurmeseSyllables(combinedText);
+        const maxSyl = calculateMaxAllowedSyllables(slotDur);
+
+        slotsOut.push({
+          id: `slot_${slotNum}_${Date.now()}_${i}`,
+          startTime: parseFloat(offsetSec.toFixed(2)),
+          endTime: slotEndSec,
+          originalStartTime: parseFloat(offsetSec.toFixed(2)),
+          originalEndTime: slotEndSec,
+          duration: parseFloat(slotDur.toFixed(2)),
+          originalText: `[${sceneTitle}] ${eventNote}`,
+          myanmarTranslation: combinedText,
+          mainNarration: mainText,
+          bridgeNarration: bridgeText,
+          pauseBetweenParts: 0.18,
+          sceneTitle,
+          slotMode: 'scene_recap_30s',
+          scriptStyle,
+          subtitleText: combinedText,
+          speaker: styleCfg.speakerLabel,
+          emotion: emotionTag,
+          isOnScreen: false,
+          lipSyncNote: `မြင်ကွင်းအလိုက် ၃၀ စက္ကန့် Slot ချိန်ညှိမှု (0.18s Pause — ${scriptStyle.toUpperCase()})`,
+          voice: 'Thiha',
+          syllableCount: sylCount,
+          maxAllowedSyllables: maxSyl,
+          atempoRate: 1.0,
+          playbackRate: 1.0,
+          pauseLead: 0.05,
+          pauseTrail: 0.18,
+          sceneShotId: `Slot ${slotNum} (${formatMinSec(offsetSec)}–${formatMinSec(slotEndSec)})`,
+          minutePartIndex: slotNum,
+          isHumanReviewed: false,
+        });
+      }
+
+      const pct = Math.min(96, Math.round(34 + ((i + 1) / totalSlots) * 62));
+      onProgress?.(
+        `✓ [Slot ${slotNum}/${totalSlots}: ${formatMinSec(offsetSec)}–${formatMinSec(slotEndSec)}] "${sceneTitle}" ပြီးစီးပါပြီ`,
+        pct
+      );
+    }
+
+    if (slotsOut.length === 0) {
+      throw new Error('Scene Recap Narration ထုတ်ယူ၍မရပါ။ Gemini API Key ကို စစ်ဆေးပေးပါ။');
+    }
+
+    onProgress?.(
+      `🎉 [အောင်မြင်ပါသည်] ${slotStep}s Slot ${slotsOut.length} ပိုင်းစလုံး မြင်ကွင်းအလိုက် ဇာတ်ကြောင်းအကျဉ်း + ဆက်စကားတို (0.18s Pause) ထုတ်ယူပြီးပါပြီ!`,
+      100
+    );
+    return slotsOut;
+  } finally {
+    if (createdObjectUrl && videoUrlToUse) {
+      try {
+        URL.revokeObjectURL(videoUrlToUse);
+      } catch {}
+    }
+  }
+}
+
+/**
+ * Generates a short, scene-matching bridging/continuation sentence ("မြင်ကွင်းနဲ့ကိုက်ညီတဲ့ ဆက်စကားတို")
+ * to fill the remaining seconds of a 30-second recap slot cleanly after a 0.18s pause.
+ */
+export async function generateShortBridgeLineForSlot(
+  mainNarration: string,
+  targetFillSeconds: number,
+  sceneContext = '',
+  existingBridge = ''
+): Promise<string> {
+  const safeFill = Math.max(3.5, Math.min(18, targetFillSeconds));
+  const targetSyllables = Math.max(12, Math.round(safeFill * 3.55));
+
+  const prompt = `You are a Burmese Movie Recap Script Editor.
+The current 30-second scene narration is TOO SHORT and leaves ~${safeFill.toFixed(1)} seconds empty.
+TASK: Write a SHORT scene-matching continuation / bridging sentence ("မြင်ကွင်းနဲ့ကိုက်ညီတဲ့ ဆက်စကားတို") that comes AFTER a 0.18-second pause to naturally fill the remaining ${safeFill.toFixed(1)} seconds.
+
+Main narration already spoken in this slot:
+"${mainNarration}"
+${sceneContext ? `Scene event context: "${sceneContext}"\n` : ''}${existingBridge ? `Previous too-short bridge line to expand smoothly: "${existingBridge}"\n` : ''}
+RULES:
+1. Aim for ~${targetSyllables} Burmese syllables so it speaks cleanly in ~${safeFill.toFixed(1)} seconds.
+2. Continue the exact scene mood/visual detail smoothly without repeating words from the main narration.
+3. Natural colloquial Burmese storytelling style (NO repetitive "ပါတယ်" padding; mix endings like "...ပြီ", "...မယ်", "...ဘူး", "...ပဲ", "...သွားတယ်").
+4. Output ONLY the Burmese bridging sentence(s). No quotes, no markdown, no explanations.`;
+
+  try {
+    const { text: res } = await callGeminiWithRotation(
+      prompt,
+      'You are a Burmese Movie Recap narrator assistant writing concise continuation lines. Output Burmese text only.'
+    );
+    const cleaned = res
+      .replace(/```[a-z]*\n?/gi, '')
+      .replace(/```/g, '')
+      .replace(/^["'“”‘’]+|["'“”‘’]+$/g, '')
+      .replace(/[\u4e00-\u9fa5]/g, '')
+      .trim();
+    return cleaned || existingBridge || 'အဲဒီအခြေအနေကို သူ သေချာစောင့်ကြည့်ရင်း နောက်တစ်ဆင့်အတွက် ပြင်ဆင်လိုက်တယ်';
+  } catch (e) {
+    console.warn('Bridge line generation failed:', e);
+    return existingBridge || 'အဲဒီမြင်ကွင်းကြောင့် ဇာတ်လမ်းက ပိုပြီး စိတ်ဝင်စားဖို့ ကောင်းလာတော့တယ်';
+  }
 }

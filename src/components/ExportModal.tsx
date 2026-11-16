@@ -101,9 +101,11 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         await audioCtx.resume();
       }
 
-      // Schedule all generated voice clone audio clips into audioCtx destination
-      for (const seg of project.segments) {
-        if (seg.audioUrl) {
+      // Schedule all generated voice clone audio clips strictly sequentially (zero overlapping voices)
+      const sortedSegs = [...project.segments].sort((a, b) => a.startTime - b.startTime);
+      let exportCursor = 0;
+      for (const seg of sortedSegs) {
+        if (seg.audioUrl && !project.isVoiceMuted) {
           try {
             const audioRes = await fetch(seg.audioUrl);
             const arrayBuf = await audioRes.arrayBuffer();
@@ -118,8 +120,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
             source.connect(dest);
 
-            const startTime = Math.max(0, seg.startTime);
-            source.start(audioCtx.currentTime + startTime);
+            const scheduledStart = Math.max(exportCursor, Math.max(0, seg.startTime));
+            const fullDur = decodedBuf.duration / speed;
+            exportCursor = scheduledStart + fullDur + 0.04;
+            source.start(audioCtx.currentTime + scheduledStart);
           } catch (audioErr) {
             console.warn('Audio segment load notice:', audioErr);
           }

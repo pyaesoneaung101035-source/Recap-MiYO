@@ -395,6 +395,6 @@ ${JSON.stringify(items.map((it, idx) => ({ id: idx + 1, start: it.start, end: it
     enforceSingleSpeakerLabel: true,
   });
 
-  onProgress(`✅ [ပြီးစီးပါပြီ] - 1-Minute Block Timeline အတိုင်း Narrator စာသား ${aligned.length} ခု ပြင်ဆင်ပြီးပါပြီ!`);
+  onProgress(`✅ [ပြီးစီးပါပြီ] - 0:30 Part Timeline အတိုင်း Narrator စာသား ${aligned.length} ခု ပြင်ဆင်ပြီးပါပြီ!`);
   return aligned;
 }

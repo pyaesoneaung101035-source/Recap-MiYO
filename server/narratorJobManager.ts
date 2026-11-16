@@ -273,7 +273,7 @@ async function startJobProcessing(job: NarratorJob): Promise<void> {
   const ai = getGeminiClient();
 
   const durationSec = job.videoMetadata.duration || 60;
-  const targetSegmentsCount = Math.max(2, Math.round(durationSec / 20)); // ~15-25 seconds per scene segment
+  const targetSegmentsCount = Math.max(5, Math.round(durationSec / 7)); // ~5-8 seconds per scene segment for comprehensive full coverage
 
   const stylePrompts = {
     recap: 'Dramatic cinematic movie recap style (စိတ်လှုပ်ရှားဖွယ် ဇာတ်လမ်းပြော)',
@@ -292,25 +292,32 @@ async function startJobProcessing(job: NarratorJob): Promise<void> {
   };
 
   const systemInstruction = `You are a professional Burmese video narrator, audio sync engineer, and dialogue localization expert.
-MANDATORY STEP 3 TTX NARRATOR RULES FOR CUSTOM UPLOADS:
-1. STRICT VIDEO FIDELITY & TIMELINE ORDER: Inspect the attached visual JPEG keyframes AND audio. Translate original spoken dialogue in chronological order and track exactly which scene/moment of the video each event belongs to.
-2. NO VAGUE SUMMARIZATION / NO GUESSING: Do NOT collapse scenes into vague summaries or invent unrecorded events. Retain real names, numbers, money amounts, weights, locations, jokes, and facts.
-3. SINGLE NARRATOR STORYTELLING STYLE (တစ်သံတည်း ဇာတ်ကြောင်းပြန်ပြောပုံစံ): Write as ONE consistent Burmese storyteller retelling character dialogue and events in narrative format without splitting into separate acting character voices.
-4. UNCLEAR SPEECH: If any speech or name is muffled or uncertain, mark it explicitly in uncertainWords and insert "[မရှင်းလင်း]" in the text rather than guessing.
-5. SCENE SEGMENTATION: Divide into chronological sequential scene beats (4s–10s each) matched strictly to start and end timestamps inside each 1-minute block.
-6. SUBTITLE FORMATTING: Max 2 lines per subtitle cue, under 35 Burmese characters per line, broken at natural phrase breaks.
-7. STYLE: ${stylePrompts[job.style]}.
-8. MODE: ${modeInstructions[job.mode]}.`;
+MANDATORY STEP 3 TTX NARRATOR RULES FOR CUSTOM UPLOADS (အသေမှတ်ထားမည့် NARRATOR & STORY PROMPT RULES):
+1. COMPREHENSIVE FULL COVERAGE (အကြောင်းအရာ အပြည့်အစုံပါရှိရမည် - နေရာလပ်မကျန်စေရ): ဗီဒီယိုဖိုင် အစ 0.0 စက္ကန့်မှ အဆုံးအထိ (${durationSec.toFixed(1)}s) ပါရှိသမျှ အသံထွက်၊ Dialog, Action များနှင့် Transcript အားလုံးကို နေရာလပ်မကျန် (No gaps / No skipped parts) အပြည့်အစုံ ခြုံငုံပါဝင်စေရမည်။
+2. ENGAGING STORYTELLING HELD OVER DRY READING: မူလအကြောင်းအရာကို တိုက်ရိုက်ဖတ်ပြတာထက် ပိုမိုဆွဲဆောင်မှုရှိအောင် ရေးပါ—
+   • အစပိုင်းမှာ စိတ်ဝင်စားစရာ Hook ထည့်ပါ။
+   • ဇာတ်ကောင်ရဲ့ အံ့ဩမှု၊ လောဘ၊ ဒေါသ၊ လက်စားချေလိုစိတ်တို့ကို ပေါ်လွင်အောင် ဖော်ပြပါ။
+   • အချက်အလက်တွေကို စာရင်းလို (bullet list) မပြောဘဲ ဆွဲဆောင်မှုရှိသော ဇာတ်လမ်းတစ်ခုလို ဆက်စပ်ပြောပါ။
+   • Scene ပြောင်းတိုင်း “ဒါပေမယ့်…”, “အဲဒီအချိန်မှာ…”, “သူမသိသေးတာက…” စတဲ့ suspense ဖန်တီးသော စကားလုံးများကို သုံးပါ။
+   • အပိုင်းတိုင်းအဆုံးမှာ နောက် scene ကို ဆက်ကြည့်ချင်စိတ်ဖြစ်ပေါ်စေမည့် သေးငယ်တဲ့ cliffhanger ထားပါ။
+3. SHORT SCENE-BY-SCENE SEGMENTATION (အပိုင်းတိုတိုနှင့် Scene တစ်ခုချင်းစီ အပြည့်အစုံခွဲထုတ်ခြင်း): 5 စက္ကန့်မှ 8 စက္ကန့်စီပါရှိသော Scene တစ်ခုချင်းစီအလိုက် Narrator အပိုင်းတိုတိုစီ (စုစုပေါင်း Segments ~${targetSegmentsCount} ခုခန့်) ကို အစအဆုံး အပြည့်အစုံ ခွဲထုတ်ပေးပါ။
+4. STRICT VIDEO FIDELITY & TIMELINE ORDER: Inspect visual keyframes and audio in chronological order without inventing unrecorded events. Retain real names, numbers, money amounts, locations, and facts.
+5. SINGLE NARRATOR STORYTELLING STYLE (တစ်သံတည်း ဇာတ်ကြောင်းပြန်ပြောပုံစံ): Write as ONE consistent Burmese storyteller.
+6. UNCLEAR SPEECH: Mark muffled speech in uncertainWords and insert "[မရှင်းလင်း]" in the text.
+7. SUBTITLE FORMATTING: Max 2 lines per subtitle cue, under 35 Burmese characters per line.
+8. STYLE: ${stylePrompts[job.style]}.
+9. MODE: ${modeInstructions[job.mode]}.`;
 
   const promptText = `Analyze this custom uploaded video content (duration: ${durationSec}s, filename: "${job.videoMetadata.filename}").
-Inspect the attached visual JPEG keyframes from this specific video alongside the audio.
-Divide it into chronological sequential segments anchored inside each 1-minute window (0-60s, 60-120s, etc., typically 4 to 10 seconds per segment).
+Inspect the attached visual JPEG keyframes and audio.
+Divide the video into approximately ${targetSegmentsCount} continuous chronological short scene segments (5s–8s each) covering the ENTIRE video from 0.0s to ${durationSec.toFixed(1)}s without any gaps or missing parts, ensuring every single spoken line, dialogue, and scene event is fully included.
+Follow the mandatory engaging narrator rules (hooks, character emotions, suspense words like "ဒါပေမယ့်…", "အဲဒီအချိန်မှာ…", cliffhangers at segment ends).
 For each segment return:
 - index: 1-based integer
 - startTime: start time in seconds (float)
 - endTime: end time in seconds (float)
 - sourceText: exact original spoken dialogue or visual event at that timestamp in THIS video
-- burmeseText: single-narrator storytelling Burmese retelling matching THIS exact moment (တစ်သံတည်း ဇာတ်ကြောင်းပြော)
+- burmeseText: engaging scene-by-scene single-narrator storytelling Burmese retelling matching THIS exact moment (တစ်သံတည်း ဇာတ်ကြောင်းပြော)
 - uncertainWords: array of words/names you are unsure about and need user review (can be empty [])`;
 
   job.stage = 'translating';

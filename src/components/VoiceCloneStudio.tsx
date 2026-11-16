@@ -11,12 +11,11 @@ import {
   CheckCircle2,
   Mic,
   Zap,
-  ExternalLink,
   X,
   Search,
   Sliders,
   User,
-  Users,
+  Lock,
   ArrowLeft,
   ArrowRight,
   Check,
@@ -24,22 +23,26 @@ import {
   Filter,
   ShieldCheck,
 } from 'lucide-react';
-import { ProjectState, TranscriptSegment, VoiceOption } from '../types';
-import { synthesizeMyanmarVoice, VOICE_PROFILES, VoiceStyle } from '../utils/edgeTtsClient';
-import { synthesizeHuggingFaceVoice, HF_VOICE_MODELS, HF_MULTI_SPEAKERS } from '../utils/huggingFaceClient';
-import { loadApiKeys } from '../utils/apiKeys';
+import { ProjectState, TranscriptSegment, VoiceOption, VoiceToneOption, TtsEngineMode } from '../types';
 import {
-  fetchElevenLabsVoices,
-  cloneElevenLabsVoice,
-  cloneElevenLabsFromSampleVideo,
-  synthesizeElevenLabsVoice,
-  ElevenLabsVoiceItem,
-} from '../utils/elevenLabsHumeClient';
-import { shortenBurmeseTextForDuration } from '../utils/geminiPool';
+  synthesizeMyanmarVoice,
+  VOICE_PROFILES,
+  VOICE_TONE_PRESETS,
+  VoiceStyle,
+} from '../utils/edgeTtsClient';
+import {
+  shortenBurmeseTextForDuration,
+  generateShortBridgeLineForSlot,
+  countBurmeseSyllables,
+} from '../utils/geminiPool';
+import { registerPreviewAudio, stopAllPreviewAudio } from '../utils/audioPreviewManager';
+import { stitchAudioPartsWithPause } from '../utils/audioStitcher';
 import { VideoPlayerView } from './VideoPlayerView';
 import { HumanReviewDubbingStudio } from './HumanReviewDubbingStudio';
 import {
   getMinuteBlocks,
+  getRecapSlots,
+  RECAP_SLOT_SECONDS,
   formatMinSec,
   clampGentleNarratorRate,
   realignSegmentsByMinuteBlocks,
@@ -54,14 +57,20 @@ interface VoiceCloneStudioProps {
   onNextStep?: () => void;
 }
 
+export const NARA_VOICES: VoiceOption[] = [
+  'NaraKoBanyar', 'NaraHtetMyat', 'NaraShoon', 'NaraThazin'
+];
+
 export const MALE_VOICES: VoiceOption[] = [
   'Thiha', 'KyawKyaw', 'AungAung', 'MinThway',
+  'NaraKoBanyar', 'NaraHtetMyat',
   'Titus', 'Perseus', 'Oberon', 'Atlas',
   'Schedar', 'Gacrux', 'Achird', 'Zubenelgenubi', 'Sadaltager'
 ];
 
 export const FEMALE_VOICES: VoiceOption[] = [
   'Nilar', 'MayThu', 'Thiri', 'SuSu',
+  'NaraShoon', 'NaraThazin',
   'Sulafat', 'Virgo', 'Minerva', 'Luna',
   'Lyra', 'Pulcherrima', 'Vindemiatrix', 'Sadachbia'
 ];
@@ -75,86 +84,32 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
   onNextStep,
 }) => {
   const [studioTab, setStudioTab] = useState<'generation' | 'review'>('generation');
-  const [voiceEngine, setVoiceEngine] = useState<'gemini' | 'huggingface' | 'elevenlabs'>('gemini');
-  
-  const [elevenLabsVoices, setElevenLabsVoices] = useState<ElevenLabsVoiceItem[]>([]);
-  const [selectedElevenLabsVoiceId, setSelectedElevenLabsVoiceId] = useState<string>('');
-  const [isElevenLabsFlowOpen, setIsElevenLabsFlowOpen] = useState(false);
-  const [isCloningVoice, setIsCloningVoice] = useState(false);
-  const [isCloningSampleVideo, setIsCloningSampleVideo] = useState(false);
-  const [cloneAudioFile, setCloneAudioFile] = useState<File | null>(null);
-  const [cloneVoiceName, setCloneVoiceName] = useState('My Burmese Clone');
 
-  const handleApplyElevenLabsAllocation = (voiceId: string, voiceName?: string) => {
-    setSelectedElevenLabsVoiceId(voiceId);
-    const targetName = voiceName || elevenLabsVoices.find((v) => v.voice_id === voiceId)?.name || 'Cloned Voice';
-    setProject((prev) => ({
-      ...prev,
-      segments: prev.segments.map((s) => ({
-        ...s,
-        voiceProvider: 'elevenlabs',
-        elevenLabsVoiceId: voiceId,
-        speaker: `ElevenLabs (${targetName})`,
-      })),
-    }));
-    setStatusText(`✓ ElevenLabs Voice Clone (${targetName}) ကို TTX Segments အားလုံးသို့ သတ်မှတ်ပြီးပါပြီ!`);
-  };
-
-  useEffect(() => {
-    if (voiceEngine === 'elevenlabs') {
-      fetchElevenLabsVoices().then((v) => {
-        setElevenLabsVoices(v);
-        if (v.length > 0) {
-          const vId = selectedElevenLabsVoiceId || v[0].voice_id;
-          if (!selectedElevenLabsVoiceId) {
-            setSelectedElevenLabsVoiceId(vId);
-          }
-          const chosenName = v.find((x) => x.voice_id === vId)?.name;
-          setProject((prev) => ({
-            ...prev,
-            segments: prev.segments.map((s) => ({
-              ...s,
-              voiceProvider: 'elevenlabs',
-              elevenLabsVoiceId: s.elevenLabsVoiceId || vId,
-              speaker: s.speaker?.includes('ElevenLabs') ? s.speaker : `ElevenLabs (${chosenName || 'Cloned Voice'})`,
-            })),
-          }));
-        }
-      }).catch(() => {});
-    }
-  }, [voiceEngine]);
-  
-  // Single vs Double Voice Mode State
-  const [voiceMode, setVoiceMode] = useState<'single' | 'double'>('single');
-  const [singleVoice, setSingleVoice] = useState<VoiceOption>('Thiha');
-  const [speakerA, setSpeakerA] = useState<VoiceOption>('Thiha');
-  const [speakerB, setSpeakerB] = useState<VoiceOption>('Nilar');
-
-  const [selectedHfSpeaker, setSelectedHfSpeaker] = useState<string>('hf_male_thiha');
-  const [hfSpeakerA, setHfSpeakerA] = useState<string>('hf_male_thiha');
-  const [hfSpeakerB, setHfSpeakerB] = useState<string>('hf_female_nilar');
-
-  const [targetSlot, setTargetSlot] = useState<'single' | 'speakerA' | 'speakerB'>('single');
-
+  // Strict Single-Voice Lock State (guarantees zero double-voice output)
+  const [singleVoice, setSingleVoice] = useState<VoiceOption>(
+    project.lockedVoice || project.segments[0]?.voice || 'Thiha'
+  );
+  const [ttsEngine, setTtsEngine] = useState<TtsEngineMode>(
+    project.ttsEngine || (VOICE_PROFILES[project.lockedVoice || project.segments[0]?.voice || 'Thiha']?.naraVoiceId ? 'nara' : 'auto')
+  );
   const [voiceStyle, setVoiceStyle] = useState<VoiceStyle>(project.voiceStyle || 'recap');
+  const [voiceTone, setVoiceTone] = useState<VoiceToneOption>(project.voiceTone || 'natural');
+  const [voicePitch, setVoicePitch] = useState<number>(project.voicePitch ?? 0);
 
   // Flow Panels State
   const [isGeminiFlowOpen, setIsGeminiFlowOpen] = useState(false);
-  const [isHfFlowOpen, setIsHfFlowOpen] = useState(false);
 
   // Flow Panel filters & search
   const [genderFilter, setGenderFilter] = useState<'all' | 'male' | 'female'>('all');
   const [searchQuery, setSearchQuery] = useState('');
-
-  // Hugging Face state
-  const [hfModel, setHfModel] = useState<string>('coqui/XTTS-v2');
-  const [customHfModel, setCustomHfModel] = useState<string>('');
 
   // Generation & Audio state
   const [trimSilence, setTrimSilence] = useState<boolean>(false);
   const [isBatchGenerating, setIsBatchGenerating] = useState(false);
   const [isSyncFitting, setIsSyncFitting] = useState(false);
   const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(null);
+  const [voiceGenStage, setVoiceGenStage] = useState<4 | 5 | null>(null);
+  const [voiceGenPercent, setVoiceGenPercent] = useState<number>(0);
 
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
   const [audioElement, setAudioElement] = useState<HTMLAudioElement | null>(null);
@@ -165,7 +120,19 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
   const [testAudioUrls, setTestAudioUrls] = useState<Record<string, string>>({});
   const [selectedMinutePart, setSelectedMinutePart] = useState<number | 'all'>('all');
 
-  const minuteBlocks = getMinuteBlocks(project.videoDuration || MINUTE_BLOCK_SECONDS);
+  useEffect(() => {
+    return () => {
+      stopAllPreviewAudio();
+    };
+  }, []);
+
+  const isRecap30sProject =
+    project.narrationMode === 'scene_recap_30s' ||
+    project.segments.some((s) => s.slotMode === 'scene_recap_30s' || (s.endTime - s.startTime) >= 20);
+
+  const minuteBlocks = isRecap30sProject
+    ? getRecapSlots(project.videoDuration || 360, project.recapSlotSeconds || RECAP_SLOT_SECONDS)
+    : getMinuteBlocks(project.videoDuration || MINUTE_BLOCK_SECONDS);
   const totalMinuteBlocks = minuteBlocks.length;
 
   const displayedSegments = project.segments.filter((s) => {
@@ -188,6 +155,7 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
     )?.segment || null;
 
   const stopAudio = () => {
+    stopAllPreviewAudio();
     if (audioElement) {
       audioElement.pause();
       audioElement.currentTime = 0;
@@ -202,6 +170,9 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
     }
 
     stopAudio();
+    // Pause main VideoPlayerView so preview and video dialogue/narration NEVER overlap
+    setProject((prev) => (prev.isPlaying ? { ...prev, isPlaying: false } : prev));
+
     const audio = preAudio || new Audio();
     audio.src = url;
     const speedToUse = targetSpeed || project.voicePlaybackRate || 1.0;
@@ -217,12 +188,13 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
       setPlayingAudioId(null);
     };
 
+    registerPreviewAudio(audio, () => setPlayingAudioId(null));
+
     audio.play().then(() => {
       setAudioElement(audio);
       setPlayingAudioId(clipId);
     }).catch((playErr) => {
       console.warn('Audio play error, retrying standard play:', playErr);
-      // Retry standard play without pitch preservation
       audio.playbackRate = 1.0;
       audio.play().then(() => {
         setAudioElement(audio);
@@ -238,24 +210,32 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
   const handleTestVoice = async (vKey: VoiceOption) => {
     if (testingVoice) return;
 
+    stopAudio();
+    setProject((prev) => (prev.isPlaying ? { ...prev, isPlaying: false } : prev));
+
     // Pre-unlock audio synchronously during user click handler
     const preAudio = new Audio();
     preAudio.play().catch(() => {});
 
     setTestingVoice(vKey);
     const profile = VOICE_PROFILES[vKey];
-    const cacheKey = `${vKey}_${voiceStyle}`;
-    setStatusText(`[Gemini Studio] ${profile.name} voice preview testing...`);
+    const cacheKey = `${vKey}_${voiceStyle}_${voiceTone}_${voicePitch}`;
+    setStatusText(`[Studio] ${profile.name} (${voiceTone}, ${voicePitch >= 0 ? `+${voicePitch}` : voicePitch}%) စမ်းသပ်နေသည်...`);
 
     const activeSpeed = project.voicePlaybackRate || 1.0;
+
+    const testEngine: TtsEngineMode = profile.naraVoiceId ? 'nara' : (ttsEngine === 'nara' ? 'auto' : ttsEngine);
 
     try {
       const samplePhrase = profile.sampleGreeting;
       const result = await synthesizeMyanmarVoice(samplePhrase, {
         voice: vKey,
         style: voiceStyle,
+        tone: voiceTone,
+        pitchOffset: voicePitch,
         speed: activeSpeed,
         trimSilence: false,
+        preferredEngine: testEngine,
       });
 
       setTestAudioUrls((prev) => ({ ...prev, [cacheKey]: result.audioUrl }));
@@ -270,95 +250,86 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
     }
   };
 
-  const handleTestHfSpeaker = async (speakerId: string) => {
-    if (testingVoice) return;
-
-    // Pre-unlock audio synchronously during user click handler
-    const preAudio = new Audio();
-    preAudio.play().catch(() => {});
-
-    setTestingVoice(speakerId);
-    const speakerInfo = HF_MULTI_SPEAKERS.find((s) => s.id === speakerId) || HF_MULTI_SPEAKERS[0];
-    setStatusText(`[Hugging Face] ${speakerInfo.name} preview testing...`);
-    const activeSpeed = project.voicePlaybackRate || 1.0;
-    const activeModel = hfModel === 'custom' ? (customHfModel.trim() || 'facebook/mms-tts-mya') : hfModel;
-
-    try {
-      const sampleText = 'မင်္ဂလာပါ၊ Hugging Face AI Voice Clone စနစ်ဖြင့် အသံ စမ်းသပ်ခြင်း ဖြစ်ပါသည်။';
-      const result = await synthesizeHuggingFaceVoice(sampleText, {
-        model: activeModel,
-        speakerId,
-        speed: activeSpeed,
-        onStatusUpdate: (msg) => setStatusText(msg),
-      });
-
-      setTestAudioUrls((prev) => ({ ...prev, [speakerId]: result.audioUrl }));
-      playVoiceClip(`test_${speakerId}`, result.audioUrl, activeSpeed, preAudio);
-      setStatusText(null);
-    } catch (err: any) {
-      console.error('Test HF speaker failed:', err);
-      setErrorMessage(`HF preview failed: ${err.message}`);
-      setStatusText(null);
-    } finally {
-      setTestingVoice(null);
+  const handleEngineSwitch = (nextEngine: TtsEngineMode) => {
+    setTtsEngine(nextEngine);
+    let resolvedVoice = singleVoice;
+    if (nextEngine === 'nara' && !VOICE_PROFILES[singleVoice]?.naraVoiceId) {
+      resolvedVoice = VOICE_PROFILES[singleVoice]?.gender === 'female' ? 'NaraShoon' : 'NaraKoBanyar';
+    } else if (nextEngine !== 'nara' && VOICE_PROFILES[singleVoice]?.naraVoiceId) {
+      resolvedVoice = VOICE_PROFILES[singleVoice]?.gender === 'female' ? 'Nilar' : 'Thiha';
     }
+    setSingleVoice(resolvedVoice);
+    setProject((prev) => ({
+      ...prev,
+      ttsEngine: nextEngine,
+      lockedVoice: resolvedVoice,
+      segments: prev.segments.map((s) => ({
+        ...s,
+        voice: resolvedVoice,
+        speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
+      })),
+    }));
+    setStatusText(
+      nextEngine === 'nara'
+        ? `🤗 Nara Mini v1 Engine (${VOICE_PROFILES[resolvedVoice].name}) ကို Step 4 Voice Clone အတွက် ဖွင့်လှစ်ပြီးပါပြီ!`
+        : `✨ Gemini / 24kHz Neural Engine (${VOICE_PROFILES[resolvedVoice].name}) သို့ ပြောင်းလဲပြီးပါပြီ။`
+    );
   };
 
   const handleApplyVoiceAllocation = (overrideVoice?: VoiceOption) => {
     const selected = overrideVoice || singleVoice;
+    const isNara = Boolean(VOICE_PROFILES[selected]?.naraVoiceId);
+    const resolvedEngine: TtsEngineMode = isNara ? 'nara' : (ttsEngine === 'nara' ? 'auto' : ttsEngine);
+    setSingleVoice(selected);
+    setTtsEngine(resolvedEngine);
     setProject((prev) => ({
       ...prev,
+      ttsEngine: resolvedEngine,
+      lockedVoice: selected,
       segments: prev.segments.map((s) => ({
         ...s,
         voice: selected,
         speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
       })),
     }));
-    setStatusText(`✓ Single Burmese Narrator (${VOICE_PROFILES[selected].name}) ကို Segments အားလုံးသို့ သတ်မှတ်ပြီးပါပြီ။`);
+    setStatusText(`✓ Single Burmese Narrator (${VOICE_PROFILES[selected].name}) ကို Segments အားလုံးသို့ တစ်သံတည်း Lock ချပြီးပါပြီ။`);
   };
 
-  const handleApplyHfSpeakerAllocation = (overrideSpeaker?: string) => {
-    const selected = overrideSpeaker || selectedHfSpeaker;
-    const speakerInfo = HF_MULTI_SPEAKERS.find((s) => s.id === selected) || HF_MULTI_SPEAKERS[0];
+  const handleSegmentVoiceChange = (_segId: string, newVoice: VoiceOption) => {
+    // Enforce single voice lock across all segments so double-voice output can never occur
+    handleApplyVoiceAllocation(newVoice);
+  };
+
+  const handleToneChange = (newTone: VoiceToneOption) => {
+    const preset = VOICE_TONE_PRESETS.find((p) => p.id === newTone);
+    const nextPitch = preset ? preset.pitchPct : voicePitch;
+    setVoiceTone(newTone);
+    setVoicePitch(nextPitch);
     setProject((prev) => ({
       ...prev,
+      voiceTone: newTone,
+      voicePitch: nextPitch,
       segments: prev.segments.map((s) => ({
         ...s,
-        hfSpeaker: selected,
+        tone: newTone,
+        pitch: nextPitch,
       })),
     }));
-    setStatusText(`✓ All segments allocated to HF Speaker (${speakerInfo.name}).`);
+    setStatusText(
+      `✓ Voice Tone: "${preset?.label || newTone}" (${nextPitch >= 0 ? `+${nextPitch}` : nextPitch}%) သို့ ပြောင်းလဲပြီးပါပြီ။`
+    );
   };
 
-  const handleAutoAlternateVoices = () => {
+  const handlePitchChange = (newPitch: number) => {
+    const clamped = Math.max(-15, Math.min(15, Math.round(newPitch)));
+    setVoicePitch(clamped);
     setProject((prev) => ({
       ...prev,
-      segments: prev.segments.map((s, idx) => ({
+      voicePitch: clamped,
+      segments: prev.segments.map((s) => ({
         ...s,
-        voice: idx % 2 === 0 ? speakerA : speakerB,
-        hfSpeaker: idx % 2 === 0 ? hfSpeakerA : hfSpeakerB,
+        pitch: clamped,
       })),
-    }));
-    if (voiceEngine === 'gemini') {
-      setStatusText(`✓ Auto Double Voice: Odd Segments -> ${VOICE_PROFILES[speakerA].name}, Even Segments -> ${VOICE_PROFILES[speakerB].name}`);
-    } else {
-      const spA = HF_MULTI_SPEAKERS.find((s) => s.id === hfSpeakerA)?.name || 'Speaker A';
-      const spB = HF_MULTI_SPEAKERS.find((s) => s.id === hfSpeakerB)?.name || 'Speaker B';
-      setStatusText(`✓ Auto Double HF Voice: Odd Segments -> ${spA}, Even Segments -> ${spB}`);
-    }
-  };
-
-  const handleSegmentVoiceChange = (segId: string, newVoice: VoiceOption) => {
-    setProject((prev) => ({
-      ...prev,
-      segments: prev.segments.map((s) => (s.id === segId ? { ...s, voice: newVoice } : s)),
-    }));
-  };
-
-  const handleSegmentHfSpeakerChange = (segId: string, newSpeaker: string) => {
-    setProject((prev) => ({
-      ...prev,
-      segments: prev.segments.map((s) => (s.id === segId ? { ...s, hfSpeaker: newSpeaker } : s)),
     }));
   };
 
@@ -427,18 +398,163 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
         prev.segments,
         prev.videoDuration || MINUTE_BLOCK_SECONDS,
         {
-          enforceSingleVoice: voiceMode === 'single' ? singleVoice : undefined,
-          enforceSingleSpeakerLabel: voiceMode === 'single',
+          enforceSingleVoice: singleVoice,
+          enforceSingleSpeakerLabel: true,
         }
       );
       return {
         ...prev,
+        lockedVoice: singleVoice,
         segments: realigned,
       };
     });
     setStatusText(
-      `✓ 1-Minute Block Auto-Align ပြီးစီးပါပြီ: ၁ မိနစ်စာ အပိုင်း (${totalMinuteBlocks} Parts) တစ်ခုချင်းစီအတွင်း နောက်ပိုင်းအသံများ အချိန်မရွေ့စေရန် Gentle Speed (0.90x - 1.15x) ဖြင့် ပြန်ညှိပြီးပါပြီ။`
+      `✓ 0:30 Part Auto-Align ပြီးစီးပါပြီ: ၃၀ စက္ကန့်စာ အပိုင်း (${totalMinuteBlocks} Parts) တစ်ခုချင်းစီအတွင်း နောက်ပိုင်းအသံများ အချိန်မရွေ့စေရန် Gentle Speed (0.90x - 1.15x) ဖြင့် ပြန်ညှိပြီးပါပြီ။`
     );
+  };
+
+  const synthesizeSlotWithBridge = async (
+    seg: TranscriptSegment,
+    opts: {
+      style: VoiceStyle;
+      tone: VoiceToneOption;
+      pitchOffset: number;
+      preferredEngine: TtsEngineMode;
+      onStatus?: (msg: string) => void;
+    }
+  ): Promise<{
+    audioUrl: string;
+    duration: number;
+    engineUsed: 'gemini' | 'neural' | 'nara';
+    mainNarration?: string;
+    bridgeNarration?: string;
+    pauseBetweenParts?: number;
+    combinedText: string;
+  }> => {
+    const slotDur = Math.max(
+      1.0,
+      (seg.originalEndTime ?? seg.endTime) - (seg.originalStartTime ?? seg.startTime)
+    );
+    const isRecapSlot =
+      seg.slotMode === 'scene_recap_30s' ||
+      Boolean(seg.mainNarration) ||
+      Boolean(seg.bridgeNarration) ||
+      slotDur >= 15;
+
+    if (!isRecapSlot) {
+      const text = (seg.myanmarTranslation || seg.originalText || '').trim();
+      const res = await synthesizeMyanmarVoice(text, {
+        voice: singleVoice,
+        style: opts.style,
+        tone: opts.tone,
+        pitchOffset: opts.pitchOffset,
+        emotion: seg.emotion,
+        speed: 1.0,
+        trimSilence,
+        preferredEngine: opts.preferredEngine,
+        onStatusUpdate: opts.onStatus,
+      });
+      return {
+        audioUrl: res.audioUrl,
+        duration: res.duration,
+        engineUsed: res.engineUsed,
+        combinedText: text,
+      };
+    }
+
+    const pauseGap = seg.pauseBetweenParts ?? 0.18;
+    const mainText = (seg.mainNarration || seg.myanmarTranslation || seg.originalText || '').trim();
+    const part1 = await synthesizeMyanmarVoice(mainText, {
+      voice: singleVoice,
+      style: opts.style,
+      tone: opts.tone,
+      pitchOffset: opts.pitchOffset,
+      emotion: seg.emotion,
+      speed: 1.0,
+      trimSilence,
+      preferredEngine: opts.preferredEngine,
+      onStatusUpdate: opts.onStatus,
+    });
+
+    let bridgeText = (seg.bridgeNarration || '').trim();
+    const remainingAfterPart1 = slotDur - part1.duration - pauseGap;
+
+    // Auto-generate a scene-matching short bridge line if narration is too short for this slot
+    if (!bridgeText && remainingAfterPart1 >= 3.5) {
+      opts.onStatus?.(
+        `✨ [${seg.sceneShotId || `${slotDur.toFixed(0)}s Slot`}] အချိန်တိုနေသဖြင့် မြင်ကွင်းနဲ့ကိုက်ညီတဲ့ ဆက်စကားတို (+0.18s Pause) ဖန်တီးဖြည့်စွက်နေသည်...`
+      );
+      bridgeText = await generateShortBridgeLineForSlot(
+        mainText,
+        Math.max(4.0, remainingAfterPart1 - 0.5),
+        seg.originalText || seg.sceneTitle || ''
+      );
+    }
+
+    if (!bridgeText) {
+      return {
+        audioUrl: part1.audioUrl,
+        duration: part1.duration,
+        engineUsed: part1.engineUsed,
+        mainNarration: mainText,
+        bridgeNarration: '',
+        pauseBetweenParts: pauseGap,
+        combinedText: mainText,
+      };
+    }
+
+    // Always lock bridge synthesis to part1.engineUsed so zero double-voice occurs inside a slot
+    let part2 = await synthesizeMyanmarVoice(bridgeText, {
+      voice: singleVoice,
+      style: opts.style,
+      tone: opts.tone,
+      pitchOffset: opts.pitchOffset,
+      emotion: seg.emotion,
+      speed: 1.0,
+      trimSilence,
+      preferredEngine: part1.engineUsed,
+    });
+
+    let stitched = await stitchAudioPartsWithPause(part1.audioUrl, part2.audioUrl, pauseGap);
+
+    // If combined duration (Part 1 + 0.18s + Part 2) still leaves > 6.5s empty in a 30s slot, expand bridge once
+    if (slotDur >= 20 && stitched.duration < slotDur * 0.72) {
+      const missingSec = Math.max(4.5, slotDur - part1.duration - pauseGap - 0.8);
+      opts.onStatus?.(
+        `⏱️ Slot ${slotDur.toFixed(0)}s ပြည့်စေရန် ဆက်စကားတို (${missingSec.toFixed(1)}s စာ) ထပ်မံညှိနေသည်...`
+      );
+      const expandedBridge = await generateShortBridgeLineForSlot(
+        mainText,
+        missingSec,
+        seg.originalText || seg.sceneTitle || '',
+        bridgeText
+      );
+      if (expandedBridge && expandedBridge !== bridgeText) {
+        bridgeText = expandedBridge;
+        part2 = await synthesizeMyanmarVoice(bridgeText, {
+          voice: singleVoice,
+          style: opts.style,
+          tone: opts.tone,
+          pitchOffset: opts.pitchOffset,
+          emotion: seg.emotion,
+          speed: 1.0,
+          trimSilence,
+          preferredEngine: part1.engineUsed,
+        });
+        stitched = await stitchAudioPartsWithPause(part1.audioUrl, part2.audioUrl, pauseGap);
+      }
+    }
+
+    const combinedText = `${mainText} ${bridgeText}`.trim();
+    return {
+      audioUrl: stitched.audioUrl,
+      duration: stitched.duration,
+      engineUsed: part1.engineUsed,
+      mainNarration: mainText,
+      bridgeNarration: bridgeText,
+      pauseBetweenParts: pauseGap,
+      combinedText,
+    };
   };
 
   const handleGenerateSingle = async (seg: TranscriptSegment) => {
@@ -452,70 +568,42 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
 
     const activeSpeed = clampGentleNarratorRate(seg.playbackRate || project.voicePlaybackRate || 1.0);
     const activeStyle = voiceStyle || seg.style || project.voiceStyle || 'recap';
+    const activeTone = voiceTone || seg.tone || project.voiceTone || 'natural';
+    const activePitch = voicePitch ?? seg.pitch ?? project.voicePitch ?? 0;
+
+    const effectiveEngine: TtsEngineMode = VOICE_PROFILES[singleVoice]?.naraVoiceId ? 'nara' : ttsEngine;
 
     try {
-      let resultUrl = '';
-      let resultDuration = 0;
-
-      if (voiceEngine === 'elevenlabs') {
-        const vId = seg.elevenLabsVoiceId || selectedElevenLabsVoiceId || elevenLabsVoices[0]?.voice_id;
-        if (!vId) {
-          throw new Error('ElevenLabs Voice ID မရှိသေးပါ။ ကျေးဇူးပြု၍ Voice တစ်ခု ရွေးချယ်ပါ သို့မဟုတ် Voice Clone ဖန်တီးပါ။');
-        }
-        const elResult = await synthesizeElevenLabsVoice(text, {
-          voiceId: vId,
-          emotion: seg.emotion,
-          onStatusUpdate: (msg) => setStatusText(msg),
-        });
-        resultUrl = elResult.audioUrl;
-        resultDuration = elResult.duration;
-      } else if (voiceEngine === 'huggingface') {
-        const activeModel = hfModel === 'custom' ? (customHfModel.trim() || 'facebook/mms-tts-mya') : hfModel;
-        const activeSpeaker = seg.hfSpeaker || (voiceMode === 'double' ? (project.segments.findIndex(s => s.id === seg.id) % 2 === 0 ? hfSpeakerA : hfSpeakerB) : selectedHfSpeaker);
-        const hfResult = await synthesizeHuggingFaceVoice(text, {
-          model: activeModel,
-          speakerId: activeSpeaker,
-          speed: 1.0,
-          onStatusUpdate: (msg) => setStatusText(msg),
-        });
-        resultUrl = hfResult.audioUrl;
-        resultDuration = hfResult.duration;
-      } else {
-        const activeVoice = voiceMode === 'single'
-          ? singleVoice
-          : (seg.voice || (project.segments.findIndex(s => s.id === seg.id) % 2 === 0 ? speakerA : speakerB));
-        const result = await synthesizeMyanmarVoice(text, {
-          voice: activeVoice,
-          style: activeStyle,
-          emotion: seg.emotion,
-          speed: 1.0,
-          trimSilence,
-          onStatusUpdate: (msg) => setStatusText(msg),
-        });
-        resultUrl = result.audioUrl;
-        resultDuration = result.duration;
-      }
+      const slotRes = await synthesizeSlotWithBridge(seg, {
+        style: activeStyle,
+        tone: activeTone,
+        pitchOffset: activePitch,
+        preferredEngine: effectiveEngine,
+        onStatus: (msg) => setStatusText(msg),
+      });
+      const resultUrl = slotRes.audioUrl;
+      const resultDuration = slotRes.duration;
 
       let resolvedRate = activeSpeed;
       setProject((prev) => {
-        const vId = seg.elevenLabsVoiceId || selectedElevenLabsVoiceId || elevenLabsVoices[0]?.voice_id;
-        const elevenLabsName = elevenLabsVoices.find((v) => v.voice_id === vId)?.name || 'Cloned Voice';
         const updatedSegs = prev.segments.map((s) =>
           s.id === seg.id
             ? {
                 ...s,
                 audioUrl: resultUrl,
                 audioDuration: resultDuration,
+                mainNarration: slotRes.mainNarration ?? s.mainNarration,
+                bridgeNarration: slotRes.bridgeNarration ?? s.bridgeNarration,
+                pauseBetweenParts: slotRes.pauseBetweenParts ?? s.pauseBetweenParts,
+                myanmarTranslation: slotRes.combinedText || s.myanmarTranslation,
+                subtitleText: slotRes.combinedText || s.subtitleText,
+                syllableCount: countBurmeseSyllables(slotRes.combinedText || s.myanmarTranslation),
                 isGeneratingAudio: false,
-                voiceProvider: voiceEngine,
-                elevenLabsVoiceId: voiceEngine === 'elevenlabs' ? vId : s.elevenLabsVoiceId,
-                voice: voiceMode === 'single' ? singleVoice : s.voice,
-                speaker:
-                  voiceEngine === 'elevenlabs'
-                    ? `ElevenLabs (${elevenLabsName})`
-                    : voiceMode === 'single'
-                    ? 'Narrator (ဇာတ်ကြောင်းပြောသူ)'
-                    : s.speaker,
+                voiceProvider: (slotRes.engineUsed === 'nara' ? 'nara_mini_v1' : 'gemini') as 'nara_mini_v1' | 'gemini',
+                voice: singleVoice,
+                tone: activeTone,
+                pitch: activePitch,
+                speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
               }
             : s
         );
@@ -523,14 +611,17 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
           updatedSegs,
           prev.videoDuration || MINUTE_BLOCK_SECONDS,
           {
-            enforceSingleVoice: voiceEngine === 'gemini' && voiceMode === 'single' ? singleVoice : undefined,
-            enforceSingleSpeakerLabel: voiceEngine === 'gemini' && voiceMode === 'single',
+            enforceSingleVoice: singleVoice,
+            enforceSingleSpeakerLabel: true,
           }
         );
         const found = aligned.find((a) => a.id === seg.id);
         if (found?.playbackRate) resolvedRate = found.playbackRate;
         return {
           ...prev,
+          lockedVoice: singleVoice,
+          voiceTone: activeTone,
+          voicePitch: activePitch,
           segments: aligned,
         };
       });
@@ -574,90 +665,101 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
     }
 
     setIsBatchGenerating(true);
+    setVoiceGenStage(4);
+    setVoiceGenPercent(4);
     setErrorMessage(null);
     setBatchProgress({ current: 0, total: targetSegs.length });
 
     const total = targetSegs.length;
-    const generatedMap = new Map<string, { audioUrl: string; audioDuration: number; voice?: VoiceOption }>();
+    const generatedMap = new Map<
+      string,
+      {
+        audioUrl: string;
+        audioDuration: number;
+        voice: VoiceOption;
+        engineUsed: 'gemini' | 'neural' | 'nara';
+        mainNarration?: string;
+        bridgeNarration?: string;
+        pauseBetweenParts?: number;
+        combinedText: string;
+      }
+    >();
     const failedSegs: Array<{ idx: number; id: string; text: string; reason: string }> = [];
+    let batchEngine: TtsEngineMode = VOICE_PROFILES[singleVoice]?.naraVoiceId ? 'nara' : ttsEngine;
+    let switchedToNeuralMidBatch = false;
+
+    const activeStyle = voiceStyle || project.voiceStyle || 'recap';
+    const activeTone = voiceTone || project.voiceTone || 'natural';
+    const activePitch = voicePitch ?? project.voicePitch ?? 0;
 
     for (let i = 0; i < total; i++) {
       const seg = targetSegs[i];
       const text = (seg.myanmarTranslation || seg.originalText || '').trim();
       if (!text) continue;
 
-      const partNum = Math.floor(Math.max(0, seg.startTime) / MINUTE_BLOCK_SECONDS) + 1;
+      const slotStep = isRecap30sProject ? (project.recapSlotSeconds || RECAP_SLOT_SECONDS) : MINUTE_BLOCK_SECONDS;
+      const partNum = Math.floor(Math.max(0, seg.startTime) / slotStep) + 1;
       setBatchProgress({ current: i + 1, total });
-      setStatusText(`🔊 [Part ${partNum}] Narrator အသံသွင်းနေသည် (${i + 1}/${total}): "${text.substring(0, 22)}..."`);
+      setVoiceGenPercent(Math.min(82, Math.round(5 + ((i + 1) / Math.max(1, total)) * 77)));
+      setStatusText(
+        `၄. [Part ${partNum}] ${VOICE_PROFILES[singleVoice].name} Narrator အသံဖန်တီး & ပြောနှုန်းညှိနေသည် (${i + 1}/${total}): "${text.substring(0, 22)}..."`
+      );
 
-      const activeStyle = voiceStyle || seg.style || project.voiceStyle || 'recap';
       let succeeded = false;
       let lastErrMsg = 'Synthesis failed';
 
       for (let attempt = 1; attempt <= 2; attempt++) {
         try {
-          let resultUrl = '';
-          let resultDuration = 0;
-          let usedVoice: VoiceOption | undefined = undefined;
+          const result = await synthesizeSlotWithBridge(seg, {
+            style: activeStyle,
+            tone: activeTone,
+            pitchOffset: activePitch,
+            preferredEngine: batchEngine,
+            onStatus: (msg) => setStatusText(msg),
+          });
 
-          if (voiceEngine === 'elevenlabs') {
-            const vId = seg.elevenLabsVoiceId || selectedElevenLabsVoiceId || elevenLabsVoices[0]?.voice_id;
-            if (!vId) throw new Error('ElevenLabs Voice ID missing');
-            const elResult = await synthesizeElevenLabsVoice(text, {
-              voiceId: vId,
-              emotion: seg.emotion,
-            });
-            resultUrl = elResult.audioUrl;
-            resultDuration = elResult.duration;
-          } else if (voiceEngine === 'huggingface') {
-            const activeModel = hfModel === 'custom' ? (customHfModel.trim() || 'facebook/mms-tts-mya') : hfModel;
-            const activeSpeaker = seg.hfSpeaker || (voiceMode === 'double' ? (i % 2 === 0 ? hfSpeakerA : hfSpeakerB) : selectedHfSpeaker);
-            const hfResult = await synthesizeHuggingFaceVoice(text, {
-              model: activeModel,
-              speakerId: activeSpeaker,
-              speed: 1.0,
-            });
-            resultUrl = hfResult.audioUrl;
-            resultDuration = hfResult.duration;
-          } else {
-            const activeVoice = voiceMode === 'single'
-              ? singleVoice
-              : (seg.voice || (i % 2 === 0 ? speakerA : speakerB));
-            usedVoice = activeVoice;
-            const result = await synthesizeMyanmarVoice(text, {
-              voice: activeVoice,
-              style: activeStyle,
-              emotion: seg.emotion,
-              speed: 1.0,
-              trimSilence,
-            });
-            resultUrl = result.audioUrl;
-            resultDuration = result.duration;
-          }
-
-          if (!resultUrl) {
+          if (!result.audioUrl) {
             throw new Error('Empty audio URL returned');
           }
 
+          if (batchEngine === 'auto') {
+            batchEngine = result.engineUsed;
+          } else if (batchEngine === 'gemini' && result.engineUsed === 'neural') {
+            batchEngine = 'neural';
+            switchedToNeuralMidBatch = true;
+          }
+
           generatedMap.set(seg.id, {
-            audioUrl: resultUrl,
-            audioDuration: resultDuration,
-            voice: usedVoice,
+            audioUrl: result.audioUrl,
+            audioDuration: result.duration,
+            voice: singleVoice,
+            engineUsed: result.engineUsed,
+            mainNarration: result.mainNarration,
+            bridgeNarration: result.bridgeNarration,
+            pauseBetweenParts: result.pauseBetweenParts,
+            combinedText: result.combinedText,
           });
 
-          const targetVId = voiceEngine === 'elevenlabs' ? (seg.elevenLabsVoiceId || selectedElevenLabsVoiceId || elevenLabsVoices[0]?.voice_id) : undefined;
           setProject((prev) => ({
             ...prev,
+            lockedVoice: singleVoice,
             segments: prev.segments.map((s) =>
               s.id === seg.id
                 ? {
                     ...s,
-                    audioUrl: resultUrl,
-                    audioDuration: resultDuration,
-                    voiceProvider: voiceEngine,
-                    elevenLabsVoiceId: targetVId || s.elevenLabsVoiceId,
-                    voice: usedVoice || s.voice,
-                    speaker: voiceEngine === 'elevenlabs' ? 'ElevenLabs Cloned Narrator' : s.speaker,
+                    audioUrl: result.audioUrl,
+                    audioDuration: result.duration,
+                    mainNarration: result.mainNarration ?? s.mainNarration,
+                    bridgeNarration: result.bridgeNarration ?? s.bridgeNarration,
+                    pauseBetweenParts: result.pauseBetweenParts ?? s.pauseBetweenParts,
+                    myanmarTranslation: result.combinedText || s.myanmarTranslation,
+                    subtitleText: result.combinedText || s.subtitleText,
+                    syllableCount: countBurmeseSyllables(result.combinedText || s.myanmarTranslation),
+                    voiceProvider: (result.engineUsed === 'nara' ? 'nara_mini_v1' : 'gemini') as 'nara_mini_v1' | 'gemini',
+                    voice: singleVoice,
+                    tone: activeTone,
+                    pitch: activePitch,
+                    speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
                     isGeneratingAudio: false,
                   }
                 : s
@@ -688,7 +790,52 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
       }
     }
 
-    // Re-align all segments cleanly inside each 1-minute video block with gentle speed (0.90x-1.18x) so later parts never drift
+    // If Gemini quota ran out mid-batch and dropped to 'neural', harmonize any earlier 'gemini' segments
+    // in this batch so 100% of clips share the exact same single engine timbre!
+    if (switchedToNeuralMidBatch) {
+      const geminiEntries = Array.from(generatedMap.entries()).filter(([, v]) => v.engineUsed === 'gemini');
+      for (let k = 0; k < geminiEntries.length; k++) {
+        const [segId, prevGen] = geminiEntries[k];
+        const seg = targetSegs.find((s) => s.id === segId);
+        if (!seg) continue;
+        setStatusText(`🎯 အသံတစ်သံတည်း တူညီစေရန် Harmonize ပြုလုပ်နေသည် (${k + 1}/${geminiEntries.length})...`);
+        try {
+          const updatedSeg: TranscriptSegment = {
+            ...seg,
+            mainNarration: prevGen.mainNarration ?? seg.mainNarration,
+            bridgeNarration: prevGen.bridgeNarration ?? seg.bridgeNarration,
+            pauseBetweenParts: prevGen.pauseBetweenParts ?? seg.pauseBetweenParts,
+            myanmarTranslation: prevGen.combinedText || seg.myanmarTranslation,
+          };
+          const uni = await synthesizeSlotWithBridge(updatedSeg, {
+            style: activeStyle,
+            tone: activeTone,
+            pitchOffset: activePitch,
+            preferredEngine: 'neural',
+          });
+          if (uni.audioUrl) {
+            generatedMap.set(segId, {
+              audioUrl: uni.audioUrl,
+              audioDuration: uni.duration,
+              voice: singleVoice,
+              engineUsed: 'neural',
+              mainNarration: uni.mainNarration,
+              bridgeNarration: uni.bridgeNarration,
+              pauseBetweenParts: uni.pauseBetweenParts,
+              combinedText: uni.combinedText,
+            });
+          }
+        } catch (_) {}
+      }
+    }
+
+    // STAGE 5: Re-align all segments cleanly inside their 0:30 part windows (0:00-0:30, 0:30-1:00...) with gentle speed (0.90x-1.18x)
+    setVoiceGenStage(5);
+    setVoiceGenPercent(92);
+    setStatusText(
+      `၅. 0:30 Part Sync (${totalMinuteBlocks} Parts: 0:00-0:30, 0:30-1:00...) အတွင်း အသံ + Subtitle အချိန်မရွေ့စေရန် ပြန်ညှိနေပါသည်...`
+    );
+
     setProject((prev) => {
       const merged = prev.segments.map((s) => {
         const gen = generatedMap.get(s.id);
@@ -697,42 +844,60 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
               ...s,
               audioUrl: gen.audioUrl,
               audioDuration: gen.audioDuration,
-              voiceProvider: voiceEngine,
-              voice: gen.voice || s.voice,
+              mainNarration: gen.mainNarration ?? s.mainNarration,
+              bridgeNarration: gen.bridgeNarration ?? s.bridgeNarration,
+              pauseBetweenParts: gen.pauseBetweenParts ?? s.pauseBetweenParts,
+              myanmarTranslation: gen.combinedText || s.myanmarTranslation,
+              subtitleText: gen.combinedText || s.subtitleText,
+              syllableCount: countBurmeseSyllables(gen.combinedText || s.myanmarTranslation),
+              voiceProvider: (gen.engineUsed === 'nara' ? 'nara_mini_v1' : 'gemini') as 'nara_mini_v1' | 'gemini',
+              voice: singleVoice,
+              tone: activeTone,
+              pitch: activePitch,
+              speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
             }
-          : s;
+          : {
+              ...s,
+              voice: singleVoice,
+              speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
+            };
       });
       const aligned = realignSegmentsByMinuteBlocks(
         merged,
         prev.videoDuration || MINUTE_BLOCK_SECONDS,
         {
-          enforceSingleVoice: voiceEngine === 'gemini' && voiceMode === 'single' ? singleVoice : undefined,
-          enforceSingleSpeakerLabel: voiceEngine === 'gemini' && voiceMode === 'single',
+          enforceSingleVoice: singleVoice,
+          enforceSingleSpeakerLabel: true,
         }
       );
       return {
         ...prev,
+        lockedVoice: singleVoice,
+        voiceTone: activeTone,
+        voicePitch: activePitch,
         segments: aligned,
       };
     });
 
+    setVoiceGenPercent(100);
     setIsBatchGenerating(false);
     setBatchProgress(null);
+    setVoiceGenStage(null);
 
     if (failedSegs.length > 0) {
       setErrorMessage(
         `⚠️ စာကြောင်း ${failedSegs.length} ခု Voice Clone ထုတ်မရသေးပါ (ဥပမာ "${failedSegs[0].text}...": ${failedSegs[0].reason})။ "Retry Missing Voices" ခလုတ်ကို နှိပ်၍ ပြန်ထုတ်နိုင်ပါသည်။`
       );
       setStatusText(
-        `✓ ${generatedMap.size}/${total} Segments အသံသွင်းပြီးပါပြီ (${failedSegs.length} ခု မအောင်မြင်ပါ)`
+        `✓ ${generatedMap.size}/${total} Segments အသံသွင်း + 0:30 Part Sync ညှိပြီးပါပြီ (${failedSegs.length} ခု မအောင်မြင်ပါ)`
       );
     } else {
       setStatusText(
         onlyMissing
-          ? `✓ ကျန်ရှိနေသော Voice Clone ${generatedMap.size} ခုလုံးကို အောင်မြင်စွာ ပြန်လည်ထုတ်ယူပြီးပါပြီ!`
+          ? `✓ ကျန်ရှိနေသော Voice Clone ${generatedMap.size} ခုလုံး ထုတ်ယူပြီး 0:30 Part Sync ညှိပြီးပါပြီ!`
           : onlyPartNumber
-            ? `✓ Part ${onlyPartNumber} (${generatedMap.size} Segments) အသံသွင်းပြီး ၁ မိနစ်အချိန်ကွက်အတွင်း ပြန်ညှိပြီးပါပြီ!`
-            : `✓ Single Narrator အသံ ${generatedMap.size} ခုလုံး ထုတ်ယူပြီး ၁ မိနစ်အပိုင်း (${totalMinuteBlocks} Blocks) အလိုက် အချိန်ကွက် ပြန်ညှိပြီးပါပြီ!`
+            ? `✓ Part ${onlyPartNumber} (${generatedMap.size} Segments) အသံသွင်းပြီး 0:30 အချိန်ကွက်အတွင်း ပြန်ညှိပြီးပါပြီ!`
+            : `✓ အဆင့် ၄ & ၅ ပြီးစီးပါပြီ: Single Narrator (${VOICE_PROFILES[singleVoice].name}) အသံ ${generatedMap.size} ခုလုံး + 0:30 Part Sync (${totalMinuteBlocks} Parts) ချိန်ညှိပြီးပါပြီ!`
       );
       setTimeout(() => setStatusText(null), 6000);
     }
@@ -753,6 +918,10 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
     setErrorMessage(null);
     const updatedMap = new Map<string, { text: string; audioUrl: string; audioDuration: number }>();
 
+    const activeStyle = voiceStyle || project.voiceStyle || 'recap';
+    const activeTone = voiceTone || project.voiceTone || 'natural';
+    const activePitch = voicePitch ?? project.voicePitch ?? 0;
+
     try {
       for (let i = 0; i < overflowingSegs.length; i++) {
         const seg = overflowingSegs[i];
@@ -765,15 +934,17 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
           seg.originalText
         );
         const textToSpeak = condensed || seg.myanmarTranslation || seg.originalText;
-        const activeVoice = voiceMode === 'single' ? singleVoice : (seg.voice || speakerA);
-        const activeStyle = voiceStyle || seg.style || project.voiceStyle || 'recap';
 
+        const activeEngine: TtsEngineMode = VOICE_PROFILES[singleVoice]?.naraVoiceId ? 'nara' : ttsEngine;
         const result = await synthesizeMyanmarVoice(textToSpeak, {
-          voice: activeVoice,
+          voice: singleVoice,
           style: activeStyle,
+          tone: activeTone,
+          pitchOffset: activePitch,
           emotion: seg.emotion,
           speed: 1.0,
           trimSilence,
+          preferredEngine: activeEngine,
         });
 
         updatedMap.set(seg.id, {
@@ -793,6 +964,9 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                 subtitleText: hit.text,
                 audioUrl: hit.audioUrl,
                 audioDuration: hit.audioDuration,
+                voice: singleVoice,
+                tone: activeTone,
+                pitch: activePitch,
               }
             : s;
         });
@@ -800,11 +974,11 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
           merged,
           prev.videoDuration || MINUTE_BLOCK_SECONDS,
           {
-            enforceSingleVoice: voiceMode === 'single' ? singleVoice : undefined,
-            enforceSingleSpeakerLabel: voiceMode === 'single',
+            enforceSingleVoice: singleVoice,
+            enforceSingleSpeakerLabel: true,
           }
         );
-        return { ...prev, segments: aligned };
+        return { ...prev, lockedVoice: singleVoice, segments: aligned };
       });
 
       setStatusText(`✓ Sync-Fit ပြီးစီးပါပြီ: အချိန်ကျော်နေသော စာကြောင်း ${updatedMap.size} ခုကို Video Scene နှင့် ကွက်တိကိုက်အောင် ပြန်ညှိပြီးပါပြီ!`);
@@ -819,15 +993,7 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
   const generatedCount = project.segments.filter((s) => !!s.audioUrl).length;
   const missingCount = project.segments.filter((s) => !s.audioUrl && !!(s.myanmarTranslation || s.originalText)).length;
   const overflowCount = project.segments.filter((s) => !!s.narratorTimingWarning).length;
-  const currentHfKey = loadApiKeys().huggingFaceKey;
-
   const currentVoiceProfile = VOICE_PROFILES[singleVoice];
-  const profileA = VOICE_PROFILES[speakerA];
-  const profileB = VOICE_PROFILES[speakerB];
-
-  const currentHfSpeakerInfo = HF_MULTI_SPEAKERS.find((s) => s.id === selectedHfSpeaker) || HF_MULTI_SPEAKERS[0];
-  const hfInfoA = HF_MULTI_SPEAKERS.find((s) => s.id === hfSpeakerA) || HF_MULTI_SPEAKERS[0];
-  const hfInfoB = HF_MULTI_SPEAKERS.find((s) => s.id === hfSpeakerB) || HF_MULTI_SPEAKERS[1] || HF_MULTI_SPEAKERS[0];
 
   // Filtered Voices for Flow Panel
   const filteredVoices = ALL_VOICES.filter((vKey) => {
@@ -988,241 +1154,283 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
             </div>
           )}
 
-          {/* SINGLE VS DOUBLE VOICE MODE SWITCHER */}
-          <div className="p-1.5 rounded-2xl bg-black/60 border border-white/10 flex items-center gap-2 shadow-xl backdrop-blur-xl">
-            <button
-              type="button"
-              onClick={() => {
-                setVoiceMode('single');
-                handleApplyVoiceAllocation(singleVoice);
-              }}
-              className={`flex-1 py-2.5 px-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
-                voiceMode === 'single'
-                  ? 'bg-gradient-to-r from-emerald-400 to-teal-400 text-zinc-950 shadow-md font-black'
-                  : 'text-zinc-400 hover:text-white bg-white/5 hover:bg-white/10'
-              }`}
-            >
-              <User className="w-4 h-4" />
-              <span>Single Voice Mode (၁ ယောက်တည်း)</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                setVoiceMode('double');
-                handleAutoAlternateVoices();
-              }}
-              className={`flex-1 py-2.5 px-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
-                voiceMode === 'double'
-                  ? 'bg-gradient-to-r from-cyan-400 via-teal-400 to-emerald-400 text-zinc-950 shadow-md font-black'
-                  : 'text-zinc-400 hover:text-white bg-white/5 hover:bg-white/10'
-              }`}
-            >
-              <Users className="w-4 h-4" />
-              <span>Double Voice Mode (၂ ယောက် ရောမည်)</span>
-            </button>
-          </div>
-
-          {/* ENGINE TABS: GEMINI VS HUGGING FACE */}
-          <div className="flex items-center gap-2 p-1 bg-white/5 rounded-2xl border border-white/10">
-            <button
-              type="button"
-              onClick={() => setVoiceEngine('gemini')}
-              className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
-                voiceEngine === 'gemini'
-                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-black shadow'
-                  : 'text-zinc-400 hover:text-white'
-              }`}
-            >
-              <AudioLines className="w-4 h-4 text-emerald-400" />
-              <span>Gemini 24kHz Reality</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setVoiceEngine('huggingface')}
-              className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
-                voiceEngine === 'huggingface'
-                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 font-black shadow'
-                  : 'text-zinc-400 hover:text-white'
-              }`}
-            >
-              <span>🤗 Hugging Face AI Clone</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setVoiceEngine('elevenlabs')}
-              className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
-                voiceEngine === 'elevenlabs'
-                  ? 'bg-violet-500/20 text-violet-300 border border-violet-500/40 font-black shadow'
-                  : 'text-zinc-400 hover:text-white'
-              }`}
-            >
-              <span>🎙️ ElevenLabs Clone</span>
-            </button>
-          </div>
-
-          {/* VOICE CONFIGURATION CARDS BASED ON MODE */}
-          {voiceMode === 'single' ? (
-            /* SINGLE VOICE MODE CARD */
-            <div className="space-y-3">
-              <span className="text-xs font-black text-emerald-300 uppercase tracking-widest block font-display">
-                Single Voice Character (နှိပ်၍ Flow Panel ဖွင့်ရန်)
+          {/* ENGINE SELECTOR & NARA MINI v1 (HUGGING FACE) VOICE CLONE PANEL */}
+          <div className="p-4 rounded-2xl bg-black/50 border border-amber-500/35 space-y-3 backdrop-blur-xl shadow-lg">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="flex items-center gap-2">
+                <span className="text-base">🤗</span>
+                <div>
+                  <h3 className="text-xs font-black text-amber-300 font-display">
+                    Voice Clone Engine & Nara Mini v1 (Kokoro Burmese 24kHz)
+                  </h3>
+                  <p className="text-[10px] text-zinc-400 font-myanmar">
+                    100% Free Native Burmese TTS • YeeNyunn/nara-mini-v1 (HF Space)
+                  </p>
+                </div>
+              </div>
+              <span className="px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-[10px] font-mono text-amber-300">
+                nara-mini-v1-tts
               </span>
-
-              {voiceEngine === 'gemini' ? (
-                <div
-                  onClick={() => {
-                    setTargetSlot('single');
-                    setIsGeminiFlowOpen(true);
-                  }}
-                  className="p-4 rounded-2xl border border-emerald-400/80 bg-gradient-to-r from-emerald-500/20 via-teal-500/10 to-transparent hover:border-emerald-300 transition-all cursor-pointer group shadow-xl flex items-center justify-between"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-emerald-400 to-teal-400 text-zinc-950 font-black flex items-center justify-center text-base shadow-md">
-                      {currentVoiceProfile.name.charAt(0)}
-                    </div>
-                    <div>
-                      <h3 className="text-sm font-black text-white font-display">
-                        {currentVoiceProfile.name} ({currentVoiceProfile.gender === 'male' ? 'Male' : 'Female'})
-                      </h3>
-                      <p className="text-xs text-emerald-300/90 font-medium mt-0.5">
-                        {currentVoiceProfile.toneTitle}
-                      </p>
-                    </div>
-                  </div>
-
-                  <span className="text-xs font-bold text-emerald-400 group-hover:translate-x-1 transition-transform flex items-center gap-1 shrink-0">
-                    <span>Flow Panel</span>
-                    <ChevronRight className="w-4 h-4" />
-                  </span>
-                </div>
-              ) : voiceEngine === 'huggingface' ? (
-                <div
-                  onClick={() => {
-                    setTargetSlot('single');
-                    setIsHfFlowOpen(true);
-                  }}
-                  className="p-4 rounded-2xl border border-amber-400/80 bg-gradient-to-r from-amber-500/20 via-orange-500/10 to-transparent hover:border-amber-300 transition-all cursor-pointer group shadow-xl flex items-center justify-between"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-amber-400 to-orange-400 text-zinc-950 font-black flex items-center justify-center text-lg shadow-md">
-                      🤗
-                    </div>
-                    <div>
-                      <h3 className="text-sm font-black text-white font-display">
-                        {currentHfSpeakerInfo.name} ({currentHfSpeakerInfo.gender})
-                      </h3>
-                      <p className="text-xs text-amber-300/90 font-medium mt-0.5">
-                        HF Model: {hfModel}
-                      </p>
-                    </div>
-                  </div>
-
-                  <span className="text-xs font-bold text-amber-400 group-hover:translate-x-1 transition-transform flex items-center gap-1 shrink-0">
-                    <span>Flow Panel</span>
-                    <ChevronRight className="w-4 h-4" />
-                  </span>
-                </div>
-              ) : (
-                <div
-                  onClick={() => {
-                    setTargetSlot('single');
-                    setIsElevenLabsFlowOpen(true);
-                  }}
-                  className="p-4 rounded-2xl border border-violet-400/80 bg-gradient-to-r from-violet-500/20 via-purple-500/10 to-transparent hover:border-violet-300 transition-all cursor-pointer group shadow-xl flex items-center justify-between"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-violet-500 to-purple-500 text-white font-black flex items-center justify-center text-sm shadow-md">
-                      🎙️
-                    </div>
-                    <div>
-                      <h3 className="text-sm font-black text-white font-display flex items-center gap-2">
-                        <span>{elevenLabsVoices.find((v) => v.voice_id === selectedElevenLabsVoiceId)?.name || 'ElevenLabs Burmese Clone'}</span>
-                        <span className="px-2 py-0.5 rounded-full bg-violet-500/30 text-violet-300 text-[10px] font-mono">
-                          {selectedElevenLabsVoiceId ? 'Active' : 'Select Voice'}
-                        </span>
-                      </h3>
-                      <p className="text-xs text-violet-300/90 font-medium mt-0.5 font-myanmar">
-                        ID: <span className="font-mono text-[11px] text-zinc-300">{selectedElevenLabsVoiceId || 'None'}</span> — အသံပြောင်းရန် / အသံနမူနာသွင်းရန် နှိပ်ပါ
-                      </p>
-                    </div>
-                  </div>
-
-                  <span className="text-xs font-bold text-violet-400 group-hover:translate-x-1 transition-transform flex items-center gap-1 shrink-0">
-                    <span>Voice Studio</span>
-                    <ChevronRight className="w-4 h-4" />
-                  </span>
-                </div>
-              )}
             </div>
-          ) : (
-            /* DOUBLE VOICE MODE CARDS (SPEAKER A & SPEAKER B) */
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-black text-cyan-300 uppercase tracking-widest block font-display">
-                  Double Voice (Speaker A & B)
+
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => handleEngineSwitch('auto')}
+                className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                  ttsEngine !== 'nara'
+                    ? 'bg-emerald-500/20 border-emerald-400 text-white shadow ring-1 ring-emerald-400/40'
+                    : 'bg-white/5 border-white/10 text-zinc-400 hover:text-white'
+                }`}
+              >
+                <div className="text-[11px] font-black flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Gemini + Neural 24kHz</span>
+                </div>
+                <span className="text-[10px] text-zinc-400 block mt-0.5 font-myanmar">
+                  အသံ ၂၅ မျိုး + Tone / Pitch
                 </span>
-                <button
-                  type="button"
-                  onClick={handleAutoAlternateVoices}
-                  className="px-2.5 py-1 bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 rounded-xl text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 shadow"
-                >
-                  <Zap className="w-3 h-3 text-cyan-400" />
-                  <span>⚡ Auto Alternate A/B</span>
-                </button>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleEngineSwitch('nara')}
+                className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                  ttsEngine === 'nara'
+                    ? 'bg-amber-500/25 border-amber-400 text-white shadow ring-1 ring-amber-400/40'
+                    : 'bg-white/5 border-white/10 text-zinc-400 hover:text-white'
+                }`}
+              >
+                <div className="text-[11px] font-black flex items-center gap-1.5">
+                  <span>🤗</span>
+                  <span>Nara Mini v1 (HF Free)</span>
+                </div>
+                <span className="text-[10px] text-amber-200/80 block mt-0.5 font-myanmar">
+                  YeeNyunn/nara-mini-v1 Kokoro
+                </span>
+              </button>
+            </div>
+
+            {/* 4 Direct Nara Mini v1 Preset Voice Buttons */}
+            <div className="grid grid-cols-2 gap-1.5 pt-1">
+              {NARA_VOICES.map((nVoice) => {
+                const nProfile = VOICE_PROFILES[nVoice];
+                const isSelected = singleVoice === nVoice;
+                const cacheKey = `${nVoice}_${voiceStyle}_${voiceTone}_${voicePitch}`;
+                const isTesting = testingVoice === nVoice;
+                const isPlaying = playingAudioId === `test_${cacheKey}`;
+
+                return (
+                  <div
+                    key={nVoice}
+                    onClick={() => handleApplyVoiceAllocation(nVoice)}
+                    className={`p-2 rounded-xl border flex items-center justify-between gap-1.5 cursor-pointer transition-all ${
+                      isSelected
+                        ? 'bg-amber-500/20 border-amber-400 text-amber-100 ring-1 ring-amber-400/40'
+                        : 'bg-white/5 border-white/10 text-zinc-300 hover:bg-white/10'
+                    }`}
+                  >
+                    <div className="min-w-0">
+                      <div className="text-[11px] font-bold truncate flex items-center gap-1">
+                        <span>{nProfile.myanmarName}</span>
+                        <span className="text-[9px] font-mono text-zinc-400">
+                          ({nProfile.gender === 'male' ? 'M' : 'F'})
+                        </span>
+                      </div>
+                      <div className="text-[9px] font-mono text-amber-300/80 truncate">
+                        {nProfile.naraVoiceId}
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (testAudioUrls[cacheKey]) {
+                          playVoiceClip(`test_${cacheKey}`, testAudioUrls[cacheKey]);
+                        } else {
+                          handleTestVoice(nVoice);
+                        }
+                      }}
+                      disabled={isTesting}
+                      title="Nara Mini v1 အသံနမူနာ နားထောင်မည်"
+                      className="p-1.5 rounded-lg bg-white/10 hover:bg-amber-400 hover:text-zinc-950 text-white transition-all shrink-0 cursor-pointer"
+                    >
+                      {isTesting ? (
+                        <RotateCw className="w-3 h-3 animate-spin text-amber-300" />
+                      ) : isPlaying ? (
+                        <Pause className="w-3 h-3" />
+                      ) : (
+                        <Play className="w-3 h-3" />
+                      )}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* STRICT SINGLE VOICE LOCK BANNER & CHARACTER PICKER */}
+          <div className="space-y-3">
+            <div className="p-3 rounded-2xl bg-emerald-950/40 border border-emerald-500/40 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <span className="p-1.5 rounded-xl bg-emerald-400/20 text-emerald-300 border border-emerald-400/30 shrink-0">
+                  <Lock className="w-3.5 h-3.5" />
+                </span>
+                <div>
+                  <span className="text-xs font-black text-emerald-300 block font-display">
+                    Single Voice Lock Active (တစ်သံတည်း သီးသန့်စနစ်)
+                  </span>
+                  <span className="text-[11px] text-zinc-400 font-myanmar block">
+                    အသံနှစ်သံ မရောစေရန် Narrator တစ်ဦးတည်းအသံဖြင့်သာ ဗီဒီယိုတစ်ခုလုံးကို ထုတ်ပေးပါမည်
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleApplyVoiceAllocation(singleVoice)}
+                className="px-2.5 py-1.5 rounded-xl bg-emerald-400/15 hover:bg-emerald-400/25 border border-emerald-400/40 text-emerald-300 text-[10px] font-bold shrink-0 cursor-pointer"
+              >
+                Sync All
+              </button>
+            </div>
+
+            <div
+              onClick={() => setIsGeminiFlowOpen(true)}
+              className="p-4 rounded-2xl border border-emerald-400/80 bg-gradient-to-r from-emerald-500/20 via-teal-500/10 to-transparent hover:border-emerald-300 transition-all cursor-pointer group shadow-xl flex items-center justify-between"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-emerald-400 to-teal-400 text-zinc-950 font-black flex items-center justify-center text-base shadow-md">
+                  {currentVoiceProfile.name.charAt(0)}
+                </div>
+                <div>
+                  <h3 className="text-sm font-black text-white font-display">
+                    {currentVoiceProfile.name} ({currentVoiceProfile.myanmarName} — {currentVoiceProfile.gender === 'male' ? 'Male' : 'Female'})
+                  </h3>
+                  <p className="text-xs text-emerald-300/90 font-medium mt-0.5">
+                    {currentVoiceProfile.toneTitle}
+                  </p>
+                </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {/* SPEAKER A CARD */}
-                <div
-                  onClick={() => {
-                    setTargetSlot('speakerA');
-                    if (voiceEngine === 'gemini') setIsGeminiFlowOpen(true);
-                    else setIsHfFlowOpen(true);
-                  }}
-                  className="p-3.5 rounded-2xl border border-emerald-500/50 bg-emerald-950/30 hover:border-emerald-400 transition-all cursor-pointer group shadow-lg flex items-center justify-between"
-                >
-                  <div className="flex items-center gap-2.5">
-                    <span className="w-7 h-7 rounded-lg bg-emerald-400 text-zinc-950 font-black text-xs flex items-center justify-center shrink-0">
-                      A
-                    </span>
-                    <div className="truncate">
-                      <span className="text-[10px] text-emerald-400 font-bold block uppercase tracking-wider">Speaker A</span>
-                      <span className="text-xs font-black text-white truncate block font-display">
-                        {voiceEngine === 'gemini' ? profileA.name : hfInfoA.name}
-                      </span>
-                    </div>
-                  </div>
-                  <ChevronRight className="w-4 h-4 text-emerald-400 group-hover:translate-x-1 transition-transform shrink-0" />
-                </div>
+              <span className="text-xs font-bold text-emerald-400 group-hover:translate-x-1 transition-transform flex items-center gap-1 shrink-0">
+                <span>အသံပြောင်းရန်</span>
+                <ChevronRight className="w-4 h-4" />
+              </span>
+            </div>
+          </div>
 
-                {/* SPEAKER B CARD */}
-                <div
-                  onClick={() => {
-                    setTargetSlot('speakerB');
-                    if (voiceEngine === 'gemini') setIsGeminiFlowOpen(true);
-                    else setIsHfFlowOpen(true);
-                  }}
-                  className="p-3.5 rounded-2xl border border-cyan-500/50 bg-cyan-950/30 hover:border-cyan-400 transition-all cursor-pointer group shadow-lg flex items-center justify-between"
-                >
-                  <div className="flex items-center gap-2.5">
-                    <span className="w-7 h-7 rounded-lg bg-cyan-400 text-zinc-950 font-black text-xs flex items-center justify-center shrink-0">
-                      B
-                    </span>
-                    <div className="truncate">
-                      <span className="text-[10px] text-cyan-400 font-bold block uppercase tracking-wider">Speaker B</span>
-                      <span className="text-xs font-black text-white truncate block font-display">
-                        {voiceEngine === 'gemini' ? profileB.name : hfInfoB.name}
-                      </span>
+          {/* VOICE TONE & FINE VOCAL PITCH CONTROLS */}
+          <div className="p-4 rounded-2xl bg-black/50 border border-cyan-500/30 space-y-3.5 backdrop-blur-xl shadow-lg">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-black text-cyan-300 flex items-center gap-2 font-display">
+                <AudioLines className="w-4 h-4 text-cyan-400" />
+                <span>Voice Tone & Vocal Pitch ချိန်ညှိခန်း</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => handleTestVoice(singleVoice)}
+                disabled={testingVoice !== null}
+                className="px-3 py-1 rounded-xl bg-cyan-400 hover:bg-cyan-300 text-zinc-950 text-[11px] font-black flex items-center gap-1.5 shadow cursor-pointer disabled:opacity-50"
+              >
+                {testingVoice ? (
+                  <RotateCw className="w-3 h-3 animate-spin" />
+                ) : (
+                  <Play className="w-3 h-3 fill-zinc-950" />
+                )}
+                <span>Test Tone</span>
+              </button>
+            </div>
+
+            {/* Tone Presets Grid */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+              {VOICE_TONE_PRESETS.map((preset) => {
+                const isSelected = voiceTone === preset.id;
+                return (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    onClick={() => handleToneChange(preset.id)}
+                    className={`p-2 rounded-xl border text-left transition-all cursor-pointer ${
+                      isSelected
+                        ? 'bg-gradient-to-br from-cyan-500/25 to-emerald-500/20 border-cyan-400 text-white shadow-md ring-1 ring-cyan-400/40'
+                        : 'bg-white/5 border-white/10 text-zinc-300 hover:bg-white/10'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1 text-[10px] font-bold">
+                      <span className="truncate">{preset.label}</span>
+                      <span className="font-mono text-cyan-300 shrink-0">{preset.badge}</span>
                     </div>
-                  </div>
-                  <ChevronRight className="w-4 h-4 text-cyan-400 group-hover:translate-x-1 transition-transform shrink-0" />
+                    <span className="text-[10px] text-zinc-400 font-myanmar block truncate mt-0.5">
+                      {preset.myanmarLabel}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Fine Tone Pitch Offset Slider (-15% to +15%) */}
+            <div className="pt-2 border-t border-white/10 space-y-1.5">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-[11px] font-bold text-zinc-200 font-myanmar">
+                  အသံနိမ့် / အသံမြင့် Tone ချိန်ညှိမှု (Vocal Pitch Offset)
+                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-mono font-bold text-cyan-300 px-2 py-0.5 rounded-full bg-cyan-500/15 border border-cyan-500/30">
+                    {voicePitch > 0 ? `+${voicePitch}%` : `${voicePitch}%`}
+                  </span>
+                  {voicePitch !== 0 && (
+                    <button
+                      type="button"
+                      onClick={() => handlePitchChange(0)}
+                      className="text-[10px] text-zinc-400 hover:text-white underline cursor-pointer"
+                    >
+                      Reset 0%
+                    </button>
+                  )}
                 </div>
+              </div>
+              <div className="flex items-center gap-2.5">
+                <span className="text-[10px] font-mono text-zinc-400 font-bold">-15% (Deep)</span>
+                <input
+                  type="range"
+                  min="-15"
+                  max="15"
+                  step="1"
+                  value={voicePitch}
+                  onChange={(e) => handlePitchChange(parseInt(e.target.value, 10))}
+                  className="flex-1 accent-cyan-400 h-2 bg-white/10 rounded-lg cursor-pointer"
+                />
+                <span className="text-[10px] font-mono text-zinc-400 font-bold">+15% (Bright)</span>
               </div>
             </div>
-          )}
+
+            {/* Quick Delivery Style Selector */}
+            <div className="pt-2 border-t border-white/10 flex items-center gap-1.5 flex-wrap">
+              <span className="text-[10px] text-zinc-400 font-bold mr-1">Style:</span>
+              {[
+                { id: 'recap' as VoiceStyle, label: '🎬 Recap' },
+                { id: 'conversational' as VoiceStyle, label: '🎙️ Natural' },
+                { id: 'broadcast' as VoiceStyle, label: '📢 Broadcast' },
+                { id: 'energetic' as VoiceStyle, label: '🔥 Energetic' },
+                { id: 'soothing' as VoiceStyle, label: '☕ Calm' },
+                { id: 'affectionate' as VoiceStyle, label: '💖 Warm' },
+              ].map((st) => (
+                <button
+                  key={st.id}
+                  type="button"
+                  onClick={() => handleStyleChange(st.id)}
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
+                    voiceStyle === st.id
+                      ? 'bg-emerald-400 text-zinc-950 font-black shadow'
+                      : 'bg-white/5 text-zinc-300 hover:bg-white/10 border border-white/10'
+                  }`}
+                >
+                  {st.label}
+                </button>
+              ))}
+            </div>
+          </div>
 
           {/* Speed & Gentle 1-Minute Block Alignment Controls */}
           <div className="p-4 rounded-2xl bg-black/40 border border-white/10 space-y-3 backdrop-blur-xl">
@@ -1272,10 +1480,10 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                 type="button"
                 onClick={handleAutoRetimeAll}
                 className="px-2.5 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 rounded-xl text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 shadow"
-                title="၁ မိနစ်စာ အပိုင်းတစ်ခုချင်းစီအတွင်း နောက်ပိုင်းအသံများ မရွေ့စေရန် အသာအယာ (0.90x-1.15x) ပြန်ညှိမည်"
+                title="0:30 စာ အပိုင်းတစ်ခုချင်းစီအတွင်း နောက်ပိုင်းအသံများ မရွေ့စေရန် အသာအယာ (0.90x-1.15x) ပြန်ညှိမည်"
               >
                 <Zap className="w-3 h-3 text-emerald-400" />
-                <span>⏱️ 1-Min Block Align (အချိန်ကွက် ညှိမည်)</span>
+                <span>⏱️ 0:30 Part Align (အချိန်ကွက် ညှိမည်)</span>
               </button>
 
               <span className="text-[10px] text-zinc-400 font-mono">
@@ -1284,15 +1492,19 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
             </div>
           </div>
 
-          {/* 1-Minute Block Selector & Drift Sync Monitor */}
+          {/* Slot / 0:30 Part Selector & Drift Sync Monitor */}
           <div className="p-3.5 rounded-2xl bg-black/40 border border-cyan-500/25 space-y-2.5">
             <div className="flex items-center justify-between text-xs">
               <span className="font-bold text-cyan-300 flex items-center gap-1.5 font-myanmar">
                 <Sliders className="w-3.5 h-3.5 text-cyan-400" />
-                <span>၁ မိနစ်စာ အချိန်ကွက်များ ({totalMinuteBlocks} Blocks)</span>
+                <span>
+                  {isRecap30sProject
+                    ? `၃၀ စက္ကန့် Scene Slots (${totalMinuteBlocks} Slots — 0.18s Pause)`
+                    : `0:30 စာ အချိန်ကွက်များ (${totalMinuteBlocks} Parts · 0:00-0:30, 0:30-1:00...)`}
+                </span>
               </span>
               <span className="text-[10px] font-mono text-zinc-400">
-                Sync Lock / Minute
+                {isRecap30sProject ? 'Scene-by-Scene 30s Lock' : 'Sync Lock / 0:30 Part'}
               </span>
             </div>
 
@@ -1333,7 +1545,9 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                         : 'bg-white/5 text-zinc-300 hover:bg-white/10 border border-white/10'
                     }`}
                   >
-                    <span>P{part.partNumber} ({formatMinSec(part.startSec)}–{formatMinSec(part.endSec)})</span>
+                    <span>
+                      {isRecap30sProject ? `S${part.partNumber}` : `P${part.partNumber}`} ({formatMinSec(part.startSec)}–{formatMinSec(part.endSec)})
+                    </span>
                     <span className={`px-1 rounded text-[9px] font-mono ${hasWarn ? 'bg-amber-500/30 text-amber-200' : 'bg-black/40 text-emerald-300'}`}>
                       {readyInPart}/{partSegs.length}
                     </span>
@@ -1343,27 +1557,28 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
             </div>
           </div>
 
-          {/* Action Buttons: Generate All, Retry Missing Voices, Auto Sync-Fit */}
-          <div className="space-y-2">
+          {/* Action Buttons: Generate All (Stages 4 & 5), Retry Missing Voices, Auto Sync-Fit */}
+          <div className="space-y-2.5">
             <div className="flex flex-col sm:flex-row gap-2">
               <button
                 onClick={() => handleGenerateAll()}
                 disabled={isBatchGenerating || isSyncFitting || project.segments.length === 0}
-                className={`flex-1 py-3.5 px-5 disabled:opacity-50 text-zinc-950 text-xs sm:text-sm font-black rounded-2xl transition-all flex items-center justify-center gap-2 shadow-2xl cursor-pointer ${
-                  voiceEngine === 'huggingface'
-                    ? 'bg-gradient-to-r from-amber-400 via-orange-400 to-rose-400 shadow-amber-500/25 hover:scale-[1.01]'
-                    : 'bg-gradient-to-r from-emerald-400 via-teal-400 to-cyan-400 shadow-emerald-500/25 hover:scale-[1.01]'
-                }`}
+                title="၄. Narrator အသံဖန်တီး & ပြောနှုန်းညှိ + ၅. 0:30 Part Sync (Anti-Drift) ကို တစ်ပါတည်း လုပ်ဆောင်မည်"
+                className="flex-1 py-3.5 px-5 disabled:opacity-50 text-zinc-950 text-xs sm:text-sm font-black rounded-2xl transition-all flex items-center justify-center gap-2 shadow-2xl cursor-pointer bg-gradient-to-r from-emerald-400 via-teal-400 to-cyan-400 shadow-emerald-500/25 hover:scale-[1.01]"
               >
                 {isBatchGenerating ? (
                   <>
                     <RotateCw className="w-4 h-4 animate-spin" />
-                    <span>Generating ({batchProgress?.current}/{batchProgress?.total})...</span>
+                    <span>
+                      {voiceGenStage === 5
+                        ? '5. 0:30 Part Sync ညှိနေသည်...'
+                        : `Generating Voices (${batchProgress?.current}/${batchProgress?.total})...`}
+                    </span>
                   </>
                 ) : (
                   <>
                     <Volume2 className="w-4 h-4 stroke-[2.5]" />
-                    <span>Generate All Voices ({project.segments.length})</span>
+                    <span>Generate All Voices ({project.segments.length}) · +0:30 Sync</span>
                   </>
                 )}
               </button>
@@ -1380,6 +1595,41 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                 </button>
               )}
             </div>
+
+            {isBatchGenerating && (
+              <div className="space-y-2 p-3 rounded-xl bg-emerald-950/40 border border-emerald-500/30">
+                <div className="grid grid-cols-2 gap-1.5 text-[10px] font-myanmar">
+                  {[
+                    { id: 4 as const, label: '၄. Narrator အသံညှိ' },
+                    { id: 5 as const, label: '၅. 0:30 Part Sync' },
+                  ].map((st) => {
+                    const active = voiceGenStage === st.id;
+                    const done = voiceGenStage !== null && voiceGenStage > st.id;
+                    return (
+                      <div
+                        key={st.id}
+                        className={`px-2.5 py-1.5 rounded-lg border flex items-center justify-between gap-1 ${
+                          done
+                            ? 'bg-emerald-500/20 border-emerald-400/50 text-emerald-200'
+                            : active
+                              ? 'bg-cyan-500/25 border-cyan-400 text-white font-bold animate-pulse'
+                              : 'bg-black/35 border-white/10 text-zinc-400'
+                        }`}
+                      >
+                        <span className="truncate">{st.label}</span>
+                        {done && <Check className="w-3 h-3 text-emerald-400 shrink-0" />}
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="w-full h-1.5 bg-zinc-900 rounded-full overflow-hidden border border-emerald-500/20">
+                  <div
+                    className="h-full bg-gradient-to-r from-emerald-400 via-teal-400 to-cyan-400 transition-all duration-300 rounded-full"
+                    style={{ width: `${Math.max(5, Math.min(100, voiceGenPercent))}%` }}
+                  />
+                </div>
+              </div>
+            )}
 
             {(missingCount > 0 || overflowCount > 0) && (
               <div className="flex flex-wrap gap-2">
@@ -1450,8 +1700,7 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
             <div className="space-y-2.5 max-h-[340px] overflow-y-auto pr-1.5">
               {displayedSegments.map((seg, idx) => {
                 const isSegPlaying = playingAudioId === seg.id;
-                const segActiveVoice = seg.voice || (voiceMode === 'double' ? (idx % 2 === 0 ? speakerA : speakerB) : singleVoice);
-                const segActiveHfSpeaker = seg.hfSpeaker || (voiceMode === 'double' ? (idx % 2 === 0 ? hfSpeakerA : hfSpeakerB) : selectedHfSpeaker);
+                const segActiveVoice = singleVoice;
                 const isMissingVoice = !seg.audioUrl;
 
                 return (
@@ -1464,7 +1713,7 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2 flex-wrap">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <span className={`w-5 h-5 rounded-full border flex items-center justify-center font-mono text-[10px] font-bold ${
                           isMissingVoice
                             ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
@@ -1475,6 +1724,16 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                         <span className="text-[11px] font-mono text-zinc-300">
                           {seg.startTime}s - {seg.endTime}s
                         </span>
+                        {seg.slotMode === 'scene_recap_30s' && (
+                          <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 text-[9px] font-mono">
+                            ⏸ {(seg.pauseBetweenParts ?? 0.18).toFixed(2)}s Pause
+                          </span>
+                        )}
+                        {seg.sceneTitle && (
+                          <span className="px-1.5 py-0.5 rounded bg-white/5 text-zinc-300 border border-white/10 text-[10px] font-myanmar max-w-[180px] truncate">
+                            {seg.sceneTitle}
+                          </span>
+                        )}
                         {isMissingVoice && (
                           <span className="px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[9px] font-bold">
                             No Voice
@@ -1482,103 +1741,20 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                         )}
                       </div>
 
-                      {/* PER-SEGMENT VOICE CLONE DROPDOWN & QUICK A/B TOGGLE */}
+                      {/* SINGLE LOCKED VOICE INDICATOR & PLAYBACK CONTROLS */}
                       <div className="flex items-center gap-2">
-                        {voiceEngine === 'gemini' ? (
-                          <select
-                            value={segActiveVoice}
-                            onChange={(e) => handleSegmentVoiceChange(seg.id, e.target.value as VoiceOption)}
-                            className="px-2.5 py-1 bg-zinc-900 border border-emerald-500/40 rounded-xl text-xs font-bold text-emerald-300 focus:outline-none focus:border-emerald-400 cursor-pointer max-w-[130px] truncate"
-                          >
-                            {ALL_VOICES.map((v) => (
-                              <option key={v} value={v} className="bg-zinc-900 text-white font-sans">
-                                {VOICE_PROFILES[v].name} ({VOICE_PROFILES[v].gender === 'male' ? 'M' : 'F'})
-                              </option>
-                            ))}
-                          </select>
-                        ) : voiceEngine === 'elevenlabs' ? (
-                          <select
-                            value={seg.elevenLabsVoiceId || selectedElevenLabsVoiceId || elevenLabsVoices[0]?.voice_id || ''}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              const voiceObj = elevenLabsVoices.find((v) => v.voice_id === val);
-                              setProject((prev) => ({
-                                ...prev,
-                                segments: prev.segments.map((s) =>
-                                  s.id === seg.id
-                                    ? {
-                                        ...s,
-                                        voiceProvider: 'elevenlabs',
-                                        elevenLabsVoiceId: val,
-                                        speaker: `ElevenLabs (${voiceObj?.name || 'Cloned Voice'})`,
-                                      }
-                                    : s
-                                ),
-                              }));
-                            }}
-                            className="px-2.5 py-1 bg-zinc-900 border border-violet-500/40 rounded-xl text-xs font-bold text-violet-300 focus:outline-none focus:border-violet-400 cursor-pointer max-w-[140px] truncate"
-                          >
-                            {elevenLabsVoices.map((v) => (
-                              <option key={v.voice_id} value={v.voice_id} className="bg-zinc-900 text-white font-sans">
-                                {v.name}
-                              </option>
-                            ))}
-                            {elevenLabsVoices.length === 0 && (
-                              <option value="" className="bg-zinc-900 text-zinc-400">
-                                No Voice Found
-                              </option>
-                            )}
-                          </select>
-                        ) : (
-                          <select
-                            value={segActiveHfSpeaker}
-                            onChange={(e) => handleSegmentHfSpeakerChange(seg.id, e.target.value)}
-                            className="px-2.5 py-1 bg-zinc-900 border border-amber-500/40 rounded-xl text-xs font-bold text-amber-300 focus:outline-none focus:border-amber-400 cursor-pointer max-w-[130px] truncate"
-                          >
-                            {HF_MULTI_SPEAKERS.map((sp) => (
-                              <option key={sp.id} value={sp.id} className="bg-zinc-900 text-white font-sans">
-                                {sp.name} ({sp.gender})
-                              </option>
-                            ))}
-                          </select>
-                        )}
-
-                        {/* Double Voice Mode Quick A/B Buttons */}
-                        {voiceMode === 'double' && (
-                          <div className="flex items-center gap-1 bg-white/5 p-0.5 rounded-lg border border-white/10 shrink-0">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                if (voiceEngine === 'gemini') handleSegmentVoiceChange(seg.id, speakerA);
-                                else handleSegmentHfSpeakerChange(seg.id, hfSpeakerA);
-                              }}
-                              className={`px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer ${
-                                (voiceEngine === 'gemini' ? segActiveVoice === speakerA : segActiveHfSpeaker === hfSpeakerA)
-                                  ? 'bg-emerald-400 text-zinc-950 shadow font-black'
-                                  : 'text-zinc-400 hover:text-white'
-                              }`}
-                              title={`Speaker A (${voiceEngine === 'gemini' ? speakerA : hfInfoA.name})`}
-                            >
-                              A
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => {
-                                if (voiceEngine === 'gemini') handleSegmentVoiceChange(seg.id, speakerB);
-                                else handleSegmentHfSpeakerChange(seg.id, hfSpeakerB);
-                              }}
-                              className={`px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer ${
-                                (voiceEngine === 'gemini' ? segActiveVoice === speakerB : segActiveHfSpeaker === hfSpeakerB)
-                                  ? 'bg-cyan-400 text-zinc-950 shadow font-black'
-                                  : 'text-zinc-400 hover:text-white'
-                              }`}
-                              title={`Speaker B (${voiceEngine === 'gemini' ? speakerB : hfInfoB.name})`}
-                            >
-                              B
-                            </button>
-                          </div>
-                        )}
+                        <select
+                          value={segActiveVoice}
+                          onChange={(e) => handleSegmentVoiceChange(seg.id, e.target.value as VoiceOption)}
+                          title="Single Narrator Voice (တစ်သံတည်း Lock)"
+                          className="px-2.5 py-1 bg-zinc-900 border border-emerald-500/40 rounded-xl text-xs font-bold text-emerald-300 focus:outline-none focus:border-emerald-400 cursor-pointer max-w-[130px] truncate"
+                        >
+                          {ALL_VOICES.map((v) => (
+                            <option key={v} value={v} className="bg-zinc-900 text-white font-sans">
+                              {VOICE_PROFILES[v].name} ({VOICE_PROFILES[v].gender === 'male' ? 'M' : 'F'})
+                            </option>
+                          ))}
+                        </select>
 
                         <button
                           type="button"
@@ -1616,38 +1792,106 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                       </div>
                     </div>
 
-                    <div className="flex flex-col sm:flex-row gap-2">
-                      <input
-                        type="text"
-                        value={seg.myanmarTranslation}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          setProject((prev) => ({
-                            ...prev,
-                            segments: prev.segments.map((s) => (s.id === seg.id ? { ...s, myanmarTranslation: val } : s)),
-                          }));
-                        }}
-                        placeholder="မြန်မာဘာသာပြန်..."
-                        className="flex-1 px-3 py-1.5 bg-zinc-950/70 border border-white/10 rounded-xl text-xs font-myanmar text-white focus:outline-none focus:border-emerald-400"
-                      />
+                    {seg.slotMode === 'scene_recap_30s' ? (
+                      <div className="space-y-1.5">
+                        <div className="flex flex-col sm:flex-row gap-2">
+                          <input
+                            type="text"
+                            value={seg.mainNarration ?? seg.myanmarTranslation}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              const bridge = seg.bridgeNarration || '';
+                              const combined = bridge ? `${val} ${bridge}`.trim() : val;
+                              setProject((prev) => ({
+                                ...prev,
+                                segments: prev.segments.map((s) =>
+                                  s.id === seg.id
+                                    ? { ...s, mainNarration: val, myanmarTranslation: combined, subtitleText: combined }
+                                    : s
+                                ),
+                              }));
+                            }}
+                            placeholder="Part 1 (ပင်မ ဇာတ်ကြောင်းအကျဉ်း)..."
+                            className="flex-1 px-3 py-1.5 bg-zinc-950/70 border border-white/10 rounded-xl text-xs font-myanmar text-white focus:outline-none focus:border-emerald-400"
+                          />
 
-                      <select
-                        value={seg.emotion || ''}
-                        onChange={(e) => handleSegmentEmotionChange(seg.id, e.target.value)}
-                        title="အသံနိမ့်မြင့် / ခံစားချက် (Vocal Emotion)"
-                        className="px-2 py-1.5 bg-zinc-900 border border-cyan-500/30 rounded-xl text-[11px] font-myanmar font-semibold text-cyan-200 focus:outline-none focus:border-cyan-400 cursor-pointer sm:w-48"
-                      >
-                        <option value="" className="bg-zinc-900 text-white">🎭 Auto (သဘာဝ စကားပြော)</option>
-                        <option value="happy, cheerful, warm" className="bg-zinc-900 text-white">😊 ပျော်ရွှင်နွေးထွေး (Happiness)</option>
-                        <option value="sad, gentle, sincere" className="bg-zinc-900 text-white">😢 ဝမ်းနည်းကြင်နာ (Sadness)</option>
-                        <option value="excited, energetic, enthusiastic" className="bg-zinc-900 text-white">⚡ တက်ကြွစိတ်လှုပ်ရှား (Excitement)</option>
-                        <option value="curious, questioning" className="bg-zinc-900 text-white">❓ စူးစမ်းမေးမြန်း (Curiosity)</option>
-                        <option value="empathetic, caring, comforting" className="bg-zinc-900 text-white">💛 စာနာနှစ်သိမ့် (Empathy)</option>
-                        <option value="surprised, amazed" className="bg-zinc-900 text-white">😮 အံ့ဩတုန်လှုပ် (Surprise)</option>
-                        <option value="mocking, smug" className="bg-zinc-900 text-white">😏 လှောင်ပြောင် (Mocking)</option>
-                        <option value="determined, fierce" className="bg-zinc-900 text-white">🔥 မာန်ပါ / ခိုင်မာ (Fierce)</option>
-                      </select>
-                    </div>
+                          <select
+                            value={seg.emotion || ''}
+                            onChange={(e) => handleSegmentEmotionChange(seg.id, e.target.value)}
+                            title="အသံနိမ့်မြင့် / ခံစားချက် (Vocal Emotion)"
+                            className="px-2 py-1.5 bg-zinc-900 border border-cyan-500/30 rounded-xl text-[11px] font-myanmar font-semibold text-cyan-200 focus:outline-none focus:border-cyan-400 cursor-pointer sm:w-48"
+                          >
+                            <option value="" className="bg-zinc-900 text-white">🎭 Auto (သဘာဝ စကားပြော)</option>
+                            <option value="happy, cheerful, warm" className="bg-zinc-900 text-white">😊 ပျော်ရွှင်နွေးထွေး (Happiness)</option>
+                            <option value="sad, gentle, sincere" className="bg-zinc-900 text-white">😢 ဝမ်းနည်းကြင်နာ (Sadness)</option>
+                            <option value="excited, energetic, enthusiastic" className="bg-zinc-900 text-white">⚡ တက်ကြွစိတ်လှုပ်ရှား (Excitement)</option>
+                            <option value="curious, questioning" className="bg-zinc-900 text-white">❓ စူးစမ်းမေးမြန်း (Curiosity)</option>
+                            <option value="empathetic, caring, comforting" className="bg-zinc-900 text-white">💛 စာနာနှစ်သိမ့် (Empathy)</option>
+                            <option value="surprised, amazed" className="bg-zinc-900 text-white">😮 အံ့ဩတုန်လှုပ် (Surprise)</option>
+                            <option value="mocking, smug" className="bg-zinc-900 text-white">😏 လှောင်ပြောင် (Mocking)</option>
+                            <option value="determined, fierce" className="bg-zinc-900 text-white">🔥 မာန်ပါ / ခိုင်မာ (Fierce)</option>
+                          </select>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <span className="text-[9px] font-mono text-cyan-300 px-1.5 py-0.5 rounded bg-cyan-500/10 border border-cyan-500/25 shrink-0">
+                            +{(seg.pauseBetweenParts ?? 0.18).toFixed(2)}s
+                          </span>
+                          <input
+                            type="text"
+                            value={seg.bridgeNarration || ''}
+                            onChange={(e) => {
+                              const bridge = e.target.value;
+                              const main = seg.mainNarration ?? seg.myanmarTranslation;
+                              const combined = bridge.trim() ? `${main} ${bridge}`.trim() : main;
+                              setProject((prev) => ({
+                                ...prev,
+                                segments: prev.segments.map((s) =>
+                                  s.id === seg.id
+                                    ? { ...s, bridgeNarration: bridge, myanmarTranslation: combined, subtitleText: combined }
+                                    : s
+                                ),
+                              }));
+                            }}
+                            placeholder="Part 2 ဆက်စကားတို (30s slot ပြည့်အောင် ဖြည့်ရန် — ဗလာဆို Auto ဖန်တီးမည်)..."
+                            className="flex-1 px-3 py-1 bg-zinc-950/60 border border-cyan-500/20 rounded-xl text-[11px] font-myanmar text-cyan-100 focus:outline-none focus:border-cyan-400"
+                          />
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <input
+                          type="text"
+                          value={seg.myanmarTranslation}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setProject((prev) => ({
+                              ...prev,
+                              segments: prev.segments.map((s) => (s.id === seg.id ? { ...s, myanmarTranslation: val } : s)),
+                            }));
+                          }}
+                          placeholder="မြန်မာဘာသာပြန်..."
+                          className="flex-1 px-3 py-1.5 bg-zinc-950/70 border border-white/10 rounded-xl text-xs font-myanmar text-white focus:outline-none focus:border-emerald-400"
+                        />
+
+                        <select
+                          value={seg.emotion || ''}
+                          onChange={(e) => handleSegmentEmotionChange(seg.id, e.target.value)}
+                          title="အသံနိမ့်မြင့် / ခံစားချက် (Vocal Emotion)"
+                          className="px-2 py-1.5 bg-zinc-900 border border-cyan-500/30 rounded-xl text-[11px] font-myanmar font-semibold text-cyan-200 focus:outline-none focus:border-cyan-400 cursor-pointer sm:w-48"
+                        >
+                          <option value="" className="bg-zinc-900 text-white">🎭 Auto (သဘာဝ စကားပြော)</option>
+                          <option value="happy, cheerful, warm" className="bg-zinc-900 text-white">😊 ပျော်ရွှင်နွေးထွေး (Happiness)</option>
+                          <option value="sad, gentle, sincere" className="bg-zinc-900 text-white">😢 ဝမ်းနည်းကြင်နာ (Sadness)</option>
+                          <option value="excited, energetic, enthusiastic" className="bg-zinc-900 text-white">⚡ တက်ကြွစိတ်လှုပ်ရှား (Excitement)</option>
+                          <option value="curious, questioning" className="bg-zinc-900 text-white">❓ စူးစမ်းမေးမြန်း (Curiosity)</option>
+                          <option value="empathetic, caring, comforting" className="bg-zinc-900 text-white">💛 စာနာနှစ်သိမ့် (Empathy)</option>
+                          <option value="surprised, amazed" className="bg-zinc-900 text-white">😮 အံ့ဩတုန်လှုပ် (Surprise)</option>
+                          <option value="mocking, smug" className="bg-zinc-900 text-white">😏 လှောင်ပြောင် (Mocking)</option>
+                          <option value="determined, fierce" className="bg-zinc-900 text-white">🔥 မာန်ပါ / ခိုင်မာ (Fierce)</option>
+                        </select>
+                      </div>
+                    )}
 
                     {/* Duration Alignment & Auto-Retime Speed Control */}
                     <div className="flex items-center justify-between text-[10px] text-zinc-400 pt-1 border-t border-white/5 flex-wrap gap-1">
@@ -1757,10 +2001,10 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                 </div>
                 <div>
                   <h3 className="text-base font-black text-white font-display">
-                    Gemini 24kHz Reality Voices — Flow Panel
+                    Gemini 24kHz Reality Voices — Single Narrator Flow Panel
                   </h3>
                   <p className="text-xs text-zinc-400 font-myanmar">
-                    Target: <span className="font-bold text-emerald-300 uppercase">{targetSlot}</span> — လူ ၂၅ ကျော်ပါသော Voice Clone characters များကို ရွေးချယ်၊ စမ်းသပ်ပါ
+                    Tone: <span className="font-bold text-cyan-300 uppercase">{voiceTone}</span> ({voicePitch >= 0 ? `+${voicePitch}` : voicePitch}%) — တစ်သံတည်း သုံးစွဲရန် Voice Character ရွေးချယ်ပါ
                   </p>
                 </div>
               </div>
@@ -1872,24 +2116,14 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                 <div className="space-y-2 max-h-[340px] overflow-y-auto pr-1">
                   {filteredVoices.map((vKey) => {
                     const profile = VOICE_PROFILES[vKey];
-                    const activeVoiceTarget = targetSlot === 'speakerA' ? speakerA : targetSlot === 'speakerB' ? speakerB : singleVoice;
-                    const isSelected = activeVoiceTarget === vKey;
-                    const cacheKey = `${vKey}_${voiceStyle}`;
+                    const isSelected = singleVoice === vKey;
+                    const cacheKey = `${vKey}_${voiceStyle}_${voiceTone}_${voicePitch}`;
                     const isPlaying = playingAudioId === `test_${cacheKey}`;
                     const isTesting = testingVoice === vKey;
                     const initialChar = profile.name.charAt(0).toUpperCase();
 
                     const handleSelectCharacter = () => {
-                      if (targetSlot === 'speakerA') {
-                        setSpeakerA(vKey);
-                        setStatusText(`✓ Speaker A set to (${profile.name}).`);
-                      } else if (targetSlot === 'speakerB') {
-                        setSpeakerB(vKey);
-                        setStatusText(`✓ Speaker B set to (${profile.name}).`);
-                      } else {
-                        setSingleVoice(vKey);
-                        handleApplyVoiceAllocation(vKey);
-                      }
+                      handleApplyVoiceAllocation(vKey);
                       setIsGeminiFlowOpen(false);
                     };
 
@@ -1936,6 +2170,10 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                               controls
                               className="h-7 w-32 rounded-lg opacity-80 hover:opacity-100"
                               onClick={(e) => e.stopPropagation()}
+                              onPlay={(e) => {
+                                setProject((prev) => (prev.isPlaying ? { ...prev, isPlaying: false } : prev));
+                                registerPreviewAudio(e.currentTarget);
+                              }}
                             />
                           )}
 
@@ -2004,9 +2242,9 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
             {/* Flow Panel Footer */}
             <div className="pt-4 border-t border-white/10 flex items-center justify-between relative z-10">
               <div className="flex items-center gap-2 text-xs">
-                <span className="text-zinc-400">Target Slot:</span>
+                <span className="text-zinc-400">Locked Single Narrator:</span>
                 <span className="font-bold text-emerald-300 font-display uppercase">
-                  {targetSlot} ({VOICE_PROFILES[targetSlot === 'speakerA' ? speakerA : targetSlot === 'speakerB' ? speakerB : singleVoice].name})
+                  {currentVoiceProfile.name}
                 </span>
               </div>
 
@@ -2022,465 +2260,6 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
         </div>
       )}
 
-      {/* ========================================================================= */}
-      {/* FLOW PANEL 2: HUGGING FACE AI CLONE (MODAL OVERLAY) */}
-      {/* ========================================================================= */}
-      {isHfFlowOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xl animate-fade-in">
-          <div className="w-full max-w-2xl bg-zinc-950 border border-amber-500/30 rounded-3xl p-6 sm:p-8 shadow-2xl flex flex-col max-h-[90vh] overflow-hidden relative">
-            <div className="absolute top-0 right-0 w-64 h-64 bg-amber-500/10 rounded-full blur-3xl pointer-events-none" />
-
-            {/* Header */}
-            <div className="flex items-center justify-between pb-4 border-b border-white/10 relative z-10">
-              <div className="flex items-center gap-3">
-                <div className="p-2.5 rounded-2xl bg-amber-500/20 text-amber-400 border border-amber-500/30 text-lg">
-                  🤗
-                </div>
-                <div>
-                  <h3 className="text-base font-black text-white font-display">
-                    Hugging Face AI Clone — Flow Panel
-                  </h3>
-                  <p className="text-xs text-zinc-400 font-myanmar">
-                    Target: <span className="font-bold text-amber-300 uppercase">{targetSlot}</span> — XTTS-v2 & Multi-Speaker Burmese AI Voice Models
-                  </p>
-                </div>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setIsHfFlowOpen(false)}
-                className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-white transition-all cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Content */}
-            <div className="flex-1 overflow-y-auto space-y-5 py-4 pr-1 relative z-10">
-              {!currentHfKey ? (
-                <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300 flex items-center justify-between gap-4 shadow-lg">
-                  <span>Hugging Face Token မထည့်ရသေးပါ။ Step 1 တွင် အရင်ထည့်သွင်းပေးပါ။</span>
-                  <a
-                    href="https://huggingface.co/settings/tokens"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="px-4 py-2 bg-amber-400 hover:bg-amber-300 text-zinc-950 rounded-xl font-bold text-xs shrink-0 flex items-center gap-1.5 shadow-md transition-all"
-                  >
-                    <span>Free Token ရယူရန်</span>
-                    <ExternalLink className="w-3.5 h-3.5" />
-                  </a>
-                </div>
-              ) : (
-                <div className="p-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-between text-xs text-emerald-300">
-                  <span className="flex items-center gap-2">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                    <span>Hugging Face Access Token Connected</span>
-                  </span>
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/20 font-bold uppercase">Ready</span>
-                </div>
-              )}
-
-              {/* Models */}
-              <div className="space-y-2.5">
-                <span className="text-xs font-black text-amber-300 uppercase tracking-widest block font-display">
-                  1. AI Voice Architecture Model
-                </span>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                  {HF_VOICE_MODELS.map((m) => {
-                    const isSelected = hfModel === m.id;
-                    return (
-                      <button
-                        key={m.id}
-                        type="button"
-                        onClick={() => setHfModel(m.id)}
-                        className={`p-3 rounded-2xl border text-left transition-all cursor-pointer ${
-                          isSelected
-                            ? 'bg-gradient-to-br from-amber-500/20 to-orange-500/10 border-amber-400 text-amber-200 shadow-md ring-1 ring-amber-400/40 font-bold'
-                            : 'bg-white/5 border-white/10 text-zinc-400 hover:text-zinc-200 hover:bg-white/10'
-                        }`}
-                      >
-                        <span className="text-xs font-black block text-white font-display">{m.name}</span>
-                        <span className="text-[10px] font-mono text-zinc-400 mt-0.5 block">{m.badge}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Multi-speaker Profiles */}
-              <div className="space-y-2.5 pt-2 border-t border-white/10">
-                <span className="text-xs font-black text-amber-300 uppercase tracking-widest block font-display">
-                  2. Hugging Face Speaker Characters
-                </span>
-
-                <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
-                  {HF_MULTI_SPEAKERS.map((sp) => {
-                    const activeHfTarget = targetSlot === 'speakerA' ? hfSpeakerA : targetSlot === 'speakerB' ? hfSpeakerB : selectedHfSpeaker;
-                    const isSelected = activeHfTarget === sp.id;
-                    const isPlaying = playingAudioId === `test_${sp.id}`;
-                    const isTesting = testingVoice === sp.id;
-
-                    const handleSelectHfSpeaker = () => {
-                      if (targetSlot === 'speakerA') {
-                        setHfSpeakerA(sp.id);
-                        setStatusText(`✓ HF Speaker A set to (${sp.name}).`);
-                      } else if (targetSlot === 'speakerB') {
-                        setHfSpeakerB(sp.id);
-                        setStatusText(`✓ HF Speaker B set to (${sp.name}).`);
-                      } else {
-                        setSelectedHfSpeaker(sp.id);
-                        handleApplyHfSpeakerAllocation(sp.id);
-                      }
-                      setIsHfFlowOpen(false);
-                    };
-
-                    return (
-                      <div
-                        key={sp.id}
-                        onClick={handleSelectHfSpeaker}
-                        className={`p-3.5 rounded-2xl border transition-all flex items-center justify-between cursor-pointer group ${
-                          isSelected
-                            ? 'bg-gradient-to-r from-amber-500/25 via-orange-500/10 to-transparent border-amber-400 text-amber-200 shadow-xl ring-1 ring-amber-400/50'
-                            : 'bg-white/5 border-white/10 hover:bg-white/10 hover:border-white/20'
-                        }`}
-                      >
-                        <div className="flex items-center gap-3">
-                          <div
-                            className={`w-10 h-10 rounded-xl flex items-center justify-center font-black text-sm shadow-md ${
-                              isSelected
-                                ? 'bg-gradient-to-tr from-amber-400 to-orange-400 text-zinc-950 font-black'
-                                : 'bg-white/10 text-white'
-                            }`}
-                          >
-                            {sp.gender === 'Male' ? '👨' : '👩'}
-                          </div>
-
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <span className="text-xs font-black text-white font-display">
-                                {sp.name}
-                              </span>
-                              <span className="text-[9px] font-mono px-2 py-0.2 rounded-full bg-white/10 text-zinc-300">
-                                {sp.gender}
-                              </span>
-                            </div>
-                            <span className="text-[11px] text-zinc-400 block mt-0.5">
-                              {sp.toneTitle}
-                            </span>
-                          </div>
-                        </div>
-
-                        <div className="flex items-center gap-2 flex-wrap justify-end">
-                          {testAudioUrls[sp.id] && (
-                            <audio
-                              src={testAudioUrls[sp.id]}
-                              controls
-                              className="h-7 w-32 rounded-lg opacity-80 hover:opacity-100"
-                              onClick={(e) => e.stopPropagation()}
-                            />
-                          )}
-
-                          {/* Test Voice Button */}
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (testAudioUrls[sp.id]) {
-                                playVoiceClip(`test_${sp.id}`, testAudioUrls[sp.id]);
-                              } else {
-                                handleTestHfSpeaker(sp.id);
-                              }
-                            }}
-                            disabled={isTesting}
-                            className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-amber-400 hover:text-zinc-950 text-white transition-all text-xs font-bold flex items-center gap-1.5 shadow-md cursor-pointer"
-                          >
-                            {isPlaying ? (
-                              <>
-                                <Pause className="w-3.5 h-3.5" />
-                                <span>Stop</span>
-                              </>
-                            ) : isTesting ? (
-                              <>
-                                <RotateCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
-                                <span>Loading...</span>
-                              </>
-                            ) : (
-                              <>
-                                <Play className="w-3.5 h-3.5" />
-                                <span>Test Voice</span>
-                              </>
-                            )}
-                          </button>
-
-                          {/* Select Button */}
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleSelectHfSpeaker();
-                            }}
-                            className={`px-3 py-1.5 rounded-xl text-xs font-black transition-all cursor-pointer ${
-                              isSelected
-                                ? 'bg-amber-400 text-zinc-950 shadow-md flex items-center gap-1'
-                                : 'bg-white/10 hover:bg-white/20 text-zinc-300'
-                            }`}
-                          >
-                            {isSelected ? (
-                              <>
-                                <Check className="w-3.5 h-3.5 stroke-[3]" />
-                                <span>Selected</span>
-                              </>
-                            ) : (
-                              <span>Select</span>
-                            )}
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-
-            {/* Footer */}
-            <div className="pt-4 border-t border-white/10 flex items-center justify-between relative z-10">
-              <div className="flex items-center gap-2 text-xs">
-                <span className="text-zinc-400">Target Slot:</span>
-                <span className="font-bold text-amber-300 font-display uppercase">
-                  {targetSlot} ({HF_MULTI_SPEAKERS.find(s => s.id === (targetSlot === 'speakerA' ? hfSpeakerA : targetSlot === 'speakerB' ? hfSpeakerB : selectedHfSpeaker))?.name})
-                </span>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setIsHfFlowOpen(false)}
-                className="px-6 py-2.5 bg-gradient-to-r from-amber-400 to-orange-400 text-zinc-950 font-black text-xs rounded-xl shadow-lg hover:opacity-90 transition-all cursor-pointer"
-              >
-                Done
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ========================================================================= */}
-      {/* FLOW PANEL 3: ELEVENLABS VOICE CLONE STUDIO (MODAL OVERLAY) */}
-      {/* ========================================================================= */}
-      {isElevenLabsFlowOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xl animate-fade-in">
-          <div className="w-full max-w-2xl bg-zinc-950 border border-violet-500/30 rounded-3xl p-6 sm:p-8 shadow-2xl flex flex-col max-h-[90vh] overflow-hidden relative">
-            <div className="absolute top-0 right-0 w-64 h-64 bg-violet-500/10 rounded-full blur-3xl pointer-events-none" />
-
-            {/* Header */}
-            <div className="flex items-center justify-between pb-4 border-b border-white/10 relative z-10">
-              <div className="flex items-center gap-3">
-                <div className="p-2.5 rounded-2xl bg-violet-500/20 text-violet-300 border border-violet-500/30 font-black">
-                  II
-                </div>
-                <div>
-                  <h3 className="text-base font-black text-white font-display">
-                    ElevenLabs Voice Clone Studio
-                  </h3>
-                  <p className="text-xs text-zinc-400 font-myanmar">
-                    ElevenLabs API ဖြင့် အသံဖိုင်တင်ပြီး Instant Voice Clone ဖန်တီးခြင်း သို့မဟုတ် Premade Voices ရွေးချယ်ခြင်း
-                  </p>
-                </div>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setIsElevenLabsFlowOpen(false)}
-                className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-white transition-all cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Content */}
-            <div className="flex-1 overflow-y-auto space-y-6 py-4 pr-1 relative z-10">
-              {/* 1-Click Clone directly from User's Attached Sample Video */}
-              <div className="p-4 rounded-2xl bg-gradient-to-r from-violet-950/70 via-purple-950/40 to-zinc-950 border border-violet-500/50 space-y-3 shadow-xl">
-                <div className="flex items-center gap-2.5">
-                  <span className="w-8 h-8 rounded-xl bg-gradient-to-tr from-violet-500 to-fuchsia-500 text-white flex items-center justify-center font-bold text-sm shadow">
-                    🎬
-                  </span>
-                  <div>
-                    <h4 className="text-xs font-black text-white uppercase tracking-wider font-display">
-                      နမူနာ Video မှ Voice Clone တိုက်ရိုက်ရယူမည် (1-Click Instant Clone)
-                    </h4>
-                    <p className="text-[11px] text-zinc-400 font-myanmar mt-0.5">
-                      ပေးပို့ထားသော နမူနာဗီဒီယို (Sample Video) မှ စကားပြောသံကို ElevenLabs သို့ တိုက်ရိုက် Voice Clone ပြုလုပ်ပါမည်။
-                    </p>
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  disabled={isCloningSampleVideo}
-                  onClick={async () => {
-                    setIsCloningSampleVideo(true);
-                    setStatusText('🎙️ နမူနာဗီဒီယိုမှ အသံလှိုင်းကို ElevenLabs သို့ ပေးပို့ပြီး Instant Voice Clone ပြုလုပ်နေပါသည်...');
-                    try {
-                      const res = await cloneElevenLabsFromSampleVideo('Sample Video Burmese Narrator');
-                      handleApplyElevenLabsAllocation(res.voice_id, res.name);
-                      setStatusText(`✓ နမူနာ Video မှ ElevenLabs Voice Clone အောင်မြင်စွာ ဖန်တီးပြီး TTX စာကြောင်းများသို့ သတ်မှတ်ပြီးပါပြီ! (${res.name})`);
-                      const updatedVoices = await fetchElevenLabsVoices();
-                      setElevenLabsVoices(updatedVoices);
-                    } catch (err: any) {
-                      setErrorMessage(`Sample Video Voice Clone မအောင်မြင်ပါ: ${err.message}`);
-                    } finally {
-                      setIsCloningSampleVideo(false);
-                    }
-                  }}
-                  className="w-full py-2.5 px-4 bg-gradient-to-r from-violet-500 to-fuchsia-500 hover:from-violet-400 hover:to-fuchsia-400 text-white font-black text-xs rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
-                >
-                  {isCloningSampleVideo ? (
-                    <>
-                      <RotateCw className="w-4 h-4 animate-spin text-white" />
-                      <span>နမူနာ Video မှ Clone နေပါသည်...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Sparkles className="w-4 h-4 text-amber-300" />
-                      <span>🎬 နမူနာ Video မှ Voice Clone ရယူမည် (1-Click Clone)</span>
-                    </>
-                  )}
-                </button>
-              </div>
-
-              {/* Instant Voice Clone Upload Box */}
-              <div className="p-4 rounded-2xl bg-violet-950/40 border border-violet-500/40 space-y-3">
-                <h4 className="text-xs font-black text-violet-300 uppercase tracking-wider font-display">
-                  ➕ Instant Voice Clone (အသံနမူနာ ဖိုင်တင်ပြီး အသံအသစ်ဖန်တီးရန်)
-                </h4>
-                <div className="space-y-2.5">
-                  <input
-                    type="text"
-                    value={cloneVoiceName}
-                    onChange={(e) => setCloneVoiceName(e.target.value)}
-                    placeholder="Voice Name (ဥပမာ- My Burmese Narrator Voice)"
-                    className="w-full px-3.5 py-2 bg-zinc-900 border border-white/10 rounded-xl text-xs text-white focus:outline-none focus:border-violet-400 font-myanmar"
-                  />
-
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="file"
-                      accept="audio/*"
-                      onChange={(e) => setCloneAudioFile(e.target.files?.[0] || null)}
-                      className="text-xs text-zinc-400 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-violet-600 file:text-white hover:file:bg-violet-500 cursor-pointer"
-                    />
-
-                    <button
-                      type="button"
-                      disabled={isCloningVoice || !cloneAudioFile}
-                      onClick={async () => {
-                        if (!cloneAudioFile) return;
-                        setIsCloningVoice(true);
-                        setStatusText('🎙️ ElevenLabs သို့ အသံဖိုင်တင်ပြီး Instant Voice Clone ပြုလုပ်နေပါသည်...');
-                        try {
-                          const res = await cloneElevenLabsVoice(cloneVoiceName, cloneAudioFile);
-                          handleApplyElevenLabsAllocation(res.voice_id, res.name);
-                          setStatusText(`✓ Voice Clone အောင်မြင်ပါသည်! (${res.name}) - TTX Segments အားလုံးသို့ သတ်မှတ်ပြီးပါပြီ`);
-                          const updatedVoices = await fetchElevenLabsVoices();
-                          setElevenLabsVoices(updatedVoices);
-                          setCloneAudioFile(null);
-                        } catch (err: any) {
-                          setErrorMessage(`Voice Clone failed: ${err.message}`);
-                        } finally {
-                          setIsCloningVoice(false);
-                        }
-                      }}
-                      className="px-4 py-2 bg-gradient-to-r from-violet-500 to-purple-500 hover:opacity-90 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-md transition-all cursor-pointer shrink-0"
-                    >
-                      {isCloningVoice ? 'Cloning...' : '🚀 Clone Voice'}
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              {/* Available Voices List */}
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <h4 className="text-xs font-black text-violet-300 uppercase tracking-wider font-display">
-                    Voices List ({elevenLabsVoices.length} available)
-                  </h4>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      fetchElevenLabsVoices().then((v) => setElevenLabsVoices(v)).catch(() => {});
-                    }}
-                    className="px-2.5 py-1 bg-white/5 hover:bg-white/10 text-zinc-300 rounded-lg text-[10px] font-bold cursor-pointer"
-                  >
-                    🔄 Refresh
-                  </button>
-                </div>
-
-                <div className="space-y-2 max-h-[260px] overflow-y-auto pr-1">
-                  {elevenLabsVoices.map((v) => {
-                    const isSelected = selectedElevenLabsVoiceId === v.voice_id;
-                    return (
-                      <div
-                        key={v.voice_id}
-                        onClick={() => handleApplyElevenLabsAllocation(v.voice_id, v.name)}
-                        className={`p-3.5 rounded-2xl border transition-all flex items-center justify-between cursor-pointer ${
-                          isSelected
-                            ? 'bg-gradient-to-r from-violet-500/25 to-purple-500/10 border-violet-400 text-violet-200 shadow-lg ring-1 ring-violet-400/50'
-                            : 'bg-white/5 border-white/10 hover:bg-white/10 text-zinc-300'
-                        }`}
-                      >
-                        <div>
-                          <span className="text-xs font-black text-white block font-display">{v.name}</span>
-                          <span className="text-[10px] text-zinc-400 font-mono">Category: {v.category} | ID: {v.voice_id}</span>
-                        </div>
-
-                        <div className="flex items-center gap-2">
-                          {v.preview_url && (
-                            <audio src={v.preview_url} controls className="h-6 w-28 opacity-75 hover:opacity-100" onClick={(e) => e.stopPropagation()} />
-                          )}
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleApplyElevenLabsAllocation(v.voice_id, v.name);
-                            }}
-                            className={`px-3 py-1 rounded-xl text-xs font-bold transition-all ${isSelected ? 'bg-violet-400 text-zinc-950 font-black shadow' : 'bg-white/10 hover:bg-white/20 text-zinc-200'}`}
-                          >
-                            {isSelected ? '✓ Active Voice' : 'TTX အားလုံးတွင် သုံးမည်'}
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                  {elevenLabsVoices.length === 0 && (
-                    <p className="text-xs text-zinc-500 text-center py-6 font-myanmar">
-                      ElevenLabs voices မတွေ့ရသေးပါ။ Step 1 တွင် ElevenLabs API Key ထည့်သွင်းထားခြင်း ရှိမရှိ စစ်ဆေးပါ။
-                    </p>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* Footer */}
-            <div className="pt-4 border-t border-white/10 flex items-center justify-between relative z-10">
-              <span className="text-xs text-zinc-400 font-myanmar">
-                Selected Voice: <strong className="text-violet-300 font-mono">{elevenLabsVoices.find((v) => v.voice_id === selectedElevenLabsVoiceId)?.name || selectedElevenLabsVoiceId || 'None'}</strong>
-              </span>
-              <button
-                type="button"
-                onClick={() => {
-                  if (selectedElevenLabsVoiceId) {
-                    handleApplyElevenLabsAllocation(selectedElevenLabsVoiceId);
-                  }
-                  setIsElevenLabsFlowOpen(false);
-                }}
-                className="px-6 py-2.5 bg-gradient-to-r from-violet-500 to-purple-500 text-white font-black text-xs rounded-xl shadow-lg hover:opacity-90 transition-all cursor-pointer"
-              >
-                Done (အတည်ပြုမည်)
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

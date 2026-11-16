@@ -10,9 +10,6 @@ export interface GeminiKeyInfo {
 
 export interface ApiKeys {
   assemblyAiKey: string;
-  huggingFaceKey?: string;
-  manusApiKey?: string;
-  elevenLabsKey?: string;
 }
 
 export interface FalConfig {
@@ -22,6 +19,8 @@ export interface FalConfig {
 }
 
 export type AiMode = 'Dubbing' | 'Recap' | 'Subtitle' | 'Long to Short' | 'Gemini TTS' | 'Dhamma AI' | 'Dhamma AI background';
+
+export type Step3ScriptStyle = 'narrator' | 'story' | 'translation';
 
 export type VoiceOption =
   | 'Thiha'
@@ -48,7 +47,22 @@ export type VoiceOption =
   | 'Zubenelgenubi'
   | 'Vindemiatrix'
   | 'Sadachbia'
-  | 'Sadaltager';
+  | 'Sadaltager'
+  | 'NaraKoBanyar'
+  | 'NaraHtetMyat'
+  | 'NaraShoon'
+  | 'NaraThazin';
+
+export type TtsEngineMode = 'auto' | 'gemini' | 'neural' | 'nara';
+
+export type VoiceToneOption =
+  | 'natural'
+  | 'warm'
+  | 'deep'
+  | 'bright'
+  | 'calm'
+  | 'dramatic'
+  | 'soft';
 
 export interface TranscriptSegment {
   id: string;
@@ -68,14 +82,15 @@ export interface TranscriptSegment {
   isGeneratingAudio?: boolean;
   originalStartTime?: number; // original timestamp before nudge/catch-up
   originalEndTime?: number; // original timestamp before nudge/catch-up
+  subtitleStartTime?: number; // independent subtitle start when unlinked from voice clip
+  subtitleEndTime?: number; // independent subtitle end when unlinked from voice clip
   isTimingFixed?: boolean; // whether user locked/fixed this position
   playbackRate?: number; // voice clone speed for this segment
   videoPlaybackRate?: number; // video playback speed for this segment
   style?: 'conversational' | 'recap' | 'broadcast' | 'energetic' | 'soothing' | 'affectionate'; // vocal style for this segment
-  voiceProvider?: 'gemini' | 'huggingface' | 'elevenlabs' | 'cloudtts_gemini';
-  hfModel?: string;
-  hfSpeaker?: string;
-  elevenLabsVoiceId?: string;
+  tone?: VoiceToneOption; // vocal tone preset for this segment
+  pitch?: number; // fine vocal pitch/tone offset (-15 to +15 %)
+  voiceProvider?: 'gemini' | 'cloudtts_gemini' | 'nara_mini_v1';
   syllableCount?: number; // Burmese syllable count
   maxAllowedSyllables?: number; // Strict 5-second syllable budget
   atempoRate?: number; // Pitch-preserving audio speed factor (e.g. 1.0 - 1.25)
@@ -83,7 +98,13 @@ export interface TranscriptSegment {
   pauseLead?: number; // Pre-speech breathing pause in seconds (default 0.1s)
   pauseTrail?: number; // Post-speech reaction pause in seconds
   sceneShotId?: string; // Visual shot / scene cut reference
-  minutePartIndex?: number; // 1-based 1-minute video time block index (e.g. Part 1 = 0:00-1:00)
+  minutePartIndex?: number; // 1-based time block index (e.g. Part 1 = 0:00-1:00 or 30s Slot 1)
+  slotMode?: 'scene_recap_30s' | 'dialogue_dub'; // 30s chronological story recap vs line-by-line dubbing
+  scriptStyle?: Step3ScriptStyle; // Step 3 script generation style: Narrator vs Story vs Translation
+  sceneTitle?: string; // Short Burmese plot event title for this scene slot
+  mainNarration?: string; // Primary story recap narration in this 30s slot
+  bridgeNarration?: string; // Short scene-matching bridging line to fill the 30s slot cleanly
+  pauseBetweenParts?: number; // Silence gap in seconds between mainNarration and bridgeNarration (default 0.18s)
   narratorTimingWarning?: string; // Gentle timing warning if speech exceeds slot even at 1.15x
   visemeData?: { time: number; mouthOpening: number }[]; // Lip-sync viseme frames
 }
@@ -147,16 +168,35 @@ export interface FrameCropConfig {
   backgroundStyle: 'blur' | 'black' | 'gradient';
 }
 
+export interface VideoInspection {
+  duration: number;
+  width: number;
+  height: number;
+  resolution: string;
+  hasAudio: boolean;
+  format?: string;
+  filesize?: number;
+  inspectedAt: number;
+}
+
 export interface ProjectState {
   videoFile?: File | null;
   videoUrl: string | null;
   videoName: string;
   videoDuration: number;
+  videoInspection?: VideoInspection | null;
   currentTime: number;
   isPlaying: boolean;
   playbackRate: number; // Video playback speed (default 1.0x, max 1.25x)
   voicePlaybackRate: number; // Voice Clone audio speed (independent of video speed, default 1.0x)
+  narrationMode?: 'scene_recap_30s' | 'dialogue_dub'; // Scene-by-scene 30s recap narration vs dialogue dubbing
+  step3ScriptStyle?: Step3ScriptStyle; // Active Step 3 script style ('narrator' | 'story' | 'translation')
+  recapSlotSeconds?: number; // Default 30s per scene recap slot
   voiceStyle?: 'conversational' | 'recap' | 'broadcast' | 'energetic' | 'soothing' | 'affectionate'; // Active global voice style
+  voiceTone?: VoiceToneOption; // Active global voice tone preset
+  voicePitch?: number; // Fine global voice tone/pitch offset (-15 to +15 %)
+  ttsEngine?: TtsEngineMode; // Active Voice Clone TTS Engine ('auto' Gemini/Neural vs 'nara' YeeNyunn/nara-mini-v1)
+  lockedVoice?: VoiceOption; // Single consistent narrator voice across the entire video
   smartSyncFrameLock: boolean;
   volume: number;
   isMuted?: boolean; // Mute original video audio

@@ -125,6 +125,36 @@ export const VERIFIED_BURMESE_PROVIDERS: TTSProvider[] = [
       },
     ],
   },
+  {
+    id: 'nara_mini_v1',
+    name: 'Nara Mini v1 (YeeNyunn/nara-mini-v1 • HF Space)',
+    supportsMyanmarLanguage: true,
+    isFree: true,
+    pricingInfo: '100% Free & Open Source (Apache 2.0 • hugging-apps/nara-mini-v1-tts)',
+    description: 'Kokoro-based Burmese & English 24kHz TTS model (YeeNyunn/nara-mini-v1) with native Burmese number normalization.',
+    maleNarratorVoices: [
+      {
+        id: 'NaraKoBanyar',
+        name: 'Ko Banyar (ကိုဗညား)',
+        myanmarName: 'ကိုဗညား',
+        gender: 'male',
+        ageGroup: 'adult',
+        tone: 'Natural Burmese male narrator (Nara Mini v1 ko-banyar)',
+        description: 'YeeNyunn/nara-mini-v1 24kHz Kokoro Burmese Male Narrator',
+        isMaleNarratorRecommended: true,
+      },
+      {
+        id: 'NaraHtetMyat',
+        name: 'Htet Myat (ထက်မြတ်)',
+        myanmarName: 'ထက်မြတ်',
+        gender: 'male',
+        ageGroup: 'youth',
+        tone: 'Articulate Burmese male voice (Nara Mini v1 htet-myat)',
+        description: 'YeeNyunn/nara-mini-v1 24kHz Kokoro Burmese Male',
+        isMaleNarratorRecommended: true,
+      },
+    ],
+  },
 ];
 
 /**

@@ -4,21 +4,43 @@
  * with Multi-Key Rotation, Human Vocal Expression Presets, and Smooth Fallback.
  */
 
-import { VoiceOption } from '../types';
+import { VoiceOption, VoiceToneOption, TtsEngineMode } from '../types';
 import { loadGeminiKeys, saveGeminiKeys } from './geminiPool';
 import { generateOfflineWebAudioSpeech } from './webAudioTts';
+import { MINUTE_BLOCK_SECONDS } from './timingSync';
 
 export type VoiceStyle = 'conversational' | 'recap' | 'broadcast' | 'energetic' | 'soothing' | 'affectionate';
+
+export interface VoiceTonePreset {
+  id: VoiceToneOption;
+  label: string;
+  myanmarLabel: string;
+  pitchPct: number;
+  badge: string;
+}
+
+export const VOICE_TONE_PRESETS: VoiceTonePreset[] = [
+  { id: 'natural', label: 'Natural', myanmarLabel: 'သဘာဝအတိုင်း (ပုံမှန်)', pitchPct: 0, badge: '🎙️ 0%' },
+  { id: 'warm', label: 'Warm & Rich', myanmarLabel: 'နွေးထွေးကြင်နာ', pitchPct: -2, badge: '☕ -2%' },
+  { id: 'deep', label: 'Deep Bass', myanmarLabel: 'နက်နဲသြဇာရှိ', pitchPct: -8, badge: '🎬 -8%' },
+  { id: 'bright', label: 'Bright & Clear', myanmarLabel: 'ကြည်လင်တောက်ပ', pitchPct: 6, badge: '✨ +6%' },
+  { id: 'calm', label: 'Calm & Steady', myanmarLabel: 'အေးချမ်းတည်ငြိမ်', pitchPct: -4, badge: '🍃 -4%' },
+  { id: 'dramatic', label: 'Dramatic Recap', myanmarLabel: 'ဇာတ်ရှိန်တင်', pitchPct: -3, badge: '🎭 -3%' },
+  { id: 'soft', label: 'Soft & Gentle', myanmarLabel: 'နူးညံ့သိမ်မွေ့', pitchPct: 2, badge: '🕊️ +2%' },
+];
 
 export interface TtsOptions {
   voice: VoiceOption;
   style?: VoiceStyle;
+  tone?: VoiceToneOption;
+  pitchOffset?: number; // Fine pitch adjustment in % (-15 to +15)
   emotion?: string; // Expressive vocal emotion cue (e.g. 'surprised, amazed', 'mocking', 'determined')
   rate?: string; // e.g. '+0%', '+10%'
   speed?: number; // e.g. 0.5 to 2.0
   pitch?: string; // e.g. '+0Hz', '-5Hz'
   trimSilence?: boolean; // cut pauses > 0.25s down to 0.25s
   forceBackup?: boolean;
+  preferredEngine?: TtsEngineMode;
   onStatusUpdate?: (status: string) => void;
 }
 
@@ -28,6 +50,7 @@ export interface VoiceProfile {
   gender: 'male' | 'female';
   toneTitle: string;
   geminiVoice: string; // Prebuilt Gemini voice (Charon, Puck, Fenrir, etc.)
+  naraVoiceId?: 'ko-banyar' | 'htet-myat' | 'shoon' | 'thazin'; // Nara Mini v1 preset ID
   desc: string;
   sampleGreeting: string;
 }
@@ -261,6 +284,48 @@ export const VOICE_PROFILES: Record<VoiceOption, VoiceProfile> = {
     desc: 'Knowledgeable male voice',
     sampleGreeting: 'မင်္ဂလာပါခင်ဗျာ၊ ဆာဒယ်လ်တေဂါ ပါ။ ဗဟုသုတကြွယ်ဝသော အသံ ဖြစ်ပါတယ်။',
   },
+
+  // 4 NATIVE BURMESE NARA MINI v1 VOICES (YeeNyunn/nara-mini-v1 • Kokoro 24kHz)
+  NaraKoBanyar: {
+    name: 'Ko Banyar (Nara v1)',
+    myanmarName: 'ကိုဗညား',
+    gender: 'male',
+    toneTitle: '🤗 Nara Mini v1 Native Male Narrator (ko-banyar • 24kHz Kokoro)',
+    geminiVoice: 'Charon',
+    naraVoiceId: 'ko-banyar',
+    desc: 'YeeNyunn/nara-mini-v1 ko-banyar — Free Hugging Face Kokoro Burmese Male',
+    sampleGreeting: 'မင်္ဂလာပါခင်ဗျာ၊ ကျွန်တော် ကိုဗညား ပါ။ Nara Mini v1 မြန်မာ ဇာတ်ကြောင်းပြော အသံဖြစ်ပါတယ်။',
+  },
+  NaraHtetMyat: {
+    name: 'Htet Myat (Nara v1)',
+    myanmarName: 'ထက်မြတ်',
+    gender: 'male',
+    toneTitle: '🤗 Nara Mini v1 Dynamic Youth Male (htet-myat • 24kHz Kokoro)',
+    geminiVoice: 'Puck',
+    naraVoiceId: 'htet-myat',
+    desc: 'YeeNyunn/nara-mini-v1 htet-myat — Free Hugging Face Kokoro Burmese Male',
+    sampleGreeting: 'မင်္ဂလာပါခင်ဗျာ၊ ကျွန်တော် ထက်မြတ် ပါ။ Nara Mini v1 ကြည်လင်ပြတ်သားတဲ့ မြန်မာအသံ ဖြစ်ပါတယ်။',
+  },
+  NaraShoon: {
+    name: 'Shoon (Nara v1)',
+    myanmarName: 'ရွှန်း',
+    gender: 'female',
+    toneTitle: '🤗 Nara Mini v1 Clear Female Narrator (shoon • 24kHz Kokoro)',
+    geminiVoice: 'Kore',
+    naraVoiceId: 'shoon',
+    desc: 'YeeNyunn/nara-mini-v1 shoon — Free Hugging Face Kokoro Burmese Female',
+    sampleGreeting: 'မင်္ဂလာပါရှင်၊ ကျွန်မ ရွှန်း ပါ။ Nara Mini v1 သဘာဝကျတဲ့ မြန်မာအမျိုးသမီးအသံ ဖြစ်ပါတယ်။',
+  },
+  NaraThazin: {
+    name: 'Thazin (Nara v1)',
+    myanmarName: 'သဇင်',
+    gender: 'female',
+    toneTitle: '🤗 Nara Mini v1 Soft Storytelling Female (thazin • 24kHz Kokoro)',
+    geminiVoice: 'Aoede',
+    naraVoiceId: 'thazin',
+    desc: 'YeeNyunn/nara-mini-v1 thazin — Free Hugging Face Kokoro Burmese Female',
+    sampleGreeting: 'မင်္ဂလာပါရှင်၊ ကျွန်မ သဇင် ပါ။ Nara Mini v1 နူးညံ့ချိုသာတဲ့ မြန်မာအသံ ဖြစ်ပါတယ်။',
+  },
 };
 
 let currentTtsKeyIndex = 0;
@@ -288,35 +353,62 @@ export async function fetchDirectGeminiTtsRest(
   voice: VoiceOption,
   apiKey?: string,
   style: VoiceStyle = 'recap',
-  emotion?: string
-): Promise<ArrayBuffer> {
+  emotion?: string,
+  tone: VoiceToneOption = 'natural',
+  pitchOffset = 0,
+  preferredEngine: TtsEngineMode = 'auto'
+): Promise<{ buffer: ArrayBuffer; engineUsed: 'gemini' | 'neural' | 'nara' }> {
+  if (preferredEngine === 'nara') {
+    const res = await fetch('/api/tts/nara', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, voice, normalizeNumbers: true, pitchOffset }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Nara Mini v1 TTS error (HTTP ${res.status})`);
+    }
+    return { buffer: await res.arrayBuffer(), engineUsed: 'nara' };
+  }
+
   const res = await fetch('/api/tts/gemini', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, voice, style, emotion, apiKey }),
+    body: JSON.stringify({ text, voice, style, tone, pitchOffset, emotion, apiKey, preferredEngine }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error || `Server TTS error (HTTP ${res.status})`);
   }
-  return await res.arrayBuffer();
+  const engineHeader = (res.headers.get('X-TTS-Engine') || '').toLowerCase();
+  const engineUsed: 'gemini' | 'neural' = engineHeader.includes('gemini') ? 'gemini' : 'neural';
+  return { buffer: await res.arrayBuffer(), engineUsed };
 }
 
 /**
- * Synthesize authentic Myanmar speech with multi-key rotation and automatic 429 quota handling.
- * Prioritizes Gemini Flagship Neural Voice Model for 100% lifelike human realism.
+ * Synthesize authentic Myanmar speech with multi-key rotation and single-engine locking
+ * so all generated clips in a project keep ONE identical voice timbre.
  */
 export async function synthesizeMyanmarVoice(
   text: string,
-  options: TtsOptions = { voice: 'Thiha', style: 'recap', trimSilence: false }
-): Promise<{ audioUrl: string; duration: number; isRealityGemini: boolean }> {
+  options: TtsOptions = { voice: 'Thiha', style: 'recap', tone: 'natural', trimSilence: false }
+): Promise<{ audioUrl: string; duration: number; isRealityGemini: boolean; engineUsed: 'gemini' | 'neural' | 'nara' }> {
   let arrayBuffer: ArrayBuffer | null = null;
   let lastErrorMsg = '';
   let isRealityGemini = false;
+  let engineUsed: 'gemini' | 'neural' | 'nara' = 'neural';
 
   const profile = VOICE_PROFILES[options.voice] || VOICE_PROFILES.Thiha;
   const style = options.style || 'recap';
+  const tone: VoiceToneOption = options.tone || 'natural';
+  const pitchOffset = typeof options.pitchOffset === 'number' ? options.pitchOffset : 0;
   const emotion = options.emotion || '';
+  const requestedNaraVoice = Boolean(profile.naraVoiceId);
+  const preferredEngine: TtsEngineMode = options.forceBackup
+    ? 'neural'
+    : requestedNaraVoice
+      ? 'nara'
+      : (options.preferredEngine || 'auto');
 
   const isNetlifyOrStatic = typeof window !== 'undefined' && (
     window.location.hostname.includes('netlify.app') ||
@@ -324,16 +416,61 @@ export async function synthesizeMyanmarVoice(
     (!window.location.hostname.includes('localhost') && !window.location.hostname.includes('run.app') && !window.location.hostname.includes('127.0.0.1'))
   );
 
-  // 1. PRIMARY: Direct Gemini REST TTS (if running on Netlify/static hosting)
-  if (isNetlifyOrStatic && !options.forceBackup) {
+  // 0. NARA MINI v1 ENGINE (Hugging Face YeeNyunn/nara-mini-v1 • hugging-apps/nara-mini-v1-tts)
+  if (preferredEngine === 'nara') {
+    if (options.onStatusUpdate) {
+      options.onStatusUpdate(`🤗 Nara Mini v1 (${profile.name} - ${profile.myanmarName}) ဖြင့် အသံထုတ်လုပ်နေပါသည်...`);
+    }
+    try {
+      const naraRes = await fetch('/api/tts/nara', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text,
+          voice: profile.naraVoiceId || options.voice,
+          normalizeNumbers: true,
+          pitchOffset,
+        }),
+      });
+      const contentType = naraRes.headers.get('content-type') || '';
+      if (!naraRes.ok || contentType.includes('text/html') || contentType.includes('application/json')) {
+        const errJson = await naraRes.json().catch(() => ({}));
+        throw new Error(errJson.error || `Nara Mini v1 HTTP ${naraRes.status}`);
+      }
+      const naraBuf = await naraRes.arrayBuffer();
+      if (!naraBuf || naraBuf.byteLength < 100) {
+        throw new Error('Nara Mini v1 returned empty audio buffer');
+      }
+      arrayBuffer = naraBuf;
+      engineUsed = 'nara';
+      isRealityGemini = false;
+    } catch (naraErr: any) {
+      throw new Error(
+        `Nara Mini v1 (HF Space) အသံထုတ်မရသေးပါ: ${naraErr?.message || 'Connection error'}။ ခေတ္တစောင့်ပြီး ထပ်စမ်းကြည့်ပါ။`
+      );
+    }
+  }
+
+  // 1. PRIMARY: Direct Gemini REST TTS (if running on Netlify/static hosting and not locked to neural/nara)
+  if (!arrayBuffer && isNetlifyOrStatic && preferredEngine !== 'neural' && preferredEngine !== 'nara') {
     try {
       if (options.onStatusUpdate) {
         options.onStatusUpdate(`✨ Reality Human Voice (${profile.name} - ${profile.myanmarName}) ဖြင့် သဘာဝကျကျ အသံထုတ်လုပ်နေပါသည်...`);
       }
-      const directBuf = await fetchDirectGeminiTtsRest(text, options.voice, undefined, style, emotion);
-      if (directBuf && directBuf.byteLength > 100) {
-        arrayBuffer = directBuf;
-        isRealityGemini = true;
+      const directRes = await fetchDirectGeminiTtsRest(
+        text,
+        options.voice,
+        undefined,
+        style,
+        emotion,
+        tone,
+        pitchOffset,
+        preferredEngine
+      );
+      if (directRes.buffer && directRes.buffer.byteLength > 100) {
+        arrayBuffer = directRes.buffer;
+        engineUsed = directRes.engineUsed;
+        isRealityGemini = directRes.engineUsed === 'gemini';
       }
     } catch (directErr: any) {
       console.warn('Direct Gemini TTS notice:', directErr);
@@ -341,8 +478,8 @@ export async function synthesizeMyanmarVoice(
     }
   }
 
-  // 2. SECONDARY: Server Proxy endpoint (if running on full-stack server and direct wasn't attempted or failed)
-  if (!arrayBuffer && !options.forceBackup) {
+  // 2. SECONDARY: Server Proxy endpoint (if running on full-stack server and not locked to neural)
+  if (!arrayBuffer && preferredEngine !== 'neural') {
     let keys = loadGeminiKeys();
     const activeKeys = keys.filter((k) => k.status === 'active');
     const availableKeys = activeKeys.length > 0 ? activeKeys : keys;
@@ -370,20 +507,25 @@ export async function synthesizeMyanmarVoice(
             text,
             voice: options.voice,
             style,
+            tone,
+            pitchOffset,
             emotion,
             speed: options.speed,
+            preferredEngine,
             apiKey: currentKey ? currentKey.key : undefined,
           }),
         });
 
         const contentType = res.headers.get('content-type') || '';
+        const headerEngine = (res.headers.get('X-TTS-Engine') || '').toLowerCase();
         if (res.ok && !contentType.includes('text/html')) {
           const buf = await res.arrayBuffer();
           if (buf && buf.byteLength > 200) {
             arrayBuffer = buf;
-            isRealityGemini = true;
+            engineUsed = headerEngine.includes('gemini') ? 'gemini' : 'neural';
+            isRealityGemini = engineUsed === 'gemini';
 
-            if (currentKey) {
+            if (currentKey && isRealityGemini) {
               currentKey.callCount = (currentKey.callCount || 0) + 1;
               currentKey.status = 'active';
               currentKey.lastUsed = new Date().toLocaleTimeString();
@@ -419,17 +561,22 @@ export async function synthesizeMyanmarVoice(
             text,
             voice: options.voice,
             style,
+            tone,
+            pitchOffset,
             emotion,
             speed: options.speed,
+            preferredEngine,
           }),
         });
 
         const contentType = serverRes.headers.get('content-type') || '';
+        const headerEngine = (serverRes.headers.get('X-TTS-Engine') || '').toLowerCase();
         if (serverRes.ok && !contentType.includes('text/html')) {
           const buf = await serverRes.arrayBuffer();
           if (buf && buf.byteLength > 200) {
             arrayBuffer = buf;
-            isRealityGemini = true;
+            engineUsed = headerEngine.includes('gemini') ? 'gemini' : 'neural';
+            isRealityGemini = engineUsed === 'gemini';
           }
         }
       } catch (err: any) {
@@ -438,7 +585,7 @@ export async function synthesizeMyanmarVoice(
     }
   }
 
-  // 3. TERTIARY FALLBACK: Call /api/tts/free directly (bypasses any Gemini route issue & always uses Azure 24kHz Myanmar Neural)
+  // 3. TERTIARY FALLBACK / DIRECT NEURAL MODE: Call /api/tts/free directly (consistent 24kHz Myanmar Neural voice)
   if (!arrayBuffer) {
     try {
       if (options.onStatusUpdate) {
@@ -451,6 +598,8 @@ export async function synthesizeMyanmarVoice(
           text,
           voice: options.voice,
           style,
+          tone,
+          pitchOffset,
           emotion,
           speed: options.speed || 1.0,
         }),
@@ -459,7 +608,8 @@ export async function synthesizeMyanmarVoice(
         const freeBuf = await freeRes.arrayBuffer();
         if (freeBuf && freeBuf.byteLength > 200) {
           arrayBuffer = freeBuf;
-          isRealityGemini = true;
+          engineUsed = 'neural';
+          isRealityGemini = false;
         }
       }
     } catch (freeErr: any) {
@@ -473,6 +623,7 @@ export async function synthesizeMyanmarVoice(
         options.onStatusUpdate(`⚡ Studio Offline Voice Engine (${profile.name}) ဖြင့် အသံထုတ်လုပ်ပေးနေပါသည်...`);
       }
       arrayBuffer = await generateOfflineWebAudioSpeech(text, options.voice, options.speed);
+      engineUsed = 'neural';
       isRealityGemini = false;
     } catch (offlineErr: any) {
       throw new Error(
@@ -511,6 +662,7 @@ export async function synthesizeMyanmarVoice(
     audioUrl,
     duration,
     isRealityGemini,
+    engineUsed,
   };
 }
 
@@ -781,11 +933,14 @@ function writeString(view: DataView, offset: number, string: string): void {
 export async function autoGenerateAllNarratorVoices(
   segments: import('../types').TranscriptSegment[],
   onProgress?: (message: string, current: number, total: number) => void,
-  defaultVoice: VoiceOption = 'Thiha'
+  defaultVoice: VoiceOption = 'Thiha',
+  tone: VoiceToneOption = 'natural',
+  pitchOffset = 0
 ): Promise<import('../types').TranscriptSegment[]> {
   if (!segments || segments.length === 0) return [];
   const updated: import('../types').TranscriptSegment[] = [];
   const total = segments.length;
+  let lockedBatchEngine: TtsEngineMode = (VOICE_PROFILES[defaultVoice]?.naraVoiceId ? 'nara' : 'auto');
 
   for (let i = 0; i < total; i++) {
     const seg = segments[i];
@@ -798,22 +953,28 @@ export async function autoGenerateAllNarratorVoices(
 
     if (onProgress) {
       onProgress(
-        `🔊 [One-Click Narrator TTS] (${i + 1}/${total}) — ယောက်ျားအသံ (သီဟ) ထုတ်လုပ်နေပါသည်: "${textToSpeak.substring(0, 18)}..."`,
+        `🔊 [One-Click Narrator TTS] (${i + 1}/${total}) — တစ်သံတည်း (Single Voice) ထုတ်လုပ်နေပါသည်: "${textToSpeak.substring(0, 18)}..."`,
         i + 1,
         total
       );
     }
 
     try {
-      const activeVoice = defaultVoice || seg.voice || 'Thiha';
+      const activeVoice = defaultVoice || 'Thiha';
       const result = await synthesizeMyanmarVoice(textToSpeak, {
         voice: activeVoice,
         style: seg.style || 'recap',
+        tone: seg.tone || tone,
+        pitchOffset: typeof seg.pitch === 'number' ? seg.pitch : pitchOffset,
         emotion: seg.emotion,
+        preferredEngine: lockedBatchEngine,
       });
+      if (lockedBatchEngine === 'auto') {
+        lockedBatchEngine = result.engineUsed;
+      }
 
-      // Keep audio inside its 1-minute block and before the next segment with gentle speed tuning (max 1.15x)
-      const blockEnd = (Math.floor(Math.max(0, seg.startTime) / 60) + 1) * 60;
+      // Keep audio inside its 30-second part and before the next segment with gentle speed tuning (max 1.15x)
+      const blockEnd = (Math.floor(Math.max(0, seg.startTime) / MINUTE_BLOCK_SECONDS) + 1) * MINUTE_BLOCK_SECONDS;
       const nextStartTime = (i < total - 1 && segments[i + 1])
         ? Math.min(blockEnd, segments[i + 1].startTime)
         : blockEnd;
@@ -834,7 +995,7 @@ export async function autoGenerateAllNarratorVoices(
         playbackRate: atempo,
         voice: activeVoice,
         speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
-        minutePartIndex: Math.floor(Math.max(0, seg.startTime) / 60) + 1,
+        minutePartIndex: Math.floor(Math.max(0, seg.startTime) / MINUTE_BLOCK_SECONDS) + 1,
       });
     } catch (err) {
       console.warn(`Voice synthesis notice for segment #${i + 1}:`, err);

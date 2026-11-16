@@ -5,10 +5,13 @@ import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import os from 'os';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import dotenv from 'dotenv';
 import multer from 'multer';
-import { exec } from 'child_process';
-import os from 'os';
+
+const execFileAsync = promisify(execFile);
 import { GoogleGenAI, Modality, LiveServerMessage } from '@google/genai';
 import { synthesizeNeuralRealityMyanmar, REALITY_VOICE_CONFIGS } from './server/neuralRealityTts';
 import {
@@ -24,7 +27,12 @@ import {
   generateAllNarrations,
   exportNarratorPackage,
 } from './server/narratorJobManager';
-import { detectSeparationCapabilities, extractBgmAndSfxFromVideo } from './server/audioSeparationAdapter';
+import {
+  detectSeparationCapabilities,
+  extractBgmAndSfxFromVideo,
+  startBuiltinBgmJob,
+  getBuiltinBgmJob,
+} from './server/audioSeparationAdapter';
 import {
   VERIFIED_BURMESE_PROVIDERS,
   getProviderDisclosures,
@@ -239,25 +247,48 @@ async function startServer() {
       cb(null, VIDEOS_DIR);
     },
     filename: (_req, file, cb) => {
-      const ext = path.extname(file.originalname).toLowerCase() || '.mp4';
-      const cleanBase = path.basename(file.originalname, ext).replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 40);
+      let ext = path.extname(file.originalname || '').toLowerCase();
+      if (!ext || ext === '.') ext = '.mp4';
+      const cleanBase = path.basename(file.originalname || 'video', ext).replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 40) || 'video';
       cb(null, `vid_${Date.now()}_${cleanBase}${ext}`);
     },
   });
 
   const uploadVideoMiddleware = multer({
     storage: videoStorage,
-    limits: { fileSize: 350 * 1024 * 1024 }, // 350MB limit
-    fileFilter: (_req, file, cb) => {
-      const allowed = ['.mp4', '.mov', '.webm', '.m4v', '.mkv'];
-      const ext = path.extname(file.originalname).toLowerCase();
-      if (allowed.includes(ext) || file.mimetype.startsWith('video/')) {
-        cb(null, true);
-      } else {
-        cb(new Error('MP4, MOV, WebM ဗီဒီယို ဖိုင်များကိုသာ ခွင့်ပြုထားပါသည်'));
-      }
+    limits: { fileSize: 500 * 1024 * 1024 }, // 500MB limit
+    fileFilter: (_req, _file, cb) => {
+      // Pass all uploads through to disk; ffmpeg validates actual video content safely
+      cb(null, true);
     },
   });
+
+  // Safe wrapper for multer: returns JSON errors rather than letting Express crash or serve default HTML error pages
+  const safeUploadVideo = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    uploadVideoMiddleware.single('video')(req, res, (err: any) => {
+      if (err) {
+        console.warn('Multer upload error:', err?.message || err);
+        return res.status(400).json({ error: err?.message || 'ဗီဒီယို ဖိုင်တင်သွင်းမှု မအောင်မြင်ပါ' });
+      }
+      next();
+    });
+  };
+
+  // Chunked upload middleware (for files > Cloud Run 32MB proxy limit)
+  const chunkUploadMiddleware = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 10 * 1024 * 1024 },
+  });
+
+  const safeUploadChunk = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    chunkUploadMiddleware.single('chunk')(req, res, (err: any) => {
+      if (err) {
+        console.warn('Chunk upload error:', err?.message || err);
+        return res.status(400).json({ error: err?.message || 'Video chunk upload failed' });
+      }
+      next();
+    });
+  };
 
   // 1. API Configuration & Secrets Status
   app.get('/api/narrator/config', (_req, res) => {
@@ -315,8 +346,56 @@ async function startServer() {
     }
   });
 
+  async function ensureSampleDemoVideo(): Promise<string> {
+    const samplePath = path.join(VIDEOS_DIR, 'sample_demo_action.mp4');
+    if (fs.existsSync(samplePath) && fs.statSync(samplePath).size > 10_000) {
+      return samplePath;
+    }
+    const tmpSample = `${samplePath}.tmp.mp4`;
+    await execFileAsync('ffmpeg', [
+      '-nostdin',
+      '-loglevel',
+      'error',
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      'testsrc2=size=640x360:rate=24:duration=12',
+      '-f',
+      'lavfi',
+      '-i',
+      'aevalsrc=0.25*sin(2*PI*220*t)+0.18*sin(2*PI*330*t)+0.12*sin(2*PI*440*t):d=12:s=44100:c=stereo',
+      '-c:v',
+      'libx264',
+      '-preset',
+      'ultrafast',
+      '-pix_fmt',
+      'yuv420p',
+      '-c:a',
+      'aac',
+      '-b:a',
+      '128k',
+      '-movflags',
+      '+faststart',
+      tmpSample,
+    ]);
+    fs.renameSync(tmpSample, samplePath);
+    return samplePath;
+  }
+
+  // 1d. Built-in Same-Origin Sample Demo Video (replaces external 403 sample URL)
+  app.get('/api/narrator/sample-video', async (_req, res) => {
+    try {
+      const samplePath = await ensureSampleDemoVideo();
+      return res.sendFile(samplePath);
+    } catch (err: any) {
+      console.error('Sample video generation error:', err);
+      return res.status(500).json({ error: 'Sample video unavailable' });
+    }
+  });
+
   // 2. Video Upload and Metadata Probe
-  app.post('/api/narrator/upload-video', uploadVideoMiddleware.single('video'), async (req, res) => {
+  app.post('/api/narrator/upload-video', safeUploadVideo, async (req, res) => {
     try {
       if (!req.file) {
         return res.status(400).json({ error: 'ဗီဒီယိုဖိုင် မတွေ့ရှိပါ' });
@@ -551,20 +630,32 @@ async function startServer() {
   });
 
   // 12. Extract Background BGM & SFX Only (Removing Original Human Vocals)
-  app.post('/api/audio/extract-bgm', uploadVideoMiddleware.single('video'), async (req, res) => {
+  app.post('/api/audio/extract-bgm', safeUploadVideo, async (req, res) => {
     let tempUploadedPath: string | undefined;
+    let cleanupVideoAfter = false;
     try {
       let targetVideoPath = '';
       if (req.file && fs.existsSync(req.file.path)) {
         targetVideoPath = req.file.path;
         tempUploadedPath = req.file.path;
+        cleanupVideoAfter = true;
       } else if (req.body?.videoPath && fs.existsSync(req.body.videoPath)) {
         targetVideoPath = req.body.videoPath;
-      } else if (typeof req.body?.videoUrl === 'string' && req.body.videoUrl.startsWith('/')) {
-        const candidatePublic = path.join(process.cwd(), 'public', req.body.videoUrl.replace(/^\/+/, ''));
-        const candidateRoot = path.join(process.cwd(), req.body.videoUrl.replace(/^\/+/, ''));
-        if (fs.existsSync(candidatePublic)) targetVideoPath = candidatePublic;
-        else if (fs.existsSync(candidateRoot)) targetVideoPath = candidateRoot;
+      } else if (typeof req.body?.videoUrl === 'string') {
+        const rawUrl = req.body.videoUrl.trim();
+        if (rawUrl.startsWith('/')) {
+          const candidatePublic = path.join(process.cwd(), 'public', rawUrl.replace(/^\/+/, ''));
+          const candidateRoot = path.join(process.cwd(), rawUrl.replace(/^\/+/, ''));
+          if (fs.existsSync(candidatePublic)) targetVideoPath = candidatePublic;
+          else if (fs.existsSync(candidateRoot)) targetVideoPath = candidateRoot;
+        } else if (rawUrl.startsWith('http://') || rawUrl.startsWith('https://')) {
+          const tmpDownloadPath = path.join(EXPORTS_DIR, `remote_vid_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.mp4`);
+          const resp = await fetch(rawUrl, { signal: AbortSignal.timeout(60000) });
+          if (!resp.ok) throw new Error(`Remote video download failed (HTTP ${resp.status})`);
+          fs.writeFileSync(tmpDownloadPath, Buffer.from(await resp.arrayBuffer()));
+          targetVideoPath = tmpDownloadPath;
+          cleanupVideoAfter = true;
+        }
       }
 
       if (!targetVideoPath) {
@@ -574,10 +665,10 @@ async function startServer() {
       const extractId = `bgm_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       const result = await extractBgmAndSfxFromVideo(targetVideoPath, EXPORTS_DIR, extractId);
 
-      // Clean up temporary uploaded video file after extracting BGM MP3
-      if (tempUploadedPath && fs.existsSync(tempUploadedPath)) {
+      // Clean up temporary uploaded/downloaded video file after extracting BGM MP3
+      if (cleanupVideoAfter && targetVideoPath && fs.existsSync(targetVideoPath)) {
         try {
-          fs.unlinkSync(tempUploadedPath);
+          fs.unlinkSync(targetVideoPath);
         } catch (_) {}
       }
 
@@ -601,6 +692,143 @@ async function startServer() {
       console.error('BGM extraction error:', err);
       return res.status(500).json({ error: err.message || 'နောက်ခံတီးလုံး ခွဲထုတ်ခြင်း မအောင်မြင်ပါ' });
     }
+  });
+
+  // 13a. Chunked video upload endpoint for BGM extraction (bypasses HTTP proxy 32MB body cap)
+  app.post('/api/audio/bgm/upload-chunk', safeUploadChunk, (req, res) => {
+    try {
+      const rawId = String(req.body?.uploadId || '');
+      const safeId = rawId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
+      if (!safeId) {
+        return res.status(400).json({ error: 'Invalid uploadId' });
+      }
+      if (!req.file || !req.file.buffer) {
+        return res.status(400).json({ error: 'Missing video chunk data' });
+      }
+      const chunkIndex = Number(req.body?.chunkIndex ?? 0);
+      let ext = path.extname(String(req.body?.fileName || '')).toLowerCase();
+      if (!ext || ext === '.') ext = '.mp4';
+      const safeExt = ext.replace(/[^a-zA-Z0-9.]/g, '').slice(0, 10) || '.mp4';
+      const partPath = path.join(VIDEOS_DIR, `chunk_${safeId}${safeExt}.part`);
+
+      if (chunkIndex === 0) {
+        // Remove any stale .part files for the same uploadId before writing chunk 0
+        try {
+          for (const entry of fs.readdirSync(VIDEOS_DIR)) {
+            if (entry.startsWith(`chunk_${safeId}`) && entry.endsWith('.part')) {
+              fs.unlinkSync(path.join(VIDEOS_DIR, entry));
+            }
+          }
+        } catch (_) {}
+        fs.writeFileSync(partPath, req.file.buffer);
+      } else {
+        fs.appendFileSync(partPath, req.file.buffer);
+      }
+
+      return res.json({
+        success: true,
+        uploadId: safeId,
+        chunkIndex,
+        bytesWritten: req.file.buffer.length,
+      });
+    } catch (err: any) {
+      console.error('Chunk write error:', err);
+      return res.status(500).json({ error: err?.message || 'Chunk upload error' });
+    }
+  });
+
+  // 13b. Built-in BGM Generator: Start background vocal-removal stem extraction job (no external API key required)
+  app.post('/api/audio/bgm/start', safeUploadVideo, async (req, res) => {
+    let tempUploadedPath: string | undefined;
+    try {
+      if (req.file && fs.existsSync(req.file.path)) {
+        tempUploadedPath = req.file.path;
+      }
+
+      let targetVideoPath = '';
+      let cleanupVideoAfter = false;
+      if (tempUploadedPath) {
+        targetVideoPath = tempUploadedPath;
+        cleanupVideoAfter = true;
+      } else if (typeof req.body?.uploadId === 'string' && req.body.uploadId.trim()) {
+        const safeId = req.body.uploadId.trim().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
+        if (safeId) {
+          const files = fs.readdirSync(VIDEOS_DIR);
+          const partFile = files.find((f) => f.startsWith(`chunk_${safeId}`) && f.endsWith('.part'));
+          if (partFile) {
+            const fullPartPath = path.join(VIDEOS_DIR, partFile);
+            const assembledPath = fullPartPath.replace(/\.part$/, '');
+            fs.renameSync(fullPartPath, assembledPath);
+            tempUploadedPath = assembledPath;
+            targetVideoPath = assembledPath;
+            cleanupVideoAfter = true;
+          }
+        }
+      } else if (req.body?.videoPath && fs.existsSync(req.body.videoPath)) {
+        targetVideoPath = req.body.videoPath;
+      } else if (typeof req.body?.videoUrl === 'string') {
+        const rawUrl = req.body.videoUrl.trim();
+        if (rawUrl === '/api/narrator/sample-video' || rawUrl.startsWith('/api/narrator/sample-video?')) {
+          targetVideoPath = await ensureSampleDemoVideo();
+        } else if (rawUrl.startsWith('/')) {
+          const cleanRel = rawUrl.replace(/^\/+/, '');
+          const candidatePublic = path.join(process.cwd(), 'public', cleanRel);
+          const candidateRoot = path.join(process.cwd(), cleanRel);
+          if (fs.existsSync(candidatePublic)) targetVideoPath = candidatePublic;
+          else if (fs.existsSync(candidateRoot)) targetVideoPath = candidateRoot;
+        } else if (rawUrl.startsWith('http://') || rawUrl.startsWith('https://')) {
+          const tmpDownloadPath = path.join(EXPORTS_DIR, `remote_vid_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.mp4`);
+          const resp = await fetch(rawUrl, { signal: AbortSignal.timeout(60000) });
+          if (!resp.ok) throw new Error(`Remote video download failed (HTTP ${resp.status})`);
+          fs.writeFileSync(tmpDownloadPath, Buffer.from(await resp.arrayBuffer()));
+          targetVideoPath = tmpDownloadPath;
+          cleanupVideoAfter = true;
+        }
+      }
+
+      if (!targetVideoPath) {
+        return res.status(400).json({ error: 'နောက်ခံတီးလုံး ထုတ်ယူရန် ဗီဒီယိုဖိုင် မတွေ့ရှိပါ။' });
+      }
+
+      const job = await startBuiltinBgmJob({
+        videoPath: targetVideoPath,
+        exportsDir: EXPORTS_DIR,
+        cleanupVideoAfter,
+      });
+
+      return res.json({
+        success: true,
+        jobId: job.jobId,
+        status: job.status,
+        percent: job.percent,
+        stageLabel: job.stageLabel,
+      });
+    } catch (err: any) {
+      if (tempUploadedPath && fs.existsSync(tempUploadedPath)) {
+        try { fs.unlinkSync(tempUploadedPath); } catch (_) {}
+      }
+      console.error('BGM job start error:', err);
+      return res.status(500).json({ error: err.message || 'BGM ထုတ်ယူမှု မစတင်နိုင်ပါ' });
+    }
+  });
+
+  // 14. Built-in BGM Generator: Poll live job progress (0% -> 100%)
+  app.get('/api/audio/bgm/status/:jobId', (req, res) => {
+    const job = getBuiltinBgmJob(req.params.jobId);
+    if (!job) {
+      return res.status(404).json({ error: 'BGM extraction job not found' });
+    }
+    return res.json({
+      success: job.status !== 'error',
+      jobId: job.jobId,
+      status: job.status,
+      percent: job.percent,
+      stageLabel: job.stageLabel,
+      bgmUrl: job.bgmUrl,
+      durationSec: job.durationSec,
+      engineUsed: job.engineUsed,
+      error: job.error,
+    });
   });
 
   // Server-side Gemini API route
@@ -769,15 +997,16 @@ async function startServer() {
   // 100% Free Unlimited 24kHz Studio Neural Myanmar Voice Endpoint (8 Distinct Human Personas)
   app.post(['/api/tts/free', '/api/tts/edge'], async (req, res) => {
     try {
-      const { text, voice = 'Thiha', style = 'recap', emotion = '', speed, rate } = req.body;
+      const { text, voice = 'Thiha', style = 'recap', tone = 'natural', pitchOffset = 0, emotion = '', speed, rate } = req.body;
       if (!text || typeof text !== 'string') {
         return res.status(400).json({ error: 'Text is required for TTS' });
       }
 
       const activeSpeed = typeof speed === 'number' ? speed : (rate ? parseFloat(rate) : 1.0);
-      const mp3Buffer = await synthesizeNeuralRealityMyanmar(text, { voice, style, emotion, speed: activeSpeed });
+      const mp3Buffer = await synthesizeNeuralRealityMyanmar(text, { voice, style, tone, pitchOffset, emotion, speed: activeSpeed });
       res.setHeader('Content-Type', 'audio/mpeg');
       res.setHeader('Content-Length', mp3Buffer.length);
+      res.setHeader('X-TTS-Engine', 'neural-reality-24k');
       return res.send(mp3Buffer);
     } catch (error: any) {
       console.error('Neural Reality TTS error:', error);
@@ -854,7 +1083,18 @@ async function startServer() {
   // Human Reality Studio TTS endpoint (Gemini Flagship Neural Voice Model with 24kHz Neural Fallback)
   app.post('/api/tts/gemini', async (req, res) => {
     try {
-      const { text, voice = 'Thiha', style = 'recap', emotion = '', speed, rate, apiKey } = req.body;
+      const {
+        text,
+        voice = 'Thiha',
+        style = 'recap',
+        tone = 'natural',
+        pitchOffset = 0,
+        emotion = '',
+        speed,
+        rate,
+        apiKey,
+        preferredEngine = 'auto',
+      } = req.body;
       if (!text || typeof text !== 'string') {
         return res.status(400).json({ error: 'Text is required for TTS' });
       }
@@ -875,7 +1115,7 @@ async function startServer() {
       const rawKey = apiKey || process.env.GEMINI_API_KEY;
       const keyToUse = isValidAsciiApiKey(rawKey) ? cleanAsciiHeader(rawKey) : '';
 
-      // 8 Curated Human Reality Character Voices (Gemini Voice Mapping)
+      // 8+ Curated Human Reality Character Voices (Gemini Voice Mapping)
       const geminiVoiceMap: Record<string, { voice: string; persona: string }> = {
         Thiha: {
           voice: 'Puck',
@@ -981,63 +1221,52 @@ async function startServer() {
 
       const selected = geminiVoiceMap[voice] || geminiVoiceMap.Thiha;
 
-      // 5 Vocal Emotion & Style Selectors
       const styleModifierMap: Record<string, string> = {
-        conversational: 'Conversational Reality: နေ့စဉ် သဘာဝကျကျ စကားပြောသံ (Natural everyday conversational tone with authentic breath pauses, relaxed human cadence, and realistic inflections)',
-        recap: 'Cinematic Movie Recap: ဇာတ်လမ်းနားဆင်ရသလို စိတ်ဝင်စားဖွယ်အသံ (Captivating cinematic storyteller with dramatic pauses, suspenseful cadence, and engaging narrative warmth)',
-        broadcast: 'Broadcast News: တိကျခိုင်မာသော သတင်းကြေညာသံ (Articulate, authoritative news and TV broadcast presenter with crisp diction and steady pacing)',
-        energetic: 'High Energy: TikTok/Shorts အတွက် သွက်လက်တက်ကြွသောအသံ (High-tempo, vibrant, viral, lively and enthusiastic delivery)',
-        soothing: 'Calm & Soothing: နားဆင်ရ သက်သာနွေးထွေးသောအသံ (Soft, peaceful, gentle and relaxing tone with soothing melodic warmth)',
+        conversational: 'Conversational Reality: Natural everyday conversational tone with authentic breath pauses and relaxed human cadence',
+        recap: 'Cinematic Movie Recap: Captivating cinematic storyteller with engaging narrative warmth',
+        broadcast: 'Broadcast News: Articulate, authoritative presenter with crisp diction and steady pacing',
+        energetic: 'High Energy: Upbeat, vibrant, lively and enthusiastic storytelling delivery',
+        soothing: 'Calm & Soothing: Soft, peaceful, gentle and relaxing tone with warm resonance',
+        affectionate: 'Warm & Affectionate: Gentle, friendly, caring personal tone',
       };
 
-      const styleDescription = styleModifierMap[style] || styleModifierMap.conversational;
+      const toneDirectiveMap: Record<string, string> = {
+        natural: 'Balanced Natural Tone: Keep pitch steady in the speaker’s core midrange timbre throughout every sentence.',
+        warm: 'Warm Chest Tone: Soft, comforting, slightly lower warm vocal resonance.',
+        deep: 'Deep & Resonant Tone: Richer low-pitched chest voice with calm baritone gravity.',
+        bright: 'Bright & Crisp Tone: Clear, slightly lifted vocal timbre with lively forward articulation.',
+        calm: 'Calm & Measured Tone: Relaxed, peaceful, gently lower vocal posture with smooth breathing.',
+        dramatic: 'Dramatic Storytelling Tone: Confident, focused cinematic timbre with controlled weight.',
+        soft: 'Soft & Gentle Tone: Tender, light vocal touch without harsh edges.',
+      };
 
-      // Detect dynamic vocal emotion acting cues from segment emotion + Burmese meaning
-      const combinedEmotionSource = `${emotion || ''} ${cleanText}`.toLowerCase();
-      let emotionalActingCue =
-        'NATURAL CONVERSATIONAL FLOW: Speak like talking face-to-face with a close friend—authentic Burmese sentence melody, connected phrasing, varied pacing, and natural emphasis on meaningful words without exaggerating.';
-      if (/surpris|shock|amaze|astonish|wow|discover|အံ့ဩ|မထင်မှတ်|တကယ်|အများကြီး|!/.test(combinedEmotionSource)) {
-        emotionalActingCue =
-          'SPONTANEOUS SURPRISE: Genuinely and naturally surprised in the moment, lifting pitch cleanly on the key reveal without sounding theatrical or artificial.';
-      } else if (/question|curious|wonder|မေး|\?|လား|လဲ/.test(combinedEmotionSource)) {
-        emotionalActingCue =
-          'CURIOSITY: Naturally inquisitive conversational delivery with gentle rising Burmese question intonation.';
-      } else if (/happy|cheer|joy|delight|smile|warm|relief|ပျော်|ဝမ်းသာ|ကောင်း|အောင်မြင်/.test(combinedEmotionSource)) {
-        emotionalActingCue =
-          'HAPPINESS: Warm, cheerful, lively conversational smile in the voice—bright and genuine, never forced.';
-      } else if (/empath|caring|comfort|kind|gentle|စာနာ|နှစ်သိမ့်|ဂရု|သနား/.test(combinedEmotionSource)) {
-        emotionalActingCue =
-          'EMPATHY: Caring, comforting, warm personal closeness, speaking gently as to a trusted friend.';
-      } else if (/sad|sorrow|melanchol|pain|ဝမ်းနည်း|ငို|နာကျင်/.test(combinedEmotionSource)) {
-        emotionalActingCue =
-          'SADNESS: Gentle, soft, emotionally sincere delivery with quiet authentic weight and natural human breath.';
-      } else if (/excit|energetic|enthusias|viral|thrill|တက်ကြွ|စိတ်လှုပ်ရှား/.test(combinedEmotionSource)) {
-        emotionalActingCue =
-          'EXCITEMENT: Energetic, expressive, enthusiastic storytelling momentum with natural dynamic emphasis.';
-      } else if (/mock|smug|sarcas|playful|tease|လှောင်|နော်|ပြီပဲ|တာပဲ/.test(combinedEmotionSource)) {
-        emotionalActingCue =
-          'PLAYFUL / KNOWING: Subtle sly conversational inflection on the punchline, natural and human.';
-      } else if (/determin|fierce|angry|threat|urgent|tense|မာန်|ဒေါသ|မပေးဘူး|သေချာပေါက်|ယူရမယ်/.test(combinedEmotionSource)) {
-        emotionalActingCue =
-          'FIRM RESOLVE: Grounded, sincere determination with clear natural vocal weight on key words.';
-      }
+      const parsedPitch = typeof pitchOffset === 'number' ? pitchOffset : parseFloat(String(pitchOffset || '0')) || 0;
+      const clampedPitch = Math.max(-15, Math.min(15, Math.round(parsedPitch)));
+      const pitchDirective = clampedPitch === 0
+        ? ''
+        : clampedPitch < 0
+          ? ` Slightly lower vocal pitch adjustment (${clampedPitch}% deeper).`
+          : ` Slightly brighter/higher vocal pitch adjustment (+${clampedPitch}% lighter).`;
+
+      const styleDescription = styleModifierMap[style] || styleModifierMap.conversational;
+      const toneDescription = (toneDirectiveMap[String(tone).toLowerCase()] || toneDirectiveMap.natural) + pitchDirective;
 
       const speechStyleMetadata =
-        `VOICE DIRECTOR — BURMESE NATURAL HUMAN VOICE (${selected.persona}). ` +
-        `Scene: Speaking directly face-to-face to a close friend in real time (NOT a speech, audiobook, presentation, or newsreader). ` +
-        `Style: ${styleDescription}. Emotion: ${emotion ? `${emotion} — ` : ''}${emotionalActingCue} ` +
-        `Rules: Authentic native Burmese pronunciation and sentence melody; connected conversational rhythm with subtle natural breaths and varied pacing; stress meaningful words naturally; NEVER robotic, NEVER monotonous, NEVER identical rhythm across sentences, NEVER exaggerate every emotion, and speak the exact words without adding or changing anything.`;
+        `VOICE DIRECTOR — SINGLE CONSISTENT BURMESE HUMAN VOICE (${selected.persona}). ` +
+        `Maintain strictly ONE uniform vocal identity and consistent voice timbre across the entire clip—NEVER switch voices or alter speaker identity mid-sentence. ` +
+        `Style: ${styleDescription}. Tone Profile: ${toneDescription} ` +
+        `${emotion ? `Subtle emotional coloring: ${emotion}. ` : ''}` +
+        `Rules: Authentic native Burmese pronunciation, steady single-speaker timbre, natural breath pauses, zero double-voice artifacts, and speak the exact words cleanly.`;
 
       let audioBuffer: Buffer | null = null;
       let usedEngine = 'neural-reality-24k';
 
-      // If a Gemini API key is present, attempt Gemini Expressive TTS first
-      if (keyToUse) {
+      // If Gemini API key is present and caller didn't lock directly to neural engine, use single consistent Gemini TTS model
+      if (keyToUse && preferredEngine !== 'neural') {
         try {
           const ai = createGeminiClient(keyToUse);
 
           const tryModel = async (modelName: string): Promise<Buffer> => {
-            // Note: Gemini 3.8 TTS models use speechMetadata.style (no systemInstruction in config)
             const response = await Promise.race([
               ai.models.generateContent({
                 model: modelName,
@@ -1077,15 +1306,18 @@ async function startServer() {
           };
 
           try {
-            audioBuffer = await tryModel('gemini-3.8-flash-tts');
-            usedEngine = 'gemini-3.8-flash-tts';
+            // Single primary model for dubbing consistency (matches gemini-3.8-flash-lite-tts guidance)
+            audioBuffer = await tryModel('gemini-3.8-flash-lite-tts');
+            usedEngine = 'gemini-3.8-flash-lite-tts';
           } catch (err: any) {
-            console.warn('Primary Gemini expressive TTS attempt failed:', err.message);
-            try {
-              audioBuffer = await tryModel('gemini-3.8-flash-lite-tts');
-              usedEngine = 'gemini-3.8-flash-lite-tts';
-            } catch (err2: any) {
-              console.warn('Secondary Gemini TTS attempt failed:', err2.message);
+            console.warn('Primary Gemini TTS attempt failed:', err.message);
+            if (preferredEngine !== 'gemini') {
+              try {
+                audioBuffer = await tryModel('gemini-3.8-flash-tts');
+                usedEngine = 'gemini-3.8-flash-tts';
+              } catch (err2: any) {
+                console.warn('Secondary Gemini TTS attempt failed:', err2.message);
+              }
             }
           }
         } catch (geminiInitErr: any) {
@@ -1100,10 +1332,17 @@ async function startServer() {
         return res.send(audioBuffer);
       }
 
-      // Expressive 24kHz Studio Neural fallback with Rubberband pitch/cadence sculpting
-      console.log(`Using expressive 24kHz Studio Neural Voice Actor for ${voice} (${style} | ${emotion || 'recap'})...`);
+      // Expressive 24kHz Studio Neural fallback with single-voice tone & pitch sculpting
+      console.log(`Using expressive 24kHz Studio Neural Voice Actor for ${voice} (style=${style}, tone=${tone}, pitch=${clampedPitch}%)...`);
       const activeSpeed = typeof speed === 'number' ? speed : (rate ? parseFloat(rate) : 1.0);
-      const neuralMp3 = await synthesizeNeuralRealityMyanmar(cleanText, { voice, style, emotion, speed: activeSpeed });
+      const neuralMp3 = await synthesizeNeuralRealityMyanmar(cleanText, {
+        voice,
+        style,
+        tone,
+        pitchOffset: clampedPitch,
+        emotion,
+        speed: activeSpeed,
+      });
       res.setHeader('Content-Type', 'audio/mpeg');
       res.setHeader('Content-Length', neuralMp3.length);
       res.setHeader('X-TTS-Engine', 'neural-reality-24k');
@@ -1112,6 +1351,168 @@ async function startServer() {
       console.error('TTS synthesis error:', error);
       return res.status(500).json({
         error: error.message || 'TTS synthesis failed',
+      });
+    }
+  });
+
+  // Nara Mini v1 (YeeNyunn/nara-mini-v1 via hugging-apps/nara-mini-v1-tts Gradio Space API)
+  app.post('/api/tts/nara', async (req, res) => {
+    try {
+      const { text, voice = 'ko-banyar', normalizeNumbers = true } = req.body;
+      if (!text || typeof text !== 'string' || !text.trim()) {
+        return res.status(400).json({ error: 'Text is required for Nara Mini v1 TTS' });
+      }
+
+      const cleanText = text
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\r\n/g, '\n')
+        .replace(/\t/g, ' ')
+        .replace(/[\u200B-\u200D\uFEFF]/g, '')
+        .trim();
+
+      // Map app VoiceOption names or direct Nara voice IDs to Nara Mini v1's 4 official voices
+      const naraVoiceMap: Record<string, 'shoon' | 'thazin' | 'ko-banyar' | 'htet-myat'> = {
+        'ko-banyar': 'ko-banyar',
+        'htet-myat': 'htet-myat',
+        shoon: 'shoon',
+        thazin: 'thazin',
+        NaraKoBanyar: 'ko-banyar',
+        NaraHtetMyat: 'htet-myat',
+        NaraShoon: 'shoon',
+        NaraThazin: 'thazin',
+        Thiha: 'ko-banyar',
+        KyawKyaw: 'ko-banyar',
+        MinThway: 'ko-banyar',
+        Titus: 'ko-banyar',
+        Oberon: 'ko-banyar',
+        Atlas: 'ko-banyar',
+        Gacrux: 'ko-banyar',
+        Sadaltager: 'ko-banyar',
+        AungAung: 'htet-myat',
+        Perseus: 'htet-myat',
+        Schedar: 'htet-myat',
+        Achird: 'htet-myat',
+        Zubenelgenubi: 'htet-myat',
+        Nilar: 'shoon',
+        Thiri: 'shoon',
+        SuSu: 'shoon',
+        Sulafat: 'shoon',
+        Pulcherrima: 'shoon',
+        Sadachbia: 'shoon',
+        MayThu: 'thazin',
+        Virgo: 'thazin',
+        Minerva: 'thazin',
+        Luna: 'thazin',
+        Lyra: 'thazin',
+        Vindemiatrix: 'thazin',
+      };
+      const naraVoice = naraVoiceMap[String(voice)] || 'ko-banyar';
+      const spaceBase = 'https://hugging-apps-nara-mini-v1-tts.hf.space';
+
+      const callRes = await fetch(`${spaceBase}/gradio_api/call/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          data: [cleanText, naraVoice, Boolean(normalizeNumbers)],
+        }),
+        signal: AbortSignal.timeout(20000),
+      });
+
+      if (!callRes.ok) {
+        const errTxt = await callRes.text().catch(() => '');
+        return res.status(callRes.status).json({
+          error: `Nara Mini v1 Space call failed (HTTP ${callRes.status}): ${errTxt || callRes.statusText}`,
+        });
+      }
+
+      const callJson: any = await callRes.json().catch(() => ({}));
+      const eventId = callJson?.event_id;
+      if (!eventId) {
+        return res.status(502).json({ error: 'Nara Mini v1 Space did not return an event_id' });
+      }
+
+      const sseRes = await fetch(`${spaceBase}/gradio_api/call/generate/${eventId}`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(45000),
+      });
+
+      if (!sseRes.ok) {
+        return res.status(sseRes.status).json({
+          error: `Nara Mini v1 SSE stream failed (HTTP ${sseRes.status})`,
+        });
+      }
+
+      const sseText = await sseRes.text();
+      if (sseText.includes('event: error')) {
+        const errDataMatch = sseText.match(/event:\s*error[\s\S]*?data:\s*(.+)/);
+        return res.status(502).json({
+          error: `Nara Mini v1 synthesis error: ${errDataMatch?.[1] || 'Unknown Gradio error'}`,
+        });
+      }
+
+      // Extract the FileData JSON line after event: complete
+      const completeMatch = sseText.match(/event:\s*complete[\r\n]+data:\s*(\[[\s\S]*?\])(?:\r?\n|$)/);
+      const dataMatch = completeMatch || sseText.match(/data:\s*(\[[\s\S]*?\])(?:\r?\n|$)/);
+      if (!dataMatch) {
+        return res.status(502).json({ error: 'Nara Mini v1 returned empty SSE output' });
+      }
+
+      const parsedData = JSON.parse(dataMatch[1]);
+      const fileObj = Array.isArray(parsedData) ? parsedData[0] : null;
+      const audioFileUrl =
+        fileObj?.url ||
+        (fileObj?.path ? `${spaceBase}/gradio_api/file=${fileObj.path}` : null);
+
+      if (!audioFileUrl) {
+        return res.status(502).json({ error: 'Nara Mini v1 did not return an audio file URL' });
+      }
+
+      const audioRes = await fetch(audioFileUrl, { signal: AbortSignal.timeout(25000) });
+      if (!audioRes.ok) {
+        return res.status(502).json({ error: `Failed to download Nara Mini v1 audio (HTTP ${audioRes.status})` });
+      }
+
+      const rawArrayBuffer = await audioRes.arrayBuffer();
+      let rawWav = Buffer.from(rawArrayBuffer);
+
+      // Apply Voice Tone / Pitch adjustment if pitchOffset != 0 while keeping exact duration via ffmpeg
+      const clampedPitch = Math.max(-15, Math.min(15, Math.round(Number(req.body?.pitchOffset) || 0)));
+      if (clampedPitch !== 0) {
+        const tmpIn = path.join(os.tmpdir(), `nara_in_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.wav`);
+        const tmpOut = path.join(os.tmpdir(), `nara_out_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.wav`);
+        try {
+          fs.writeFileSync(tmpIn, rawWav);
+          const ratio = Math.max(0.85, Math.min(1.15, 1 + clampedPitch / 100));
+          const invTempo = Math.max(0.5, Math.min(2.0, 1 / ratio));
+          await execFileAsync('ffmpeg', [
+            '-y',
+            '-i', tmpIn,
+            '-af', `asetrate=24000*${ratio.toFixed(4)},aresample=24000,atempo=${invTempo.toFixed(4)}`,
+            tmpOut,
+          ], { timeout: 15000 });
+          if (fs.existsSync(tmpOut)) {
+            const shifted = fs.readFileSync(tmpOut);
+            if (shifted.length > 44) rawWav = shifted;
+          }
+        } catch (pitchErr: any) {
+          console.warn('Nara pitch shift skipped:', pitchErr?.message || pitchErr);
+        } finally {
+          try { if (fs.existsSync(tmpIn)) fs.unlinkSync(tmpIn); } catch (_) {}
+          try { if (fs.existsSync(tmpOut)) fs.unlinkSync(tmpOut); } catch (_) {}
+        }
+      }
+
+      const paddedWav = appendWavSilencePadding(rawWav, 0.08);
+
+      res.setHeader('Content-Type', 'audio/wav');
+      res.setHeader('Content-Length', paddedWav.length);
+      res.setHeader('X-TTS-Engine', 'nara-mini-v1');
+      res.setHeader('X-Nara-Voice', naraVoice);
+      return res.send(paddedWav);
+    } catch (error: any) {
+      console.error('Nara Mini v1 TTS error:', error);
+      return res.status(500).json({
+        error: error?.message || 'Nara Mini v1 TTS synthesis failed',
       });
     }
   });
@@ -1275,453 +1676,6 @@ async function startServer() {
     }
   });
 
-  // Hugging Face API Verification Endpoint
-  app.post('/api/huggingface/verify', async (req, res) => {
-    try {
-      const { apiKey } = req.body;
-      const rawKey = apiKey || process.env.HUGGINGFACE_API_KEY || process.env.HF_TOKEN;
-      if (!rawKey) {
-        return res.status(400).json({ ok: false, error: 'Hugging Face API Key (Token) is missing.' });
-      }
-      if (!isValidAsciiApiKey(rawKey)) {
-        return res.status(400).json({
-          ok: false,
-          error: 'Hugging Face Token မမှန်ကန်ပါ (မြန်မာစာလုံးများ ပါဝင်နေပါသည်)။ ကျေးဇူးပြု၍ Hugging Face မှ အင်္ဂလိပ် Access Token (hf_...) ကိုသာ ထည့်သွင်းပေးပါ။',
-        });
-      }
-
-      const keyToUse = cleanAsciiHeader(rawKey);
-      const hfRes = await fetch('https://huggingface.co/api/whoami-v2', {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${keyToUse}`,
-        },
-      });
-
-      if (hfRes.ok) {
-        const data = await hfRes.json().catch(() => ({}));
-        const username = data.name || data.id || 'User';
-        return res.json({
-          ok: true,
-          message: `✓ Hugging Face ချိတ်ဆက်မှု အောင်မြင်ပါသည်! (${username}) (Voice Clone အဆင်သင့်ဖြစ်ပါပြီ)`,
-          username,
-        });
-      } else {
-        const errData = await hfRes.json().catch(() => ({}));
-        let errMsg = errData.error || `Hugging Face Authentication Failed (HTTP ${hfRes.status})`;
-        if (hfRes.status === 401) {
-          errMsg = 'Hugging Face API Token မမှန်ကန်ပါ (Invalid token)။ ကျေးဇူးပြု၍ https://huggingface.co/settings/tokens မှ User Access Token (hf_...) ကို စစ်ဆေးပေးပါ။';
-        }
-        return res.status(hfRes.status).json({ ok: false, error: errMsg });
-      }
-    } catch (error: any) {
-      console.error('Hugging Face verify error:', error);
-      return res.status(500).json({ ok: false, error: formatNetworkError(error, 'Hugging Face') });
-    }
-  });
-
-  // Hugging Face Multi-Speaker Studio & TTS Endpoint
-  app.post('/api/huggingface/tts', async (req, res) => {
-    try {
-      const { text, model = 'coqui/XTTS-v2', apiKey, speakerId } = req.body;
-      const rawKey = apiKey || process.env.HUGGINGFACE_API_KEY || process.env.HF_TOKEN;
-      if (!rawKey) {
-        return res.status(400).json({ error: 'Hugging Face API Key (Token) မရှိသေးပါ။ အဆင့် 1 တွင် Token ထည့်သွင်းပြီး Connect ပြုလုပ်ပေးပါ။' });
-      }
-      if (!isValidAsciiApiKey(rawKey)) {
-        return res.status(400).json({ error: 'Hugging Face Token တွင် မြန်မာစာလုံးများ မပါဝင်ရပါ။' });
-      }
-      if (!text || typeof text !== 'string') {
-        return res.status(400).json({ error: 'Text is required for TTS' });
-      }
-
-      const keyToUse = cleanAsciiHeader(rawKey);
-      const cleanModel = (typeof model === 'string' && model.trim()) ? model.trim() : 'coqui/XTTS-v2';
-
-      const standardHeaders: Record<string, string> = {
-        Authorization: `Bearer ${keyToUse}`,
-        'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AIStudio/1.0',
-        'Accept': '*/*',
-      };
-
-      // Prepare payload options for Hugging Face Inference
-      const primaryPayload: any = { inputs: text.trim() };
-
-      // Endpoints to attempt for HF Inference Router
-      const endpoints = [
-        `https://router.huggingface.co/hf-inference/models/${cleanModel}`,
-        `https://api-inference.huggingface.co/models/${cleanModel}`,
-        'https://router.huggingface.co/hf-inference/models/facebook/mms-tts-mya',
-        'https://api-inference.huggingface.co/models/facebook/mms-tts-mya',
-      ];
-
-      let audioBuffer: Buffer | null = null;
-      let lastErrMsg = '';
-      let statusCode = 500;
-
-      for (const endpoint of endpoints) {
-        try {
-          const hfResponse = await fetch(endpoint, {
-            method: 'POST',
-            headers: standardHeaders,
-            body: JSON.stringify(primaryPayload),
-            signal: AbortSignal.timeout(18000),
-          });
-
-          if (hfResponse.ok) {
-            const arrayBuffer = await hfResponse.arrayBuffer();
-            audioBuffer = Buffer.from(arrayBuffer);
-            if (audioBuffer.length > 200) {
-              const contentType = hfResponse.headers.get('content-type') || 'audio/wav';
-              res.setHeader('Content-Type', contentType);
-              res.setHeader('Content-Length', audioBuffer.length);
-              res.setHeader('X-HF-Speaker-ID', speakerId || 'default');
-              return res.send(audioBuffer);
-            }
-          } else {
-            statusCode = hfResponse.status;
-            const errJson = await hfResponse.json().catch(() => ({}));
-            lastErrMsg = errJson.error || errJson.message || `HF Inference HTTP ${hfResponse.status}`;
-          }
-        } catch (fetchErr: any) {
-          lastErrMsg = fetchErr.message || 'Network request failed';
-        }
-      }
-
-      // Fallback to 24kHz Studio Neural Voice if HF serverless router endpoints fail
-      try {
-        console.log(`HF Router fallback notice (${lastErrMsg}). Synthesizing via 24kHz Neural Studio Engine for speaker ${speakerId}...`);
-        const voiceMapping: Record<string, string> = {
-          hf_male_thiha: 'Thiha',
-          hf_male_kyawkyaw: 'KyawKyaw',
-          hf_male_aungaung: 'AungAung',
-          hf_male_minthway: 'MinThway',
-          hf_female_nilar: 'Nilar',
-          hf_female_maythu: 'MayThu',
-          hf_female_thiri: 'Thiri',
-          hf_female_susu: 'SuSu',
-        };
-        const mappedVoice = voiceMapping[speakerId || ''] || 'Thiha';
-        const neuralMp3 = await synthesizeNeuralRealityMyanmar(text.trim(), { voice: mappedVoice, style: 'conversational', speed: 1.0 });
-        if (neuralMp3 && neuralMp3.length > 200) {
-          res.setHeader('Content-Type', 'audio/mpeg');
-          res.setHeader('Content-Length', neuralMp3.length);
-          res.setHeader('X-HF-Fallback-Voice', mappedVoice);
-          return res.send(neuralMp3);
-        }
-      } catch (fallbackErr: any) {
-        console.error('Final fallback TTS error:', fallbackErr);
-      }
-
-      return res.status(statusCode).json({
-        error: `Hugging Face Multi-Speaker synthesis error: ${lastErrMsg || 'No response from Hugging Face Inference API'}`,
-      });
-    } catch (error: any) {
-      console.error('Hugging Face TTS proxy error:', error);
-      return res.status(500).json({ error: formatNetworkError(error, 'Hugging Face') });
-    }
-  });
-
-  // ============================================================================
-  // TTS PROVIDERS CONFIG STATUS
-  // ============================================================================
-  app.get('/api/tts/providers-status', (_req, res) => {
-    res.json({
-      geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
-      elevenLabsConfigured: Boolean(process.env.ELEVENLABS_API_KEY),
-      huggingFaceConfigured: Boolean(process.env.HUGGINGFACE_API_KEY || process.env.HF_TOKEN),
-    });
-  });
-
-  // ============================================================================
-  // ELEVENLABS VOICE CLONE & TTS PROXY ENDPOINTS
-  // ============================================================================
-  const memoryUpload = multer({
-    storage: multer.memoryStorage(),
-    limits: { fileSize: 25 * 1024 * 1024 },
-  });
-
-  app.post('/api/elevenlabs/verify', async (req, res) => {
-    try {
-      const rawKey = req.body?.apiKey || process.env.ELEVENLABS_API_KEY;
-      if (!rawKey) {
-        return res.status(400).json({ ok: false, error: 'ElevenLabs API Key မရှိသေးပါ။' });
-      }
-      if (!isValidAsciiApiKey(rawKey)) {
-        return res.status(400).json({ ok: false, error: 'ElevenLabs API Key တွင် မြန်မာစာလုံးများ မပါဝင်ရပါ။' });
-      }
-      const keyToUse = cleanAsciiHeader(rawKey);
-      const elRes = await fetch('https://api.elevenlabs.io/v1/user', {
-        method: 'GET',
-        headers: { 'xi-api-key': keyToUse },
-        signal: AbortSignal.timeout(12000),
-      });
-      if (elRes.ok) {
-        const user = await elRes.json().catch(() => ({}));
-        const tier = user?.subscription?.tier ? ` (${user.subscription.tier})` : '';
-        return res.json({
-          ok: true,
-          message: `✓ ElevenLabs Voice Clone ချိတ်ဆက်မှု အောင်မြင်ပါသည်!${tier}`,
-        });
-      }
-      const errData = await elRes.json().catch(() => ({}));
-      const msg = errData?.detail?.message || errData?.detail || `ElevenLabs Auth Failed (HTTP ${elRes.status})`;
-      return res.status(elRes.status).json({ ok: false, error: typeof msg === 'string' ? msg : JSON.stringify(msg) });
-    } catch (error: any) {
-      return res.status(500).json({ ok: false, error: formatNetworkError(error, 'ElevenLabs') });
-    }
-  });
-
-  app.post('/api/elevenlabs/voices', async (req, res) => {
-    try {
-      const rawKey = req.body?.apiKey || process.env.ELEVENLABS_API_KEY;
-      if (!rawKey) {
-        return res.status(400).json({ error: 'ElevenLabs API Key ထည့်သွင်းပေးပါ (သို့မဟုတ် Environment Variable တွင် သတ်မှတ်ပါ)။' });
-      }
-      if (!isValidAsciiApiKey(rawKey)) {
-        return res.status(400).json({ error: 'ElevenLabs API Key မမှန်ကန်ပါ။' });
-      }
-      const keyToUse = cleanAsciiHeader(rawKey);
-      const elRes = await fetch('https://api.elevenlabs.io/v1/voices', {
-        method: 'GET',
-        headers: { 'xi-api-key': keyToUse },
-        signal: AbortSignal.timeout(15000),
-      });
-      const data = await elRes.json().catch(() => ({}));
-      if (!elRes.ok) {
-        const msg = data?.detail?.message || data?.detail || `Failed to load voices (HTTP ${elRes.status})`;
-        return res.status(elRes.status).json({ error: typeof msg === 'string' ? msg : JSON.stringify(msg) });
-      }
-      const voices = Array.isArray(data?.voices)
-        ? data.voices.map((v: any) => ({
-            voice_id: v.voice_id,
-            name: v.name,
-            category: v.category || 'premade',
-            preview_url: v.preview_url,
-            labels: v.labels || {},
-          }))
-        : [];
-      return res.json({ voices });
-    } catch (error: any) {
-      return res.status(500).json({ error: formatNetworkError(error, 'ElevenLabs') });
-    }
-  });
-
-  app.post('/api/elevenlabs/clone', memoryUpload.single('audio'), async (req, res) => {
-    try {
-      const rawKey = req.body?.apiKey || process.env.ELEVENLABS_API_KEY;
-      if (!rawKey) {
-        return res.status(400).json({ error: 'ElevenLabs API Key မရှိသေးပါ။' });
-      }
-      if (!isValidAsciiApiKey(rawKey)) {
-        return res.status(400).json({ error: 'ElevenLabs API Key မမှန်ကန်ပါ။' });
-      }
-      const file = req.file;
-      if (!file || !file.buffer?.length) {
-        return res.status(400).json({ error: 'Voice Clone ပြုလုပ်ရန် နမူနာ အသံဖိုင် (MP3/WAV/M4A) ထည့်သွင်းပေးပါ။' });
-      }
-
-      const keyToUse = cleanAsciiHeader(rawKey);
-      const voiceName = String(req.body?.name || 'Myanmar Cloned Voice').trim().slice(0, 80);
-      const description = String(req.body?.description || 'Burmese Natural Human Voice Clone').trim().slice(0, 400);
-
-      const form = new FormData();
-      form.append('name', voiceName);
-      form.append('description', description);
-      const audioBlob = new Blob([new Uint8Array(file.buffer)], {
-        type: file.mimetype || 'audio/mpeg',
-      });
-      form.append('files', audioBlob, file.originalname || 'voice_sample.mp3');
-
-      const cloneRes = await fetch('https://api.elevenlabs.io/v1/voices/add', {
-        method: 'POST',
-        headers: { 'xi-api-key': keyToUse },
-        body: form,
-        signal: AbortSignal.timeout(45000),
-      });
-
-      const data = await cloneRes.json().catch(() => ({}));
-      if (!cloneRes.ok || !data?.voice_id) {
-        const msg = data?.detail?.message || data?.detail || data?.message || `Voice Clone failed (HTTP ${cloneRes.status})`;
-        return res.status(cloneRes.status || 400).json({ error: typeof msg === 'string' ? msg : JSON.stringify(msg) });
-      }
-
-      return res.json({
-        success: true,
-        voice_id: data.voice_id,
-        name: voiceName,
-      });
-    } catch (error: any) {
-      return res.status(500).json({ error: formatNetworkError(error, 'ElevenLabs Voice Clone') });
-    }
-  });
-
-  // 1-Click Instant Voice Clone directly from user's attached sample video or project video
-  app.post('/api/elevenlabs/clone-sample-video', async (req, res) => {
-    try {
-      const rawKey = req.body?.apiKey || process.env.ELEVENLABS_API_KEY;
-      if (!rawKey) {
-        return res.status(400).json({ error: 'ElevenLabs API Key မရှိသေးပါ။ Step 1 တွင် API Key ထည့်သွင်းပေးပါ။' });
-      }
-      if (!isValidAsciiApiKey(rawKey)) {
-        return res.status(400).json({ error: 'ElevenLabs API Key မမှန်ကန်ပါ။' });
-      }
-
-      let targetVideo = path.join(process.cwd(), 'public/assets/aistudio/89cbad80-de9b-11f1-9f64-f9e4747b79f2_c572e83d.mp4');
-      if (req.body?.videoPath && fs.existsSync(req.body.videoPath)) {
-        targetVideo = req.body.videoPath;
-      }
-
-      if (!fs.existsSync(targetVideo)) {
-        return res.status(404).json({ error: 'နမူနာ ဗီဒီယိုဖိုင် မတွေ့ရှိပါ' });
-      }
-
-      const outTmpAudio = path.join(os.tmpdir(), `sample_clone_${Date.now()}.mp3`);
-      await new Promise<void>((resolve, reject) => {
-        exec(
-          `ffmpeg -y -ss 00:00:02 -i "${targetVideo}" -t 35 -vn -ar 44100 -ac 1 -b:a 192k "${outTmpAudio}"`,
-          (err) => {
-            if (err) reject(err);
-            else resolve();
-          }
-        );
-      });
-
-      if (!fs.existsSync(outTmpAudio) || fs.statSync(outTmpAudio).size < 1000) {
-        return res.status(500).json({ error: 'ဗီဒီယိုမှ အသံထုတ်ယူခြင်း မအောင်မြင်ပါ' });
-      }
-
-      const audioBuf = fs.readFileSync(outTmpAudio);
-      try { fs.unlinkSync(outTmpAudio); } catch (_) {}
-
-      const keyToUse = cleanAsciiHeader(rawKey);
-      const voiceName = String(req.body?.name || 'Sample Video Burmese Narrator').trim().slice(0, 80);
-      const description = 'Extracted Burmese Natural Human Narrator Voice from sample video for Expressive Recaps';
-
-      const form = new FormData();
-      form.append('name', voiceName);
-      form.append('description', description);
-      const audioBlob = new Blob([new Uint8Array(audioBuf)], { type: 'audio/mpeg' });
-      form.append('files', audioBlob, 'sample_narrator.mp3');
-
-      const cloneRes = await fetch('https://api.elevenlabs.io/v1/voices/add', {
-        method: 'POST',
-        headers: { 'xi-api-key': keyToUse },
-        body: form,
-        signal: AbortSignal.timeout(50000),
-      });
-
-      const data = await cloneRes.json().catch(() => ({}));
-      if (!cloneRes.ok || !data?.voice_id) {
-        const msg = data?.detail?.message || data?.detail || data?.message || `Voice Clone failed (HTTP ${cloneRes.status})`;
-        return res.status(cloneRes.status || 400).json({ error: typeof msg === 'string' ? msg : JSON.stringify(msg) });
-      }
-
-      return res.json({
-        success: true,
-        voice_id: data.voice_id,
-        name: voiceName,
-      });
-    } catch (error: any) {
-      console.error('Clone from sample video error:', error);
-      return res.status(500).json({ error: formatNetworkError(error, 'Sample Video Voice Clone') });
-    }
-  });
-
-  app.post('/api/elevenlabs/tts', async (req, res) => {
-    try {
-      const {
-        text,
-        voiceId,
-        modelId = 'eleven_v3',
-        stability = 0.5,
-        style = 0.0,
-        emotion = '',
-        apiKey,
-      } = req.body || {};
-
-      const rawKey = apiKey || process.env.ELEVENLABS_API_KEY;
-      if (!rawKey) {
-        return res.status(400).json({ error: 'ElevenLabs API Key မရှိသေးပါ။ Step 1 တွင် ElevenLabs API Key ထည့်သွင်းပေးပါ။' });
-      }
-      if (!isValidAsciiApiKey(rawKey)) {
-        return res.status(400).json({ error: 'ElevenLabs API Key မမှန်ကန်ပါ။' });
-      }
-      if (!text || typeof text !== 'string' || !text.trim()) {
-        return res.status(400).json({ error: 'TTS ပြုလုပ်ရန် စာသား လိုအပ်ပါသည်။' });
-      }
-      if (!voiceId || typeof voiceId !== 'string' || !voiceId.trim()) {
-        return res.status(400).json({ error: 'ElevenLabs Voice ID ရွေးချယ်ပေးပါ (သို့မဟုတ် Instant Clone ပြုလုပ်ပါ)။' });
-      }
-
-      const keyToUse = cleanAsciiHeader(rawKey);
-      const cleanVoiceId = cleanAsciiHeader(voiceId);
-
-      const emLower = String(emotion || '').toLowerCase();
-      let dynStability = Number(stability);
-      let dynStyle = Number(style);
-      if (emLower.includes('excited') || emLower.includes('surpris') || emLower.includes('fierce')) {
-        dynStability = Math.max(0.3, dynStability - 0.1);
-        dynStyle = Math.min(0.5, dynStyle + 0.1);
-      } else if (emLower.includes('sad') || emLower.includes('empathetic') || emLower.includes('calm')) {
-        dynStability = Math.min(0.7, dynStability + 0.1);
-      }
-
-      // ElevenLabs v3 models require exact schema:
-      // Note: `similarity_boost` MUST NOT be sent to eleven_v3 (causes 422 Unprocessable Entity)
-      // `language_code: "my"` specifies Burmese Unicode text
-      const cleanText = text.trim();
-      const v3Payload = {
-        text: cleanText,
-        model_id: 'eleven_v3',
-        language_code: 'my',
-        voice_settings: {
-          stability: Number.isFinite(dynStability) ? Math.min(1.0, Math.max(0.0, dynStability)) : 0.5,
-          style: Number.isFinite(dynStyle) ? Math.min(1.0, Math.max(0.0, dynStyle)) : 0.0,
-          use_speaker_boost: true,
-        },
-      };
-
-      const ttsUrl = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(cleanVoiceId)}?output_format=mp3_44100_128`;
-      const ttsRes = await fetch(ttsUrl, {
-        method: 'POST',
-        headers: {
-          'xi-api-key': keyToUse,
-          'Content-Type': 'application/json',
-          Accept: 'audio/mpeg',
-        },
-        body: JSON.stringify(v3Payload),
-        signal: AbortSignal.timeout(35000),
-      });
-
-      if (ttsRes.ok) {
-        const audioBuf = Buffer.from(await ttsRes.arrayBuffer());
-        if (audioBuf.length > 100) {
-          res.setHeader('Content-Type', 'audio/mpeg');
-          res.setHeader('Content-Length', audioBuf.length);
-          res.setHeader('X-TTS-Engine', 'elevenlabs_v3');
-          return res.send(audioBuf);
-        }
-      }
-
-      const errJson = await ttsRes.json().catch(() => ({}));
-      console.error(`ElevenLabs TTS HTTP ${ttsRes.status} Error:`, JSON.stringify(errJson));
-      const detail = errJson?.detail?.message || errJson?.detail || errJson?.message || `ElevenLabs API error (HTTP ${ttsRes.status})`;
-      const errMessage = typeof detail === 'string' ? detail : JSON.stringify(detail);
-
-      return res.status(ttsRes.status || 400).json({
-        error: `ElevenLabs TTS Error: ${errMessage}`,
-        status: ttsRes.status,
-      });
-    } catch (error: any) {
-      console.error('ElevenLabs TTS error:', error);
-      return res.status(500).json({ error: formatNetworkError(error, 'ElevenLabs TTS') });
-    }
-  });
-
-
-
   // Vite integration
   if (process.env.NODE_ENV !== 'production') {
     process.env.DISABLE_HMR = 'true';
@@ -1811,6 +1765,9 @@ async function startServer() {
       }
     }
   });
+
+  server.keepAliveTimeout = 65000;
+  server.headersTimeout = 66000;
 
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`Server listening on http://0.0.0.0:${PORT}`);

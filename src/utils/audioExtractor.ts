@@ -44,6 +44,112 @@ async function loadVideoArrayBuffer(videoSource: File | string): Promise<ArrayBu
   }
 }
 
+export interface InspectedVideoMetadata {
+  duration: number;
+  width: number;
+  height: number;
+  resolution: string;
+  hasAudio: boolean;
+  format: string;
+  filesize: number;
+  inspectedAt: number;
+}
+
+/**
+ * Inspects a custom uploaded video file or URL for duration, resolution, and audio track.
+ */
+export async function inspectVideoFile(
+  videoSource: File | string,
+  fallbackName = 'video.mp4'
+): Promise<InspectedVideoMetadata> {
+  let objectUrl: string | null = null;
+  const srcUrl =
+    typeof videoSource === 'string'
+      ? videoSource
+      : (objectUrl = URL.createObjectURL(videoSource));
+
+  const filesize = typeof videoSource === 'string' ? 0 : videoSource.size;
+  const name = typeof videoSource === 'string' ? fallbackName : videoSource.name;
+  const format = (name.split('.').pop() || 'mp4').toLowerCase();
+
+  let duration = 0;
+  let width = 0;
+  let height = 0;
+  let videoElementHasAudio: boolean | null = null;
+
+  try {
+    await new Promise<void>((resolve) => {
+      const video = document.createElement('video');
+      video.preload = 'metadata';
+      video.muted = true;
+      video.src = srcUrl;
+
+      const timer = setTimeout(() => resolve(), 6000);
+
+      video.onloadedmetadata = () => {
+        clearTimeout(timer);
+        duration = Number.isFinite(video.duration) ? video.duration : 0;
+        width = video.videoWidth || 0;
+        height = video.videoHeight || 0;
+        const anyVid = video as any;
+        if (typeof anyVid.mozHasAudio === 'boolean') {
+          videoElementHasAudio = anyVid.mozHasAudio;
+        } else if (anyVid.audioTracks && typeof anyVid.audioTracks.length === 'number') {
+          videoElementHasAudio = anyVid.audioTracks.length > 0;
+        }
+        resolve();
+      };
+
+      video.onerror = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+
+    // Verify decodable audio stream via Web Audio API if needed
+    let hasAudio = videoElementHasAudio === true;
+    if (videoElementHasAudio === null || !hasAudio) {
+      try {
+        const arrayBuffer = await loadVideoArrayBuffer(videoSource);
+        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+        if (AudioContextClass) {
+          const audioCtx = new AudioContextClass();
+          try {
+            const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+            hasAudio = decoded.numberOfChannels > 0 && decoded.duration > 0;
+            if (!duration && decoded.duration > 0) {
+              duration = decoded.duration;
+            }
+          } catch {
+            hasAudio = false;
+          } finally {
+            audioCtx.close().catch(() => {});
+          }
+        }
+      } catch {
+        // Keep whatever metadata reported
+      }
+    }
+
+    return {
+      duration: parseFloat(Math.max(1, duration).toFixed(2)),
+      width: width || 1280,
+      height: height || 720,
+      resolution: width && height ? `${width}x${height}` : 'Standard',
+      hasAudio,
+      format,
+      filesize,
+      inspectedAt: Date.now(),
+    };
+  } finally {
+    if (objectUrl) {
+      try {
+        URL.revokeObjectURL(objectUrl);
+      } catch {}
+    }
+  }
+}
+
 export async function extractAudioFromVideo(
   videoSource: File | string,
   maxDurationSeconds = 180
@@ -83,13 +189,13 @@ export async function extractAudioFromVideo(
 }
 
 /**
- * Slice audio track of long videos into chunk-sized PCM WAVs (default 1 min = 60s each)
- * Part 1: 0-1m, Part 2: 1-2m, Part 3: 2-3m ...
+ * Slice audio track of long videos into 30-second (0:30) chunk-sized PCM WAVs for accurate STT & AI analysis.
+ * Chunk 1: 0:00-0:30, Chunk 2: 0:30-1:00, Chunk 3: 1:00-1:30 ...
  */
 export async function extractAudioChunksFromVideo(
   videoSource: File | string,
-  chunkSizeSeconds = 60,
-  fallbackTotalDurationSec = 60
+  chunkSizeSeconds = 30,
+  fallbackTotalDurationSec = 30
 ): Promise<AudioChunkResult[]> {
   const arrayBuffer = await loadVideoArrayBuffer(videoSource);
 
@@ -172,7 +278,8 @@ export async function extractAudioChunksFromVideo(
 export async function extractAllVideoKeyframesBatch(
   videoUrl: string,
   windows: Array<{ partIndex: number; startSec: number; endSec: number }>,
-  framesPerBlock = 5
+  framesPerBlock = 5,
+  isSubtitleOcrMode = false
 ): Promise<Map<number, Array<{ time: number; base64Jpeg: string }>>> {
   const resultMap = new Map<number, Array<{ time: number; base64Jpeg: string }>>();
   for (const w of windows) {
@@ -202,22 +309,33 @@ export async function extractAllVideoKeyframesBatch(
       resolve(resultMap);
     };
 
-    const maxWaitMs = Math.min(45000, Math.max(15000, windows.length * 7500));
+    const maxWaitMs = Math.min(60000, Math.max(15000, windows.length * (isSubtitleOcrMode ? 9000 : 7500)));
     const overallTimeout = setTimeout(finish, maxWaitMs);
 
     video.onloadedmetadata = async () => {
       const duration = video.duration || windows[windows.length - 1]?.endSec || 60;
       const vw = video.videoWidth || 720;
       const vh = video.videoHeight || 1280;
-      const maxDim = 384;
       const canvas = document.createElement('canvas');
-      if (vw >= vh) {
-        canvas.width = maxDim;
-        canvas.height = Math.max(120, Math.round((vh / vw) * maxDim));
+
+      if (isSubtitleOcrMode) {
+        // VideoSubFinder Subtitle Strip Mode:
+        // Focus on bottom 36% of the video where subtitles appear, rendered at high width (840px)
+        // so Chinese characters & English letters have razor-sharp stroke clarity for PaddleOCR!
+        canvas.width = Math.min(960, Math.max(720, vw));
+        const cropH = Math.round(vh * 0.36);
+        canvas.height = Math.round((cropH / vw) * canvas.width);
       } else {
-        canvas.height = maxDim;
-        canvas.width = Math.max(120, Math.round((vw / vh) * maxDim));
+        const maxDim = 384;
+        if (vw >= vh) {
+          canvas.width = maxDim;
+          canvas.height = Math.max(120, Math.round((vh / vw) * maxDim));
+        } else {
+          canvas.height = maxDim;
+          canvas.width = Math.max(120, Math.round((vw / vh) * maxDim));
+        }
       }
+
       const ctx = canvas.getContext('2d');
       if (!ctx) {
         clearTimeout(overallTimeout);
@@ -244,13 +362,13 @@ export async function extractAllVideoKeyframesBatch(
       let corsTainted = false;
 
       for (const t of targets) {
-        if (settled || corsTainted || consecutiveTimeouts >= 3) break;
+        if (settled || corsTainted || consecutiveTimeouts >= 4) break;
 
         const seekOk = await new Promise<boolean>((r) => {
           const seekTimeout = setTimeout(() => {
             video.onseeked = null;
             r(false);
-          }, 1100);
+          }, isSubtitleOcrMode ? 850 : 1100);
           video.onseeked = () => {
             clearTimeout(seekTimeout);
             video.onseeked = null;
@@ -271,8 +389,15 @@ export async function extractAllVideoKeyframesBatch(
         consecutiveTimeouts = 0;
 
         try {
-          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-          const dataUrl = canvas.toDataURL('image/jpeg', 0.55);
+          if (isSubtitleOcrMode) {
+            // VideoSubFinder Subtitle Strip: Crop the bottom 36% bounding box where subtitles are situated
+            const cropY = Math.round(vh * 0.64);
+            const cropH = vh - cropY;
+            ctx.drawImage(video, 0, cropY, vw, cropH, 0, 0, canvas.width, canvas.height);
+          } else {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          }
+          const dataUrl = canvas.toDataURL('image/jpeg', isSubtitleOcrMode ? 0.75 : 0.55);
           const base64 = dataUrl.split(',')[1];
           if (base64) {
             resultMap.get(t.partIndex)?.push({ time: t.time, base64Jpeg: base64 });
