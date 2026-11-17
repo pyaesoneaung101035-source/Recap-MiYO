@@ -757,7 +757,7 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
       <div className="glass-panel rounded-2xl p-5 shadow-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-xl bg-cyan-400 text-zinc-950 flex items-center justify-center text-sm font-black font-mono shadow-lg shadow-cyan-400/20">
-            8
+            6
           </div>
           <div>
             <h2 className="text-base font-bold text-white font-display flex items-center gap-2">
@@ -775,7 +775,7 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
           className="px-3.5 py-2 bg-white/5 hover:bg-white/10 text-zinc-300 text-xs font-semibold rounded-xl transition-all border border-white/10 flex items-center gap-1.5 cursor-pointer self-start sm:self-auto"
         >
           <ArrowLeft className="w-4 h-4" />
-          <span>အဆင့် 7 သို့</span>
+          <span>အဆင့် ၅ သို့</span>
         </button>
       </div>
 

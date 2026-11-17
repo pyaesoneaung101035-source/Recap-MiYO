@@ -694,7 +694,7 @@ async function startServer() {
     }
   });
 
-  // 13a. Chunked video upload endpoint for BGM extraction (bypasses HTTP proxy 32MB body cap)
+  // 13a. Chunked upload endpoint for BGM extraction (idempotent per-chunk files, safe against retries & proxy limits)
   app.post('/api/audio/bgm/upload-chunk', safeUploadChunk, (req, res) => {
     try {
       const rawId = String(req.body?.uploadId || '');
@@ -702,28 +702,41 @@ async function startServer() {
       if (!safeId) {
         return res.status(400).json({ error: 'Invalid uploadId' });
       }
-      if (!req.file || !req.file.buffer) {
-        return res.status(400).json({ error: 'Missing video chunk data' });
+      if (!req.file || !req.file.buffer || req.file.buffer.length === 0) {
+        return res.status(400).json({ error: 'Missing video/audio chunk data' });
       }
       const chunkIndex = Number(req.body?.chunkIndex ?? 0);
-      let ext = path.extname(String(req.body?.fileName || '')).toLowerCase();
-      if (!ext || ext === '.') ext = '.mp4';
-      const safeExt = ext.replace(/[^a-zA-Z0-9.]/g, '').slice(0, 10) || '.mp4';
-      const partPath = path.join(VIDEOS_DIR, `chunk_${safeId}${safeExt}.part`);
+      if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex > 20000) {
+        return res.status(400).json({ error: 'Invalid chunkIndex' });
+      }
+
+      let ext = path.extname(String(req.body?.fileName || '').split('?')[0]).toLowerCase();
+      const allowedExts = new Set(['.mp4', '.mov', '.webm', '.mkv', '.m4v', '.avi', '.wav', '.mp3', '.m4a', '.aac', '.ogg']);
+      const safeExt = allowedExts.has(ext) ? ext : '.mp4';
+      const paddedIdx = String(chunkIndex).padStart(6, '0');
+      const chunkPartPath = path.join(VIDEOS_DIR, `chunk_${safeId}_${paddedIdx}${safeExt}.part`);
 
       if (chunkIndex === 0) {
-        // Remove any stale .part files for the same uploadId before writing chunk 0
+        // Remove any stale .part files for the same uploadId + older abandoned chunks (>2h)
+        const now = Date.now();
         try {
           for (const entry of fs.readdirSync(VIDEOS_DIR)) {
-            if (entry.startsWith(`chunk_${safeId}`) && entry.endsWith('.part')) {
-              fs.unlinkSync(path.join(VIDEOS_DIR, entry));
+            if (!entry.endsWith('.part')) continue;
+            const fullPath = path.join(VIDEOS_DIR, entry);
+            if (entry.startsWith(`chunk_${safeId}_`) || entry === `chunk_${safeId}${safeExt}.part`) {
+              fs.unlinkSync(fullPath);
+            } else if (entry.startsWith('chunk_')) {
+              const st = fs.statSync(fullPath);
+              if (now - st.mtimeMs > 2 * 3600 * 1000) {
+                fs.unlinkSync(fullPath);
+              }
             }
           }
         } catch (_) {}
-        fs.writeFileSync(partPath, req.file.buffer);
-      } else {
-        fs.appendFileSync(partPath, req.file.buffer);
       }
+
+      // Idempotent overwrite for this exact chunk index (safe on network retries)
+      fs.writeFileSync(chunkPartPath, req.file.buffer);
 
       return res.json({
         success: true,
@@ -752,16 +765,48 @@ async function startServer() {
         cleanupVideoAfter = true;
       } else if (typeof req.body?.uploadId === 'string' && req.body.uploadId.trim()) {
         const safeId = req.body.uploadId.trim().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
+        const expectedTotalChunks = Number(req.body?.totalChunks ?? 0);
         if (safeId) {
           const files = fs.readdirSync(VIDEOS_DIR);
-          const partFile = files.find((f) => f.startsWith(`chunk_${safeId}`) && f.endsWith('.part'));
-          if (partFile) {
-            const fullPartPath = path.join(VIDEOS_DIR, partFile);
-            const assembledPath = fullPartPath.replace(/\.part$/, '');
-            fs.renameSync(fullPartPath, assembledPath);
+          const partFiles = files
+            .filter((f) => f.startsWith(`chunk_${safeId}_`) && f.endsWith('.part'))
+            .sort();
+
+          if (partFiles.length > 0) {
+            if (expectedTotalChunks > 0 && partFiles.length !== expectedTotalChunks) {
+              return res.status(400).json({
+                error: `ဖိုင်အစိတ်အပိုင်းများ မစုံလင်သေးပါ (${partFiles.length}/${expectedTotalChunks})။ ထပ်မံကြိုးစားပေးပါ။`,
+              });
+            }
+            const firstMatch = partFiles[0].match(/(\.[a-zA-Z0-9]+)\.part$/);
+            const safeExt = firstMatch?.[1] || '.mp4';
+            const assembledPath = path.join(VIDEOS_DIR, `assembled_${safeId}${safeExt}`);
+            const fd = fs.openSync(assembledPath, 'w');
+            try {
+              for (const pf of partFiles) {
+                const fullPartPath = path.join(VIDEOS_DIR, pf);
+                const chunkBuf = fs.readFileSync(fullPartPath);
+                fs.writeSync(fd, chunkBuf);
+                try {
+                  fs.unlinkSync(fullPartPath);
+                } catch (_) {}
+              }
+            } finally {
+              fs.closeSync(fd);
+            }
             tempUploadedPath = assembledPath;
             targetVideoPath = assembledPath;
             cleanupVideoAfter = true;
+          } else {
+            const legacyPart = files.find((f) => f.startsWith(`chunk_${safeId}`) && f.endsWith('.part'));
+            if (legacyPart) {
+              const fullPartPath = path.join(VIDEOS_DIR, legacyPart);
+              const assembledPath = fullPartPath.replace(/\.part$/, '');
+              fs.renameSync(fullPartPath, assembledPath);
+              tempUploadedPath = assembledPath;
+              targetVideoPath = assembledPath;
+              cleanupVideoAfter = true;
+            }
           }
         }
       } else if (req.body?.videoPath && fs.existsSync(req.body.videoPath)) {
@@ -814,7 +859,8 @@ async function startServer() {
 
   // 14. Built-in BGM Generator: Poll live job progress (0% -> 100%)
   app.get('/api/audio/bgm/status/:jobId', (req, res) => {
-    const job = getBuiltinBgmJob(req.params.jobId);
+    res.setHeader('Cache-Control', 'no-store');
+    const job = getBuiltinBgmJob(req.params.jobId, EXPORTS_DIR);
     if (!job) {
       return res.status(404).json({ error: 'BGM extraction job not found' });
     }
@@ -1768,6 +1814,7 @@ async function startServer() {
 
   server.keepAliveTimeout = 65000;
   server.headersTimeout = 66000;
+  server.requestTimeout = 600000;
 
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`Server listening on http://0.0.0.0:${PORT}`);

@@ -61,11 +61,11 @@ export const EdgePanel: React.FC<EdgePanelProps> = ({
       </button>
 
       <button
-        onClick={() => setCurrentStep(7)}
+        onClick={() => setCurrentStep(5)}
         className={`p-3 rounded-full transition-all shadow-lg cursor-pointer ${
-          currentStep === 7 ? 'bg-amber-400 text-zinc-950 font-black' : 'bg-white/5 hover:bg-white/15 text-zinc-300'
+          currentStep === 5 ? 'bg-amber-400 text-zinc-950 font-black' : 'bg-white/5 hover:bg-white/15 text-zinc-300'
         }`}
-        title="Step 7: Video Editing Studio"
+        title="Step 5: Video Editing Studio"
       >
         <Sliders className="w-4 h-4" />
       </button>

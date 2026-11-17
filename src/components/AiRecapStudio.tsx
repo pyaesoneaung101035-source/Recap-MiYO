@@ -31,7 +31,6 @@ import {
 import { ProjectState, TranscriptSegment, Step3ScriptStyle, VoiceOption } from '../types';
 import {
   generateTimestampedTranscript,
-  generateSceneRecapNarration,
   generateShortBridgeLineForSlot,
   exportToDubbingPlanJSON,
   generateBurmeseDubbingSRT,
@@ -316,15 +315,40 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
     }
   };
 
+  const getEngineShortLabel = (eng: 'assemblyai' | 'videosubfinder_paddleocr' | 'faster_whisper' | 'gemini') => {
+    switch (eng) {
+      case 'assemblyai':
+        return 'Assembly';
+      case 'videosubfinder_paddleocr':
+        return 'Vd+OCR';
+      case 'faster_whisper':
+        return 'Faster whisper';
+      case 'gemini':
+        return 'Gemini';
+      default:
+        return 'Vd+OCR';
+    }
+  };
+
+  const getEngineFullLabel = (eng: 'assemblyai' | 'videosubfinder_paddleocr' | 'faster_whisper' | 'gemini') => {
+    switch (eng) {
+      case 'assemblyai':
+        return 'Assembly Generate';
+      case 'videosubfinder_paddleocr':
+        return 'VideoSubFinder + PaddleOCR';
+      case 'faster_whisper':
+        return 'Faster-Whisper Generate';
+      case 'gemini':
+        return 'Gemini Engine';
+      default:
+        return 'VideoSubFinder + PaddleOCR';
+    }
+  };
+
   useEffect(() => {
     const keys = loadApiKeys();
     setHasAssemblyAiKey(Boolean(keys.assemblyAiKey));
-    if (keys.assemblyAiKey && narrationMode === 'dialogue_dub') {
-      setSelectedEngine('assemblyai');
-    } else {
-      setSelectedEngine('gemini');
-    }
-  }, [narrationMode]);
+  }, []);
 
   const videoParts = narrationMode === 'scene_recap_30s'
     ? getRecapSlots(project.videoDuration || 360, slotSeconds)
@@ -343,19 +367,21 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
 
   const handleGenerateScript = async (
     overrideStyle?: Step3ScriptStyle,
-    overrideTimingMode?: 'scene_recap_30s' | 'dialogue_dub'
+    overrideEngine?: 'assemblyai' | 'videosubfinder_paddleocr' | 'faster_whisper' | 'gemini'
   ) => {
     const activeStyle: Step3ScriptStyle = overrideStyle || scriptStyle;
-    const activeTimingMode: 'scene_recap_30s' | 'dialogue_dub' =
-      overrideTimingMode || narrationMode;
+    const activeEngine = overrideEngine || selectedEngine;
 
     if (overrideStyle) {
       setSelectedPartFilter('all');
       setProject((prev) => ({
         ...prev,
         step3ScriptStyle: activeStyle,
-        narrationMode: activeTimingMode,
       }));
+    }
+
+    if (overrideEngine) {
+      setSelectedEngine(overrideEngine);
     }
 
     const videoSource = project.videoFile || project.videoUrl;
@@ -364,23 +390,26 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
       return;
     }
 
-    if (activeTimingMode === 'dialogue_dub' && selectedEngine === 'assemblyai' && !hasAssemblyAiKey && activeStyle !== 'translation') {
+    if (activeEngine === 'assemblyai' && !hasAssemblyAiKey) {
       const msg = 'AssemblyAI API Key မတွေ့ရှိပါ။ ကျေးဇူးပြု၍ Step 1 တွင် AssemblyAI Key (32-digit Token) ကို ထည့်သွင်းပေးပါ။';
       setErrorMessage(msg);
       return;
     }
 
-    const modeBadgeLabel =
+    const styleName =
       activeStyle === 'narrator'
-        ? '1. Narrator (တကယ့် စကားပြောအသံထွက် Voiceover)'
+        ? 'Narrator'
         : activeStyle === 'story'
-          ? '2. Story (Story ပြောပြသလို ဇာတ်လမ်းစာသား)'
-          : '3. Translation (Video Subtitle + Voice ဘာသာပြန်)';
+          ? 'Story'
+          : 'Translation';
+
+    const engineName = getEngineShortLabel(activeEngine);
+    const engineFull = getEngineFullLabel(activeEngine);
 
     setIsGenerating(true);
     setGenerateStage(1);
     setProgressPercent(4);
-    setStatusMessage('၁. မူရင်းဗီဒီယို ကြာချိန်၊ ရုပ်ထွက်နှင့် အသံဖိုင်ကို စစ်ဆေးနေပါသည်...');
+    setStatusMessage(`၁. [${engineName}] မူရင်းဗီဒီယို ကြာချိန်၊ ရုပ်ထွက်နှင့် အသံလှိုင်းကို စစ်ဆေးနေပါသည်...`);
     setErrorMessage(null);
 
     const lockedVoice = project.lockedVoice || 'Thiha';
@@ -388,7 +417,6 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
     const narratorPitch = project.voicePitch ?? 0;
 
     try {
-      // STAGE 1: Inspect original video (duration, resolution, audio track)
       const inspection = await inspectVideoFile(
         videoSource,
         project.videoName || 'custom_video.mp4'
@@ -405,95 +433,62 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
 
       setProgressPercent(12);
       setStatusMessage(
-        `၁. Video စစ်ပြီး (${inspection.resolution} · ${formatMinSec(totalDuration)} · Audio ${inspection.hasAudio ? 'OK ✓' : 'Visual'}) — စကားပြောစာသား ထုတ်နေပါသည်...`
+        `၁. [${engineName}] Video စစ်ပြီး (${inspection.resolution} · ${formatMinSec(totalDuration)}) — စာသား စတင်ထုတ်ယူနေပါသည်...`
       );
 
-      if (activeTimingMode === 'scene_recap_30s') {
-        const recapSlots = await generateSceneRecapNarration(
-          project.videoName || 'Uploaded Video',
-          totalDuration,
-          customPrompt,
-          project.videoFile,
-          project.videoUrl,
-          (msg, pct = 20) => {
-            const st: 1 | 2 | 3 = pct < 35 ? 1 : pct < 75 ? 2 : 3;
-            setGenerateStage(st);
-            setStatusMessage(msg);
-            setProgressPercent(Math.min(92, Math.round(12 + (pct / 100) * 80)));
-          },
-          selectedGeminiModel,
-          slotSeconds,
-          activeStyle
-        );
-
-        setGenerateStage(3);
-        setProgressPercent(96);
-        const scriptSlots: TranscriptSegment[] = recapSlots.map((s) => ({
-          ...s,
-          voice: lockedVoice,
-          speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
-          scriptStyle: activeStyle,
-          tone: narratorTone,
-          pitch: narratorPitch,
-          audioUrl: undefined,
-          audioDuration: undefined,
-        }));
-
-        setProgressPercent(100);
-        setProject((prev) => ({
-          ...prev,
-          narrationMode: 'scene_recap_30s',
-          step3ScriptStyle: activeStyle,
-          lockedVoice,
-          segments: scriptSlots,
-        }));
-
-        setStatusMessage(
-          `🎉 [${modeBadgeLabel}] အဆင့် (၁→၃) ပြီးစီးပါပြီ — Slot ${scriptSlots.length} ပိုင်း Narrator စာသား ထုတ်ယူပြီးပါပြီ! အဆင့် ၄ (Generate All Voices) တွင် အသံ + 0:30 Sync ဆက်လုပ်နိုင်ပါသည်။`
-        );
-        return;
-      }
-
-      // STAGE 1 (STT) + STAGE 2 (Timestamps, Sequential Translation, Scene Tracking) + STAGE 3 (Single-Narrator Script)
       let rawSegments: TranscriptSegment[] = [];
 
-      if (selectedEngine === 'assemblyai' && activeStyle !== 'translation') {
-        try {
-          if (!hasAssemblyAiKey) {
-            throw new Error('AssemblyAI Key မတွေ့ရှိပါ။ ကျေးဇူးပြု၍ Step 1 တွင် AssemblyAI Key (32-digit Token) ထည့်သွင်းပေးပါ။');
+      if (activeEngine === 'assemblyai') {
+        setGenerateStage(1);
+        setStatusMessage('၁. [Assembly] အသံဖိုင်မှ Speech-to-Text စတင် ထုတ်ယူနေပါသည်...');
+        setProgressPercent(25);
+        rawSegments = await transcribeVideoWithAssemblyAi(
+          project.videoFile || project.videoUrl!,
+          {
+            onProgress: (msg) => {
+              setStatusMessage(msg);
+              if (activeStyle === 'translation') {
+                if (msg.includes('Gemini') || msg.includes('ဘာသာပြန်') || msg.includes('JSON')) {
+                  setGenerateStage(2);
+                  setProgressPercent(65);
+                }
+              } else {
+                if (msg.includes('Gemini')) {
+                  setGenerateStage(2);
+                  setProgressPercent(40);
+                } else if (msg.includes('Timeline') || msg.includes('အခိုက်အတန့်')) {
+                  setGenerateStage(3);
+                  setProgressPercent(60);
+                } else if (msg.includes('ချိန်ညှိ') || msg.includes('realign')) {
+                  setGenerateStage(4);
+                  setProgressPercent(80);
+                }
+              }
+            },
+            scriptStyle: activeStyle,
           }
-          setGenerateStage(2);
-          setStatusMessage('၂. [Assembly Generator] စကားပြောစာသား + အချိန်မှတ်တမ်း ဘာသာပြန်နေပါသည်...');
-          setProgressPercent(45);
-          rawSegments = await transcribeVideoWithAssemblyAi(
-            project.videoFile || project.videoUrl!,
-            {
-              onProgress: (msg) => setStatusMessage(msg),
-            }
-          );
-        } catch (assemblyErr: any) {
-          console.warn('AssemblyAI fallback notice:', assemblyErr);
-          const errMsg = `AssemblyAI Error: ${assemblyErr.message || 'AssemblyAI ချိတ်ဆက်မှု အဆင်မပြေပါ'}။`;
-          setErrorMessage(errMsg);
-          setIsGenerating(false);
-          setGenerateStage(null);
-          return;
-        }
+        );
       } else {
+        const customPromptContext =
+          activeEngine === 'gemini'
+            ? customPrompt.trim()
+            : activeEngine === 'videosubfinder_paddleocr'
+              ? `${customPrompt ? customPrompt + ' | ' : ''}VideoSubFinder + PaddleOCR Hardsub Extraction: Perform OCR-level text detection on all on-screen burnt-in subtitles, captions, and text overlays in the video frames. Extract the exact text shown on screen with frame timestamps (start/end), transcribe original subtitle text into originalText, and translate into Burmese in text.`
+              : `${customPrompt ? customPrompt + ' | ' : ''}Faster-Whisper high-speed STT: Transcribe all spoken speech quickly and accurately with precise start/end timestamps.`;
+
         rawSegments = await generateTimestampedTranscript(
           project.videoName || 'Uploaded Video',
           totalDuration,
-          selectedEngine === 'videosubfinder_paddleocr'
-            ? `${customPrompt ? customPrompt + ' | ' : ''}VideoSubFinder + PaddleOCR Hardsub Extraction: Perform OCR-level text detection on all on-screen burnt-in subtitles, captions, and text overlays in the video frames. Extract the exact text shown on screen with frame timestamps (start/end), transcribe original subtitle text into originalText, and translate into Burmese in text.`
-            : `${customPrompt ? customPrompt + ' | ' : ''}Single Burmese Narrator storytelling retelling across chronological 0:30 parts (no multi-character voice splitting).`,
+          customPromptContext,
           project.videoFile,
           project.videoUrl,
           (msg, pct = 20) => {
             if (activeStyle === 'translation') {
-              const st = pct < 50 ? 1 : 2;
+              const st: 1 | 2 = pct < 50 ? 1 : 2;
               setGenerateStage(st);
             } else {
-              const st = pct < 20 ? 1 : pct < 45 ? 2 : pct < 70 ? 3 : pct < 90 ? 4 : 5;
+              const st: 1 | 2 | 3 | 4 | 5 =
+                pct < 20 ? 1 : pct < 45 ? 2 : pct < 70 ? 3 : pct < 90 ? 4 : 5;
               setGenerateStage(st);
             }
             setStatusMessage(msg);
@@ -501,7 +496,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
           },
           selectedGeminiModel,
           activeStyle,
-          selectedEngine
+          activeEngine
         );
       }
 
@@ -525,7 +520,12 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
           voice: lockedVoice,
           tone: narratorTone,
           pitch: narratorPitch,
-          speaker: activeStyle !== 'translation' ? 'Narrator (ဇာတ်ကြောင်းပြောသူ)' : (s.speaker || 'Narrator (ဇာတ်ကြောင်းပြောသူ)'),
+          speaker:
+            activeStyle === 'translation'
+              ? (s.speaker || 'Translator (ဘာသာပြန်)')
+              : activeStyle === 'story'
+                ? 'Storyteller (ဇာတ်လမ်းပြောသူ)'
+                : 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
           minutePartIndex: blockPart,
           sceneShotId: s.sceneShotId || `Part ${blockPart} · Shot ${idx + 1}`,
           syllableCount: countBurmeseSyllables(s.myanmarTranslation || ''),
@@ -545,10 +545,10 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
 
       const minuteBlocks = getMinuteBlocks(totalDuration);
       setStatusMessage(
-        `🎉 [${modeBadgeLabel}] အဆင့် (၁→၃) ပြီးစီးပါပြီ! 0:30 Parts ${minuteBlocks.length} ပိုင်း (${scriptSegments.length} Segments) Narrator စာသား ထုတ်ယူပြီးပါပြီ — အဆင့် ၄ (Generate All Voices) တွင် အသံ + 0:30 Sync ဆက်လုပ်ပါ။`
+        `🎉 [${styleName} + ${engineFull}] အဆင့်များ အောင်မြင်စွာ ပြီးစီးပါပြီ! 0:30 Parts ${minuteBlocks.length} ပိုင်း (${scriptSegments.length} Segments) စာသား ထုတ်ယူပြီးပါပြီ — အဆင့် ၄ (Generate All Voices) တွင် အသံ + 0:30 Sync ဆက်လုပ်ပါ။`
       );
     } catch (err: any) {
-      console.error('Failed to generate auto dubbing:', err);
+      console.error('Failed to generate script:', err);
       setErrorMessage(err.message || 'AI စာသားထုတ်လုပ်မှု မအောင်မြင်ပါ။ API Key ကို စစ်ဆေးပါ။');
     } finally {
       setProgressPercent(100);
@@ -651,233 +651,572 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
         </div>
       </div>
 
-      {/* CORE 3 FUNCTIONS FOR STEP 3: 1. NARRATOR | 2. STORY | 3. TRANSLATION */}
-      <div className="space-y-3">
-        <div className="flex items-center justify-between">
-          <span className="text-xs font-black text-white font-display flex items-center gap-2">
-            <Sparkles className="w-4 h-4 text-cyan-400" />
-            <span>အဆင့် ၃ — အဓိက စာသားထုတ်လုပ်မှု စနစ် ၃ မျိုး (Narrator / Story / Translation)</span>
-          </span>
-          <span className="text-[10px] font-mono px-2.5 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
-            Active: {scriptStyle.toUpperCase()}
-          </span>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          {/* 1. NARRATOR */}
-          <div
-            onClick={() => selectStep3Style('narrator')}
-            className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
-              scriptStyle === 'narrator'
-                ? 'bg-gradient-to-br from-cyan-500/20 via-teal-500/10 to-black/60 border-cyan-400 shadow-xl ring-1 ring-cyan-400/50'
-                : 'bg-black/40 border-white/10 hover:border-white/25'
-            }`}
-          >
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <span className="w-7 h-7 rounded-xl bg-cyan-400/20 text-cyan-300 border border-cyan-400/40 flex items-center justify-center">
-                    <Mic className="w-3.5 h-3.5" />
-                  </span>
-                  <span className="text-sm font-black text-white font-display">
-                    1. Narrator
-                  </span>
-                </div>
-                {scriptStyle === 'narrator' && (
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-cyan-400 text-zinc-950">
-                    Active
-                  </span>
-                )}
-              </div>
-              <p className="text-[11px] text-zinc-300 font-myanmar leading-relaxed">
-                Video ကို စာသားအနေနဲ့မထုတ်ဘဲ အပြင်မှာ စကားပြောနေတဲ့အတိုင်း တကယ့် Narrator အသံထွက်စေဖို့ စာသားထုတ်ပေးပါမည်။
-              </p>
+      {/* 3 CORE USER-DEFINED STEPS IN STEP 3:
+          ၁။ ထုတ်ချင်တဲ့ ပုံစံရွေး (Narrator, Story, Translation)
+          ၂။ Video TTS ထုတ်မည့် Engine (Assembly, Vd+OCR, Faster whisper)
+          ၃။ Generate မည် (Prompt, Settings, Generate Button)
+      */}
+      <div className="space-y-4">
+        {/* ၁။ ထုတ်ချင်တဲ့ ပုံစံရွေး */}
+        <div className="space-y-2.5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="w-6 h-6 rounded-lg bg-cyan-400 text-zinc-950 flex items-center justify-center text-xs font-black shadow">
+                ၁
+              </span>
+              <h3 className="text-sm font-black text-white font-display flex items-center gap-2">
+                <span>ထုတ်ချင်တဲ့ ပုံစံရွေး</span>
+                <span className="text-xs font-normal text-zinc-400 font-myanmar">(Narrator / Story / Translation)</span>
+              </h3>
             </div>
-            <button
-              type="button"
-              disabled={isGenerating}
-              onClick={(e) => {
-                e.stopPropagation();
-                handleGenerateScript('narrator');
-              }}
-              className={`w-full py-2 px-3 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 ${
+            <span className="text-[11px] font-mono px-2.5 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-bold">
+              Active: {scriptStyle.toUpperCase()}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {/* 1. NARRATOR */}
+            <div
+              onClick={() => selectStep3Style('narrator')}
+              className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
                 scriptStyle === 'narrator'
-                  ? 'bg-gradient-to-r from-cyan-400 to-teal-400 text-zinc-950 shadow-lg'
-                  : 'bg-white/10 hover:bg-cyan-400/20 text-cyan-200 border border-white/10'
+                  ? 'bg-gradient-to-br from-cyan-500/20 via-teal-500/10 to-black/60 border-cyan-400 shadow-xl ring-2 ring-cyan-400/50'
+                  : 'bg-black/40 border-white/10 hover:border-white/25 hover:bg-white/[0.03]'
               }`}
             >
-              <Mic className="w-3.5 h-3.5" />
-              <span>1. Narrator စာသားထုတ်မည်</span>
-            </button>
-          </div>
-
-          {/* 2. STORY */}
-          <div
-            onClick={() => selectStep3Style('story')}
-            className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
-              scriptStyle === 'story'
-                ? 'bg-gradient-to-br from-emerald-500/20 via-teal-500/10 to-black/60 border-emerald-400 shadow-xl ring-1 ring-emerald-400/50'
-                : 'bg-black/40 border-white/10 hover:border-white/25'
-            }`}
-          >
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <span className="w-7 h-7 rounded-xl bg-emerald-400/20 text-emerald-300 border border-emerald-400/40 flex items-center justify-center">
-                    <BookOpen className="w-3.5 h-3.5" />
-                  </span>
-                  <span className="text-sm font-black text-white font-display">
-                    2. Story
-                  </span>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
+                    scriptStyle === 'narrator' ? 'bg-cyan-400 text-zinc-950 font-black shadow-md' : 'bg-cyan-400/20 text-cyan-300 border border-cyan-400/40'
+                  }`}>
+                    <Mic className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-black text-white font-display">1. Narrator</h4>
+                    <span className="text-[10px] text-cyan-300 font-mono">Spoken Voiceover</span>
+                  </div>
                 </div>
-                {scriptStyle === 'story' && (
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-400 text-zinc-950">
-                    Active
-                  </span>
-                )}
+                <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all ${
+                  scriptStyle === 'narrator' ? 'bg-cyan-400 border-cyan-400 text-zinc-950' : 'border-white/30'
+                }`}>
+                  {scriptStyle === 'narrator' && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                </div>
               </div>
               <p className="text-[11px] text-zinc-300 font-myanmar leading-relaxed">
-                Video တစ်ခုလုံးကို လူတစ်ယောက် Story ပြောနေသလိုမျိုး ဇာတ်အိမ်ဖွဲ့ပြီး ဆွဲဆောင်မှုရှိတဲ့ စာသားထုတ်ပေးပါမည်။
+                Video ကို စာအုပ်ဆန်ဆန် စာသားမဟုတ်ဘဲ အပြင်မှာ စကားပြောနေတဲ့အတိုင်း တကယ့် Narrator အသံထွက်စေမည့် သဘာဝစကားပြော စာသားထုတ်ပေးပါမည်။
               </p>
+              <div className="pt-1">
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                  scriptStyle === 'narrator' ? 'bg-cyan-400/30 text-cyan-200 border border-cyan-400/50' : 'bg-white/5 text-zinc-400'
+                }`}>
+                  {scriptStyle === 'narrator' ? '✓ ရွေးချယ်ထားသည်' : 'ရွေးချယ်ရန် နှိပ်ပါ'}
+                </span>
+              </div>
             </div>
-            <button
-              type="button"
-              disabled={isGenerating}
-              onClick={(e) => {
-                e.stopPropagation();
-                handleGenerateScript('story');
-              }}
-              className={`w-full py-2 px-3 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 ${
+
+            {/* 2. STORY */}
+            <div
+              onClick={() => selectStep3Style('story')}
+              className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
                 scriptStyle === 'story'
-                  ? 'bg-gradient-to-r from-emerald-400 to-teal-400 text-zinc-950 shadow-lg'
-                  : 'bg-white/10 hover:bg-emerald-400/20 text-emerald-200 border border-white/10'
+                  ? 'bg-gradient-to-br from-emerald-500/20 via-teal-500/10 to-black/60 border-emerald-400 shadow-xl ring-2 ring-emerald-400/50'
+                  : 'bg-black/40 border-white/10 hover:border-white/25 hover:bg-white/[0.03]'
               }`}
             >
-              <BookOpen className="w-3.5 h-3.5" />
-              <span>2. Story စာသားထုတ်မည်</span>
-            </button>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
+                    scriptStyle === 'story' ? 'bg-emerald-400 text-zinc-950 font-black shadow-md' : 'bg-emerald-400/20 text-emerald-300 border border-emerald-400/40'
+                  }`}>
+                    <BookOpen className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-black text-white font-display">2. Story</h4>
+                    <span className="text-[10px] text-emerald-300 font-mono">Storytelling Narrative</span>
+                  </div>
+                </div>
+                <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all ${
+                  scriptStyle === 'story' ? 'bg-emerald-400 border-emerald-400 text-zinc-950' : 'border-white/30'
+                }`}>
+                  {scriptStyle === 'story' && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                </div>
+              </div>
+              <p className="text-[11px] text-zinc-300 font-myanmar leading-relaxed">
+                Video တစ်ခုလုံးကို လူတစ်ယောက် Story ပြောပြနေသလိုမျိုး ဇာတ်အိမ်ဖွဲ့ပြီး ဆွဲဆောင်မှုရှိတဲ့ ဇာတ်လမ်းဆန်ဆန် စာသားထုတ်ပေးပါမည်။
+              </p>
+              <div className="pt-1">
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                  scriptStyle === 'story' ? 'bg-emerald-400/30 text-emerald-200 border border-emerald-400/50' : 'bg-white/5 text-zinc-400'
+                }`}>
+                  {scriptStyle === 'story' ? '✓ ရွေးချယ်ထားသည်' : 'ရွေးချယ်ရန် နှိပ်ပါ'}
+                </span>
+              </div>
+            </div>
+
+            {/* 3. TRANSLATION */}
+            <div
+              onClick={() => selectStep3Style('translation')}
+              className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
+                scriptStyle === 'translation'
+                  ? 'bg-gradient-to-br from-amber-500/20 via-orange-500/10 to-black/60 border-amber-400 shadow-xl ring-2 ring-amber-400/50'
+                  : 'bg-black/40 border-white/10 hover:border-white/25 hover:bg-white/[0.03]'
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
+                    scriptStyle === 'translation' ? 'bg-amber-400 text-zinc-950 font-black shadow-md' : 'bg-amber-400/20 text-amber-300 border border-amber-400/40'
+                  }`}>
+                    <Languages className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-black text-white font-display">3. Translation</h4>
+                    <span className="text-[10px] text-amber-300 font-mono">Direct Subtitle & Speech</span>
+                  </div>
+                </div>
+                <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all ${
+                  scriptStyle === 'translation' ? 'bg-amber-400 border-amber-400 text-zinc-950' : 'border-white/30'
+                }`}>
+                  {scriptStyle === 'translation' && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                </div>
+              </div>
+              <p className="text-[11px] text-zinc-300 font-myanmar leading-relaxed">
+                Video ထဲက Chinese/English Subtitle နှင့် Voice အသံတွေကို အကုန်အစင် ဖတ်ယူပြီး မူရင်းအတိုင်း တိကျတဲ့ မြန်မာဘာသာပြန် စာသားထုတ်ပေးပါမည်။
+              </p>
+              <div className="pt-1">
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                  scriptStyle === 'translation' ? 'bg-amber-400/30 text-amber-200 border border-amber-400/50' : 'bg-white/5 text-zinc-400'
+                }`}>
+                  {scriptStyle === 'translation' ? '✓ ရွေးချယ်ထားသည်' : 'ရွေးချယ်ရန် နှိပ်ပါ'}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* ၂။ Video TTS ထုတ်မည့် Engine */}
+        <div className="space-y-2.5 pt-1">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="w-6 h-6 rounded-lg bg-teal-400 text-zinc-950 flex items-center justify-center text-xs font-black shadow">
+                ၂
+              </span>
+              <h3 className="text-sm font-black text-white font-display flex items-center gap-2">
+                <span>Video TTS ထုတ်မည့် Engine</span>
+                <span className="text-xs font-normal text-zinc-400 font-myanmar">(Assembly, Vd+OCR, Faster whisper, Gemini)</span>
+              </h3>
+            </div>
+            <span className="text-[11px] font-mono px-2.5 py-0.5 rounded-full bg-teal-500/15 text-teal-300 border border-teal-500/30 font-bold">
+              Engine: {getEngineShortLabel(selectedEngine)}
+            </span>
           </div>
 
-          {/* 3. TRANSLATION */}
-          <div
-            onClick={() => selectStep3Style('translation')}
-            className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
-              scriptStyle === 'translation'
-                ? 'bg-gradient-to-br from-amber-500/20 via-orange-500/10 to-black/60 border-amber-400 shadow-xl ring-1 ring-amber-400/50'
-                : 'bg-black/40 border-white/10 hover:border-white/25'
-            }`}
-          >
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <span className="w-7 h-7 rounded-xl bg-amber-400/20 text-amber-300 border border-amber-400/40 flex items-center justify-center">
-                    <Languages className="w-3.5 h-3.5" />
-                  </span>
-                  <span className="text-sm font-black text-white font-display">
-                    3. Translation
-                  </span>
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+            {/* 1. Assembly */}
+            <div
+              onClick={() => setSelectedEngine('assemblyai')}
+              className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
+                selectedEngine === 'assemblyai'
+                  ? 'bg-blue-500/20 border-blue-400 shadow-xl ring-2 ring-blue-400/50'
+                  : 'bg-black/40 border-white/10 hover:border-white/25 hover:bg-white/[0.03]'
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
+                    selectedEngine === 'assemblyai' ? 'bg-blue-400 text-zinc-950 font-black shadow-md' : 'bg-blue-400/20 text-blue-300 border border-blue-400/40'
+                  }`}>
+                    <Radio className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-black text-white font-display">Assembly</h4>
+                    <span className="text-[10px] text-blue-300 font-mono">Assembly Generate</span>
+                  </div>
                 </div>
-                {scriptStyle === 'translation' && (
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-400 text-zinc-950">
-                    Active
+                <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all ${
+                  selectedEngine === 'assemblyai' ? 'bg-blue-400 border-blue-400 text-zinc-950' : 'border-white/30'
+                }`}>
+                  {selectedEngine === 'assemblyai' && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                </div>
+              </div>
+              <p className="text-[11px] text-zinc-300 font-myanmar leading-relaxed">
+                AssemblyAI API ဖြင့် Speech-to-Text ပြုလုပ်ပြီး Gemini API မှ မြန်မာဘာသာပြန်ဆို၍ စာသား ထုတ်ပေးပါမည်။
+              </p>
+              <div className="flex items-center justify-between gap-2 pt-1">
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                  selectedEngine === 'assemblyai' ? 'bg-blue-400/30 text-blue-200 border border-blue-400/50' : 'bg-white/5 text-zinc-400'
+                }`}>
+                  {selectedEngine === 'assemblyai' ? '✓ ရွေးချယ်ထားသည်' : 'ရွေးချယ်ရန် နှိပ်ပါ'}
+                </span>
+                {hasAssemblyAiKey ? (
+                  <span className="text-[9px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-bold">
+                    Connected
+                  </span>
+                ) : (
+                  <span className="text-[9px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-bold">
+                    Requires Token
                   </span>
                 )}
               </div>
-              <p className="text-[11px] text-zinc-300 font-myanmar leading-relaxed">
-                Video ထဲက On-screen Subtitle နှင့် Voice အသံတွေကို ဖတ်ရှုပြီး တိကျတဲ့ မြန်မာဘာသာပြန် စာသားထုတ်ပေးပါမည်။
-              </p>
             </div>
-            <button
-              type="button"
-              disabled={isGenerating}
-              onClick={(e) => {
-                e.stopPropagation();
-                handleGenerateScript('translation', 'dialogue_dub');
-              }}
-              className={`w-full py-2 px-3 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 ${
-                scriptStyle === 'translation'
-                  ? 'bg-gradient-to-r from-amber-400 to-orange-400 text-zinc-950 shadow-lg'
-                  : 'bg-white/10 hover:bg-amber-400/20 text-amber-200 border border-white/10'
+
+            {/* 2. Vd+OCR */}
+            <div
+              onClick={() => setSelectedEngine('videosubfinder_paddleocr')}
+              className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
+                selectedEngine === 'videosubfinder_paddleocr'
+                  ? 'bg-cyan-500/20 border-cyan-400 shadow-xl ring-2 ring-cyan-400/50'
+                  : 'bg-black/40 border-white/10 hover:border-white/25 hover:bg-white/[0.03]'
               }`}
             >
-              <Languages className="w-3.5 h-3.5" />
-              <span>3. Translation ဘာသာပြန်ထုတ်မည်</span>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
+                    selectedEngine === 'videosubfinder_paddleocr' ? 'bg-cyan-400 text-zinc-950 font-black shadow-md' : 'bg-cyan-400/20 text-cyan-300 border border-cyan-400/40'
+                  }`}>
+                    <ScanText className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-black text-white font-display">Vd+OCR</h4>
+                    <span className="text-[10px] text-cyan-300 font-mono">VideoSubFinder + PaddleOCR</span>
+                  </div>
+                </div>
+                <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all ${
+                  selectedEngine === 'videosubfinder_paddleocr' ? 'bg-cyan-400 border-cyan-400 text-zinc-950' : 'border-white/30'
+                }`}>
+                  {selectedEngine === 'videosubfinder_paddleocr' && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                </div>
+              </div>
+              <p className="text-[11px] text-zinc-300 font-myanmar leading-relaxed">
+                Custom Upload Video မှ Subtitle စာတန်းထိုးများကို Hardsub OCR ဖြင့် ရှာဖွေဖတ်ယူပြီး Transcript နှင့် မြန်မာဘာသာပြန် ထုတ်ပေးပါမည်။
+              </p>
+              <div className="flex items-center justify-between gap-2 pt-1">
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                  selectedEngine === 'videosubfinder_paddleocr' ? 'bg-cyan-400/30 text-cyan-200 border border-cyan-400/50' : 'bg-white/5 text-zinc-400'
+                }`}>
+                  {selectedEngine === 'videosubfinder_paddleocr' ? '✓ ရွေးချယ်ထားသည်' : 'ရွေးချယ်ရန် နှိပ်ပါ'}
+                </span>
+                <span className="text-[9px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-bold">
+                  ★ Subtitle OCR (Recommended)
+                </span>
+              </div>
+            </div>
+
+            {/* 3. Faster whisper */}
+            <div
+              onClick={() => setSelectedEngine('faster_whisper')}
+              className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
+                selectedEngine === 'faster_whisper'
+                  ? 'bg-emerald-500/20 border-emerald-400 shadow-xl ring-2 ring-emerald-400/50'
+                  : 'bg-black/40 border-white/10 hover:border-white/25 hover:bg-white/[0.03]'
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
+                    selectedEngine === 'faster_whisper' ? 'bg-emerald-400 text-zinc-950 font-black shadow-md' : 'bg-emerald-400/20 text-emerald-300 border border-emerald-400/40'
+                  }`}>
+                    <Zap className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-black text-white font-display">Faster whisper</h4>
+                    <span className="text-[10px] text-emerald-300 font-mono">Faster-Whisper Generate</span>
+                  </div>
+                </div>
+                <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all ${
+                  selectedEngine === 'faster_whisper' ? 'bg-emerald-400 border-emerald-400 text-zinc-950' : 'border-white/30'
+                }`}>
+                  {selectedEngine === 'faster_whisper' && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                </div>
+              </div>
+              <p className="text-[11px] text-zinc-300 font-myanmar leading-relaxed">
+                Faster-whisper (CPU mode int8) ဖြင့် အသံဖိုင်မှ Speech-to-Text အမြန် ပြုလုပ်ပြီး Gemini ဖြင့် မြန်မာဘာသာပြန်ဆို စာသားထုတ်ပေးပါမည်။
+              </p>
+              <div className="flex items-center justify-between gap-2 pt-1">
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                  selectedEngine === 'faster_whisper' ? 'bg-emerald-400/30 text-emerald-200 border border-emerald-400/50' : 'bg-white/5 text-zinc-400'
+                }`}>
+                  {selectedEngine === 'faster_whisper' ? '✓ ရွေးချယ်ထားသည်' : 'ရွေးချယ်ရန် နှိပ်ပါ'}
+                </span>
+                <span className="text-[9px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-bold">
+                  High-Speed CPU
+                </span>
+              </div>
+            </div>
+
+            {/* 4. Gemini */}
+            <div
+              onClick={() => setSelectedEngine('gemini')}
+              className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
+                selectedEngine === 'gemini'
+                  ? 'bg-violet-500/20 border-violet-400 shadow-xl ring-2 ring-violet-400/50'
+                  : 'bg-black/40 border-white/10 hover:border-white/25 hover:bg-white/[0.03]'
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
+                    selectedEngine === 'gemini' ? 'bg-violet-400 text-zinc-950 font-black shadow-md' : 'bg-violet-400/20 text-violet-300 border border-violet-400/40'
+                  }`}>
+                    <Sparkles className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-black text-white font-display">Gemini</h4>
+                    <span className="text-[10px] text-violet-300 font-mono">Gemini Engine (Visual Sync)</span>
+                  </div>
+                </div>
+                <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all ${
+                  selectedEngine === 'gemini' ? 'bg-violet-400 border-violet-400 text-zinc-950' : 'border-white/30'
+                }`}>
+                  {selectedEngine === 'gemini' && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                </div>
+              </div>
+              <p className="text-[11px] text-zinc-300 font-myanmar leading-relaxed">
+                Video ထဲက Action ပြောင်းလဲမှု + မျက်နှာအမူအရာအတိုင်း ကွက်တိကိုက်ညီသော Scene-by-Scene မြန်မာ Narrator Script (Prompt အသေ) ဖြင့် ထုတ်ပေးပါမည်။
+              </p>
+              <div className="flex items-center justify-between gap-2 pt-1">
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                  selectedEngine === 'gemini' ? 'bg-violet-400/30 text-violet-200 border border-violet-400/50' : 'bg-white/5 text-zinc-400'
+                }`}>
+                  {selectedEngine === 'gemini' ? '✓ ရွေးချယ်ထားသည်' : 'ရွေးချယ်ရန် နှိပ်ပါ'}
+                </span>
+                <span className="text-[9px] px-2 py-0.5 rounded-full bg-violet-500/20 text-violet-300 border border-violet-500/30 font-bold">
+                  Action-Synced Prompt
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* ၃။ Generate မည် */}
+        <div className="p-4 rounded-2xl bg-black/60 border border-cyan-500/30 space-y-3 shadow-xl">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <span className="w-6 h-6 rounded-lg bg-gradient-to-tr from-sky-400 to-teal-400 text-zinc-950 flex items-center justify-center text-xs font-black shadow">
+                ၃
+              </span>
+              <div>
+                <h3 className="text-sm font-black text-white font-display">
+                  Generate မည်
+                </h3>
+                <span className="text-[11px] text-zinc-400 font-myanmar">
+                  ၁၊ ၂ ရွေးထားသည့်အတိုင်း အတိအကျ စတင်ထုတ်ယူပါမည်
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="px-2.5 py-1 rounded-lg bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 text-xs font-bold font-myanmar">
+                ၁. {scriptStyle === 'narrator' ? 'Narrator' : scriptStyle === 'story' ? 'Story' : 'Translation'}
+              </span>
+              <span className="text-zinc-500">+</span>
+              <span className="px-2.5 py-1 rounded-lg bg-teal-500/10 border border-teal-500/30 text-teal-300 text-xs font-bold font-myanmar">
+                ၂. {getEngineShortLabel(selectedEngine)}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <input
+              type="text"
+              value={customPrompt}
+              onChange={(e) => setCustomPrompt(e.target.value)}
+              placeholder="အထူး ညွှန်ကြားချက်များ (ဥပမာ- ဟာသဆန်ဆန် ပြန်ဆိုပေးပါ / ရင်ခုန်ဖွယ် ဇာတ်လမ်းဆန်ဆန်)..."
+              className="glass-input flex-1 min-w-[200px] px-4 py-2.5 rounded-xl text-xs font-myanmar placeholder-zinc-500"
+            />
+
+            {/* Single Narrator Voice Selector right beside Generate */}
+            <select
+              value={project.lockedVoice || 'Thiha'}
+              onChange={(e) =>
+                setProject((prev) => ({ ...prev, lockedVoice: e.target.value as VoiceOption }))
+              }
+              className="px-3 py-2.5 bg-zinc-900 border border-emerald-500/30 rounded-xl text-xs text-emerald-300 font-semibold focus:outline-none cursor-pointer shrink-0"
+              title="Single Burmese Narrator Voice"
+            >
+              {Object.keys(VOICE_PROFILES).map((vKey) => {
+                const prof = VOICE_PROFILES[vKey as VoiceOption];
+                return (
+                  <option key={vKey} value={vKey} className="bg-zinc-900 text-white">
+                    🎙️ {prof.myanmarName} ({prof.name})
+                  </option>
+                );
+              })}
+            </select>
+
+            <select
+              value={selectedGeminiModel}
+              onChange={(e) => setSelectedGeminiModel(e.target.value)}
+              className="px-3 py-2.5 bg-zinc-900 border border-cyan-500/30 rounded-xl text-xs text-cyan-300 font-mono font-semibold focus:outline-none cursor-pointer shrink-0"
+              title="Gemini Model Selection"
+            >
+              <option value="gemini-3.1-flash-lite">⚡ Gemini 3.1 Flash Lite (Ultra Fast &amp; Recommended)</option>
+              <option value="gemini-3.5-flash-lite">⚡ Gemini 3.5 Flash Lite (Fast &amp; Low Latency)</option>
+              <option value="gemini-4-hydrogen">🧠 Gemini 4 Hydrogen (High Accuracy Reasoning)</option>
+            </select>
+
+            <button
+              onClick={() => handleGenerateScript()}
+              disabled={isGenerating}
+              className="px-6 py-2.5 bg-gradient-to-r from-sky-400 via-cyan-400 to-teal-400 hover:opacity-90 disabled:opacity-50 text-zinc-950 font-black text-xs rounded-xl transition-all shadow-xl shadow-cyan-500/25 flex items-center gap-2 cursor-pointer active:scale-95 shrink-0"
+              title="၁။ ပုံစံ + ၂။ Engine အတိုင်း အတိအကျ Generate လုပ်မည်"
+            >
+              {isGenerating ? (
+                <RotateCw className="w-4 h-4 animate-spin" />
+              ) : (
+                <Sparkles className="w-4 h-4 text-zinc-950 stroke-[2.5]" />
+              )}
+              <span>
+                ✨ Generate (၁. {scriptStyle === 'narrator' ? 'Narrator' : scriptStyle === 'story' ? 'Story' : 'Translation'} + ၂. {getEngineShortLabel(selectedEngine)})
+              </span>
             </button>
           </div>
         </div>
+
+        {/* Live Percentage Progress Bar & Stage Tracker */}
+        {isGenerating && (
+          <div className="space-y-2.5 p-3.5 rounded-xl bg-cyan-950/40 border border-cyan-500/30 backdrop-blur-md">
+            <div className="flex items-center justify-between text-xs font-mono font-bold gap-2">
+              <span className="text-cyan-300 flex items-center gap-1.5 font-myanmar">
+                <RotateCw className="w-3.5 h-3.5 animate-spin text-cyan-400 shrink-0" />
+                <span>{statusMessage || 'AI Processing Video Chunks...'}</span>
+              </span>
+              <span className="text-cyan-400 shrink-0">
+                {Math.round(progressPercent)}% ({elapsedSeconds}s)
+              </span>
+            </div>
+
+            {/* Inline Stage Indicators inside Step 3 Generate Progress */}
+            <div className={`grid grid-cols-1 ${scriptStyle === 'translation' ? 'sm:grid-cols-2' : 'sm:grid-cols-5'} gap-1.5 text-[10px] font-myanmar`}>
+              {(scriptStyle === 'translation'
+                ? [
+                    { id: 1 as const, label: `၁. ${getEngineFullLabel(selectedEngine)}` },
+                    { id: 2 as const, label: '၂. Gemini Translate' },
+                  ]
+                : [
+                    { id: 1 as const, label: `၁. ${getEngineFullLabel(selectedEngine)}` },
+                    { id: 2 as const, label: '၂. Gemini Translate' },
+                    { id: 3 as const, label: '၃. Video & STT' },
+                    { id: 4 as const, label: '၄. အချိန်ခွဲ ဘာသာပြန်' },
+                    { id: 5 as const, label: scriptStyle === 'story' ? '၅. Story စာသား' : '၅. Narrator စာသား' },
+                  ]
+              ).map((st) => {
+                const active = generateStage === st.id;
+                const done = generateStage !== null && generateStage > st.id;
+                return (
+                  <div
+                    key={st.id}
+                    className={`px-2 py-1 rounded-lg border flex items-center justify-between gap-1 ${
+                      done
+                        ? 'bg-emerald-500/20 border-emerald-400/50 text-emerald-200'
+                        : active
+                          ? 'bg-cyan-500/25 border-cyan-400 text-white font-bold animate-pulse'
+                          : 'bg-black/35 border-white/10 text-zinc-400'
+                    }`}
+                  >
+                    <span className="truncate">{st.label}</span>
+                    {done && <Check className="w-3 h-3 text-emerald-400 shrink-0" />}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Progress Bar Track */}
+            <div className="w-full h-2 bg-zinc-900 rounded-full overflow-hidden border border-cyan-500/20">
+              <div
+                className="h-full bg-gradient-to-r from-cyan-400 via-teal-400 to-emerald-400 transition-all duration-300 rounded-full shadow-lg shadow-cyan-400/50"
+                style={{ width: `${Math.max(5, Math.min(100, progressPercent))}%` }}
+              />
+            </div>
+
+            <div className="flex items-center justify-between text-[10px] text-zinc-400 font-mono">
+              <span>⚡ {selectedGeminiModel} · {getEngineFullLabel(selectedEngine)} ({scriptStyle.toUpperCase()})</span>
+              <span>100% ရောက်ရှိလျှင် ပြီးဆုံးပါမည်</span>
+            </div>
+          </div>
+        )}
+
+        {statusMessage && !isGenerating && (
+          <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-300 flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span className="font-myanmar">{statusMessage}</span>
+          </div>
+        )}
+
+        {errorMessage && (
+          <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-xs text-rose-300 flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+            <span className="font-myanmar">{errorMessage}</span>
+          </div>
+        )}
       </div>
 
-      {/* Narration Architecture Selector: 30s Scene-Recap Slots vs Dialogue Dubbing */}
-      <div className="p-3.5 rounded-2xl bg-black/50 border border-cyan-500/30 space-y-3">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-          <div>
-            <span className="text-xs font-black text-cyan-300 font-display block">
-              Timing Structure (အချိန်ပိုင်း ချိန်ညှိပုံ)
-            </span>
-              <p className="text-[11px] text-zinc-400 font-myanmar mt-0.5">
-              {narrationMode === 'scene_recap_30s'
-                ? '၃၀ စက္ကန့် မြင်ကွင်း Slot စီ (+ 0.18s Pause ဆက်စကားတို) ဖြင့် ချိန်ညှိထုတ်ပေးပါမည်။'
-                : 'AI/Whisper ကို 0:30 (0:00-0:30, 0:30-1:00...) Parts များခွဲ၍ တိကျစွာ ထုတ်ယူပြီး Single Narrator စာသား/အသံ/Subtitle များကို အချိန်မရွေ့စေရန် ပြန်ညှိထားပါမည်။'}
-            </p>
+      {/* TTX Success & Proceed Card */}
+      {project.segments.length > 0 && !isGenerating && (
+        <div className="flex flex-wrap items-center justify-between gap-3 p-4 rounded-2xl bg-gradient-to-r from-emerald-950/40 via-zinc-900/60 to-cyan-950/40 border border-emerald-500/30 text-xs">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center justify-center shrink-0">
+              <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+            </div>
+            <div>
+              <span className="font-bold text-white font-myanmar text-sm block">
+                ✓ {scriptStyle === 'story' ? 'Story' : scriptStyle === 'translation' ? 'Translation' : 'Narrator'} စာသား + 0:30 စီ {totalParts} ပိုင်း ({project.segments.length} Segments) အောင်မြင်စွာ ထွက်ရှိပါပြီ
+              </span>
+              <span className="text-[11px] text-zinc-300 font-myanmar">
+                {project.videoInspection
+                  ? `Video: ${project.videoInspection.resolution} · ${formatMinSec(project.videoInspection.duration)} · အဆင့် ၄ (Generate All Voices) တွင် အသံ + 0:30 Sync ထုတ်နိုင်ပါသည်`
+                  : 'အသံထုတ်ရန်နှင့် 0:30 Part Sync ညှိရန် အဆင့် ၄ (TTS Studio) သို့ သွားပါ'}
+              </span>
+            </div>
           </div>
-          <div className="flex flex-wrap items-center gap-1.5 bg-zinc-900 p-1 rounded-xl border border-white/10 shrink-0">
-            <button
-              type="button"
-              onClick={() => {
-                setSelectedPartFilter('all');
-                setProject((prev) => ({ ...prev, narrationMode: 'scene_recap_30s', recapSlotSeconds: 30 }));
-              }}
-              className={`px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
-                narrationMode === 'scene_recap_30s'
-                  ? 'bg-gradient-to-r from-cyan-400 to-emerald-400 text-zinc-950 font-black shadow'
-                  : 'text-zinc-400 hover:text-white'
-              }`}
-            >
-              🎬 30s Scene Slots (+0.18s)
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setSelectedPartFilter('all');
-                setProject((prev) => ({ ...prev, narrationMode: 'dialogue_dub' }));
-              }}
-              className={`px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
-                narrationMode === 'dialogue_dub'
-                  ? 'bg-cyan-500/30 text-cyan-200 border border-cyan-400/50 font-black'
-                  : 'text-zinc-400 hover:text-white'
-              }`}
-            >
-              ⏱️ 0:30 Parts (Narrator Sync)
-            </button>
-            {project.segments.length > 0 && (
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {onNextStep && (
               <button
-                type="button"
-                onClick={handleManualRealignMinuteBlocks}
-                className="px-2.5 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/40 text-emerald-200 text-[11px] font-bold cursor-pointer flex items-center gap-1"
-                title="၃၀ စက္ကန့်စီ (0:00-0:30) အပိုင်းအတွင်း နောက်ပိုင်းအသံ အချိန်မရွေ့စေရန် ပြန်ညှိမည်"
+                onClick={onNextStep}
+                className="px-4 py-2.5 bg-gradient-to-r from-emerald-400 via-teal-300 to-cyan-400 hover:opacity-90 text-zinc-950 font-black rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shadow-lg shadow-emerald-500/25 active:scale-95"
               >
-                <Layers className="w-3 h-3" />
-                <span>Re-Align 0:30</span>
+                <span>အဆင့် ၄ (TTS Studio)</span>
+                <ArrowRight className="w-4 h-4 stroke-[2.5]" />
+              </button>
+            )}
+            {onJumpToStep && (
+              <button
+                onClick={() => onJumpToStep(5)}
+                className="px-4 py-2.5 bg-violet-500 hover:bg-violet-400 text-white font-black rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shadow-lg shadow-violet-500/25 active:scale-95"
+              >
+                <span>အဆင့် ၅ (Video Editor)</span>
+                <ArrowRight className="w-4 h-4 stroke-[2.5]" />
               </button>
             )}
           </div>
         </div>
-      </div>
+      )}
 
-      {/* Slot Breakdown Filter Buttons */}
+      {/* 0:30 Parts Filter & Timing Structure */}
       <div className="glass-card rounded-xl p-3.5 space-y-2.5">
-        <div className="flex items-center justify-between text-xs">
-          <span className="font-bold text-white flex items-center gap-1.5">
-            <Zap className="w-3.5 h-3.5 text-cyan-400" />
-            <span>
-              {narrationMode === 'scene_recap_30s'
-                ? `30-Second Scene Recap Slots (${totalParts} Slots × 30s — 0.18s Pause Alignment)`
-                : `Video 0:30 Parts (${totalParts} Parts × 30s — 0:00-0:30, 0:30-1:00...)`}
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex items-center gap-2">
+            <span className="font-bold text-white flex items-center gap-1.5">
+              <Zap className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Video 0:30 Parts ({totalParts} Parts × 30s — 0:00-0:30, 0:30-1:00...)</span>
             </span>
-          </span>
-          <span className="text-[11px] font-mono text-cyan-300">
-            {Math.floor((project.videoDuration || 0) / 60)}m {Math.floor((project.videoDuration || 0) % 60)}s
-          </span>
+            <span className="text-[11px] font-mono text-cyan-300">
+              {Math.floor((project.videoDuration || 0) / 60)}m {Math.floor((project.videoDuration || 0) % 60)}s
+            </span>
+          </div>
+
+          {project.segments.length > 0 && (
+            <button
+              type="button"
+              onClick={handleManualRealignMinuteBlocks}
+              className="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/40 text-emerald-200 text-[11px] font-bold cursor-pointer flex items-center gap-1"
+              title="၃၀ စက္ကန့်စီ (0:00-0:30) အပိုင်းအတွင်း နောက်ပိုင်းအသံ အချိန်မရွေ့စေရန် ပြန်ညှိမည်"
+            >
+              <Layers className="w-3 h-3" />
+              <span>Re-Align 0:30</span>
+            </button>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -921,260 +1260,6 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
             );
           })}
         </div>
-      </div>
-
-      {/* AI STT Engine Selector */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-        <button
-          type="button"
-          onClick={() => setSelectedEngine('assemblyai')}
-          className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
-            selectedEngine === 'assemblyai'
-              ? 'bg-blue-500/15 border-blue-400/50 text-blue-200 shadow-lg ring-1 ring-blue-400/30'
-              : 'bg-white/5 border-white/5 text-zinc-400 hover:text-zinc-200'
-          }`}
-        >
-          <div className="flex items-center justify-between mb-1">
-            <div className="flex items-center gap-1.5 font-bold text-xs">
-              <Radio className="w-3.5 h-3.5 text-blue-400" />
-              <span>Assembly Generate</span>
-            </div>
-            {hasAssemblyAiKey && (
-              <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                Connected
-              </span>
-            )}
-          </div>
-          <p className="text-[11px] text-zinc-400 font-myanmar">
-            AssemblyAI API ဖြင့် Speech-to-Text ပြုလုပ်ပြီး Gemini API မှ မြန်မာဘာသာပြန်ဆို၍ TTX ထုတ်ပေးမည်
-          </p>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setSelectedEngine('videosubfinder_paddleocr')}
-          className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
-            selectedEngine === 'videosubfinder_paddleocr'
-              ? 'bg-cyan-500/15 border-cyan-400/50 text-cyan-200 shadow-lg ring-1 ring-cyan-400/30'
-              : 'bg-white/5 border-white/5 text-zinc-400 hover:text-zinc-200'
-          }`}
-        >
-          <div className="flex items-center justify-between mb-1">
-            <div className="flex items-center gap-1.5 font-bold text-xs">
-              <ScanText className="w-3.5 h-3.5 text-cyan-400" />
-              <span>VideoSubFinder + PaddleOCR</span>
-            </div>
-            <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
-              Hardsub OCR
-            </span>
-          </div>
-          <p className="text-[11px] text-zinc-400 font-myanmar">
-            Custom Upload Video မှ Subtitle စာတန်းထိုးများကို OCR ဖြင့် ရှာဖွေဖတ်ယူပြီး Transcript အပြည့်အစုံနှင့် မြန်မာဘာသာပြန် ထုတ်ပေးမည်
-          </p>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setSelectedEngine('faster_whisper')}
-          className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
-            selectedEngine === 'faster_whisper'
-              ? 'bg-emerald-500/15 border-emerald-400/50 text-emerald-200 shadow-lg ring-1 ring-emerald-400/30'
-              : 'bg-white/5 border-white/5 text-zinc-400 hover:text-zinc-200'
-          }`}
-        >
-          <div className="flex items-center justify-between mb-1">
-            <div className="flex items-center gap-1.5 font-bold text-xs">
-              <Zap className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Faster-Whisper Generate</span>
-            </div>
-            <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-              High-Speed CPU
-            </span>
-          </div>
-          <p className="text-[11px] text-zinc-400 font-myanmar">
-            Faster-whisper (CPU mode int8) ဖြင့် အမြန်ဆုံး Speech-to-Text ပြုလုပ်ပြီး Gemini ဖြင့် မြန်မာဘာသာပြန်မည်
-          </p>
-        </button>
-      </div>
-
-      {/* Prompt input & Action button */}
-      <div className="space-y-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <input
-            type="text"
-            value={customPrompt}
-            onChange={(e) => setCustomPrompt(e.target.value)}
-            placeholder="အထူး ညွှန်ကြားချက်များ (ဥပမာ- ဟာသဆန်ဆန် ပြန်ဆိုပေးပါ)..."
-            className="glass-input flex-1 min-w-[200px] px-4 py-2.5 rounded-xl text-xs font-myanmar placeholder-zinc-500"
-          />
-
-          {/* Single Narrator Voice Selector right beside Generate */}
-          <select
-            value={project.lockedVoice || 'Thiha'}
-            onChange={(e) =>
-              setProject((prev) => ({ ...prev, lockedVoice: e.target.value as VoiceOption }))
-            }
-            className="px-3 py-2.5 bg-zinc-900 border border-emerald-500/30 rounded-xl text-xs text-emerald-300 font-semibold focus:outline-none cursor-pointer shrink-0"
-            title="Single Burmese Narrator Voice"
-          >
-            {Object.keys(VOICE_PROFILES).map((vKey) => {
-              const prof = VOICE_PROFILES[vKey as VoiceOption];
-              return (
-                <option key={vKey} value={vKey} className="bg-zinc-900 text-white">
-                  🎙️ {prof.myanmarName} ({prof.name})
-                </option>
-              );
-            })}
-          </select>
-
-          <select
-            value={selectedGeminiModel}
-            onChange={(e) => setSelectedGeminiModel(e.target.value)}
-            className="px-3 py-2.5 bg-zinc-900 border border-cyan-500/30 rounded-xl text-xs text-cyan-300 font-mono font-semibold focus:outline-none cursor-pointer shrink-0"
-            title="Gemini Model Selection"
-          >
-            <option value="gemini-3.1-flash-lite">⚡ Gemini 3.1 Flash Lite (Ultra Fast &amp; Recommended)</option>
-            <option value="gemini-3.5-flash-lite">⚡ Gemini 3.5 Flash Lite (Fast &amp; Low Latency)</option>
-            <option value="gemini-4-hydrogen">🧠 Gemini 4 Hydrogen (High Accuracy Reasoning)</option>
-          </select>
-
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              onClick={() => handleGenerateScript()}
-              disabled={isGenerating}
-              className="px-5 py-2.5 bg-gradient-to-r from-sky-400 via-cyan-400 to-teal-400 hover:opacity-90 disabled:opacity-50 text-zinc-950 font-black text-xs rounded-xl transition-all shadow-xl shadow-cyan-500/25 flex items-center gap-2 cursor-pointer active:scale-95"
-              title="အဆင့် ၁ (Video စစ် & 0:30 AI/Whisper Parts STT) → ၂ (အချိန်ခွဲ ဘာသာပြန်) → ၃ (Single Narrator စာသား) ကို ထုတ်ယူမည်"
-            >
-              {isGenerating ? (
-                <RotateCw className="w-4 h-4 animate-spin" />
-              ) : (
-                <Sparkles className="w-4 h-4 text-zinc-950 stroke-[2.5]" />
-              )}
-              <span>
-                ✨ Generate ({scriptStyle === 'narrator' ? '1. Narrator' : scriptStyle === 'story' ? '2. Story' : '3. Translation'})
-              </span>
-            </button>
-          </div>
-        </div>
-
-        {/* TTX Success & Proceed Card */}
-        {project.segments.length > 0 && !isGenerating && (
-          <div className="flex flex-wrap items-center justify-between gap-3 p-4 rounded-2xl bg-gradient-to-r from-emerald-950/40 via-zinc-900/60 to-cyan-950/40 border border-emerald-500/30 text-xs">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center justify-center shrink-0">
-                <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-              </div>
-              <div>
-                <span className="font-bold text-white font-myanmar text-sm block">
-                  ✓ Narrator စာသား + 0:30 စီ {totalParts} ပိုင်း ({project.segments.length} Segments) အောင်မြင်စွာ ထွက်ရှိပါပြီ
-                </span>
-                <span className="text-[11px] text-zinc-300 font-myanmar">
-                  {project.videoInspection
-                    ? `Video: ${project.videoInspection.resolution} · ${formatMinSec(project.videoInspection.duration)} · အဆင့် ၄ (Generate All Voices) တွင် Narrator အသံ + 0:30 Sync ထုတ်နိုင်ပါသည်`
-                    : 'Narrator အသံထုတ်ရန်နှင့် 0:30 Part Sync ညှိရန် အဆင့် ၄ (TTS Studio) သို့ သွားပါ'}
-                </span>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2 shrink-0">
-              {onNextStep && (
-                <button
-                  onClick={onNextStep}
-                  className="px-4 py-2.5 bg-gradient-to-r from-emerald-400 via-teal-300 to-cyan-400 hover:opacity-90 text-zinc-950 font-black rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shadow-lg shadow-emerald-500/25 active:scale-95"
-                >
-                  <span>အဆင့် ၄ (TTS Studio)</span>
-                  <ArrowRight className="w-4 h-4 stroke-[2.5]" />
-                </button>
-              )}
-              {onJumpToStep && (
-                <button
-                  onClick={() => onJumpToStep(5)}
-                  className="px-4 py-2.5 bg-violet-500 hover:bg-violet-400 text-white font-black rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shadow-lg shadow-violet-500/25 active:scale-95"
-                >
-                  <span>အဆင့် ၅ (Video Editor)</span>
-                  <ArrowRight className="w-4 h-4 stroke-[2.5]" />
-                </button>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Live Percentage Progress Bar & 1-to-5 Stage Tracker */}
-        {isGenerating && (
-          <div className="space-y-2.5 p-3.5 rounded-xl bg-cyan-950/40 border border-cyan-500/30 backdrop-blur-md">
-            <div className="flex items-center justify-between text-xs font-mono font-bold gap-2">
-              <span className="text-cyan-300 flex items-center gap-1.5 font-myanmar">
-                <RotateCw className="w-3.5 h-3.5 animate-spin text-cyan-400 shrink-0" />
-                <span>{statusMessage || 'AI Processing Video Chunks...'}</span>
-              </span>
-              <span className="text-cyan-400 shrink-0">
-                {Math.round(progressPercent)}% ({elapsedSeconds}s)
-              </span>
-            </div>
-
-            {/* Inline Stage Indicators inside Step 3 Generate Progress */}
-            <div className={`grid grid-cols-1 ${scriptStyle === 'translation' ? 'sm:grid-cols-2' : 'sm:grid-cols-5'} gap-1.5 text-[10px] font-myanmar`}>
-              {(scriptStyle === 'translation'
-                ? [
-                    { id: 1 as const, label: selectedEngine === 'videosubfinder_paddleocr' ? '၁. VideoSubFinder + PaddleOCR' : '၁. Assembly or Whisper' },
-                    { id: 2 as const, label: '၂. Gemini Translate' },
-                  ]
-                : [
-                    { id: 1 as const, label: selectedEngine === 'videosubfinder_paddleocr' ? '၁. VideoSubFinder + PaddleOCR' : '၁. Assembly or Whisper' },
-                    { id: 2 as const, label: '၂. Gemini Translate' },
-                    { id: 3 as const, label: '၃. Video & STT' },
-                    { id: 4 as const, label: '၄. အချိန်ခွဲ ဘာသာပြန်' },
-                    { id: 5 as const, label: scriptStyle === 'story' ? '၅. Story စာသား' : '၅. Narrator စာသား' },
-                  ]
-              ).map((st) => {
-                const active = generateStage === st.id;
-                const done = generateStage !== null && generateStage > st.id;
-                return (
-                  <div
-                    key={st.id}
-                    className={`px-2 py-1 rounded-lg border flex items-center justify-between gap-1 ${
-                      done
-                        ? 'bg-emerald-500/20 border-emerald-400/50 text-emerald-200'
-                        : active
-                          ? 'bg-cyan-500/25 border-cyan-400 text-white font-bold animate-pulse'
-                          : 'bg-black/35 border-white/10 text-zinc-400'
-                    }`}
-                  >
-                    <span className="truncate">{st.label}</span>
-                    {done && <Check className="w-3 h-3 text-emerald-400 shrink-0" />}
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Progress Bar Track */}
-            <div className="w-full h-2 bg-zinc-900 rounded-full overflow-hidden border border-cyan-500/20">
-              <div
-                className="h-full bg-gradient-to-r from-cyan-400 via-teal-400 to-emerald-400 transition-all duration-300 rounded-full shadow-lg shadow-cyan-400/50"
-                style={{ width: `${Math.max(5, Math.min(100, progressPercent))}%` }}
-              />
-            </div>
-
-            <div className="flex items-center justify-between text-[10px] text-zinc-400 font-mono">
-              <span>⚡ {selectedGeminiModel} (0:30 AI/Whisper Parts · Script Stage 1→3)</span>
-              <span>100% ရောက်ရှိလျှင် ပြီးဆုံးပါမည်</span>
-            </div>
-          </div>
-        )}
-
-        {statusMessage && !isGenerating && (
-          <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-300 flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-            <span className="font-myanmar">{statusMessage}</span>
-          </div>
-        )}
-
-        {errorMessage && (
-          <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-xs text-rose-300 flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
-            <span className="font-myanmar">{errorMessage}</span>
-          </div>
-        )}
       </div>
 
       {/* Dubbing Plan & Subtitle Actions Toolbar */}

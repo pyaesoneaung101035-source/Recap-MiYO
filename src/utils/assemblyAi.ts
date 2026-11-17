@@ -1,5 +1,5 @@
 import { loadApiKeys } from './apiKeys';
-import { TranscriptSegment } from '../types';
+import { TranscriptSegment, Step3ScriptStyle } from '../types';
 import { extractAudioFromVideo } from './audioExtractor';
 import { callGeminiWithRotation, countBurmeseSyllables, calculateMaxAllowedSyllables } from './geminiPool';
 import { MINUTE_BLOCK_SECONDS, realignSegmentsByMinuteBlocks } from './timingSync';
@@ -26,6 +26,7 @@ export async function transcribeVideoWithAssemblyAi(
   videoSource: File | string,
   options?: {
     onProgress?: (msg: string) => void;
+    scriptStyle?: Step3ScriptStyle;
   }
 ): Promise<TranscriptSegment[]> {
   const { assemblyAiKey } = loadApiKeys();
@@ -271,24 +272,46 @@ export async function transcribeVideoWithAssemblyAi(
   }
 
   // 6. Gemini Timeline Re-segmentation & Duration-Budgeted Burmese Translation
-  onProgress('🇲🇲 [Gemini Timeline Engine] - မူရင်း video timeline အတိုင်း အပိုင်းငယ်များခွဲပြီး အချိန်ကိုက် narration script ဖန်တီးနေပါသည်...');
+  const scriptStyle: Step3ScriptStyle = options?.scriptStyle || 'narrator';
+  const speakerLabel =
+    scriptStyle === 'translation'
+      ? 'Translator (ဘာသာပြန်)'
+      : scriptStyle === 'story'
+        ? 'Storyteller (ဇာတ်လမ်းပြောသူ)'
+        : 'Narrator (ဇာတ်ကြောင်းပြောသူ)';
+
+  const styleDirective =
+    scriptStyle === 'translation'
+      ? `TRANSLATION MODE ("3. TRANSLATION"):
+- Translate EVERY source line directly, accurately, and faithfully into natural Burmese.
+- Do NOT rewrite as a third-person commentator or summary storyteller. Translate the dialogue/voice lines faithfully word-for-word and intent-for-intent.`
+      : scriptStyle === 'story'
+        ? `STORYTELLING MODE ("2. STORY"):
+- Retell the sequence of events as an engaging oral storyteller ("လူတစ်ယောက် Story ပြောပြနေသလို ဇာတ်လမ်းဆန်ဆန်").
+- Build suspense, hooks, and dramatic narrative flow between scenes.`
+        : `SPOKEN NARRATOR MODE ("1. NARRATOR"):
+- Write lively, natural spoken Burmese meant to be spoken aloud by a real voice actor ("အပြင်မှာ စကားပြောနေတဲ့အတိုင်း").
+- BAN repetitive "...ပါတယ်။ / ...နေပါတယ်။" textbook suffixes. Use everyday colloquial endings, reactions, and conversational punctuation.`;
+
+  onProgress(`🇲🇲 [Gemini Timeline Engine] - မူရင်း video timeline အတိုင်း ${scriptStyle.toUpperCase()} စာသားများကို Gemini ဖြင့် ပြင်ဆင်နေပါသည်...`);
 
   const translationPrompt = `
-You are a senior Burmese movie-recap storyteller & voice-acting director (နမူနာ TikTok/YouTube Recap ဇာတ်ကြောင်းပြောသူ).
-You are given the raw Speech-to-Text utterances with precise timestamps from the video.
+You are a senior Burmese dubbing & storytelling director.
+Active Mode: ${scriptStyle.toUpperCase()}
+Speaker: "${speakerLabel}"
+
+${styleDirective}
 
 CRITICAL INSTRUCTIONS (MUST FOLLOW STRICTLY):
 1. SEQUENTIAL CHRONOLOGICAL TRANSLATION & SCENE ALIGNMENT: Follow the exact sequence of spoken lines and events at their real timestamps. Do NOT skip dialogue or invent unseen facts.
 2. BAN REPETITIVE "တယ် / ပါတယ်" ENDINGS (တယ်တယ် များမနေစေရ):
    - NEVER end every line with textbook "...ပါတယ်။", "...နေပါတယ်။", "...ဖြစ်ပါတယ်။", "...သွားပါတယ်။".
-   - Write natural spoken Burmese storytelling mixing varied crisp endings like the sample video:
-     "...ပေါ်လာတော့ သူ အံ့ဩသွားတယ်!", "...ဒီခွက်နဲ့ ဝင်ပြိုင်နိုင်ပြီ။", "...သေချာပေါက် ဝင်ပြိုင်မယ်။", "...အလွတ်မပေးဘူး။", "...ငါ့နောက်လိုက်နေတဲ့သူပဲ။", "...တစ်ကီလို ရွှေတုံး ရှိလား?", "...သန်းနဲ့ချီ တန်မယ်နော်!", "...အောင်မြင်နေပြီပဲ။"
-   - Avoid "ပါတယ်" in narration (only use it if quoting a polite reply like "ရှိပါတယ်။ ခဏစောင့်ပါ။").
+   - Write natural spoken Burmese mixing varied crisp endings.
 3. EXPRESSIVE VOCAL EMOTION TAGS & PUNCTUATION:
    - Put "!" on surprising/shocking/threatening lines and "?" on questions so Voice Clone varies vocal pitch naturally!
    - Set specific "emotion" tag per segment: "surprised, amazed" | "curious, questioning" | "mocking, smug" | "determined, fierce" | "urgent, tense" | "sad, heartfelt" | "calm storytelling".
 4. EXACT TIMESTAMPS & CONCISE BREVITY: Preserve "startTime" and "endTime" (in seconds) and keep Burmese concise (~Math.floor(duration * 3.5) syllables).
-5. SINGLE ADULT MALE NARRATOR (speaker: "Narrator (ဇာတ်ကြောင်းပြောသူ)", voice: "Thiha").
+5. Speaker label: "${speakerLabel}".
 6. Clean Burmese subtitles: max 2 lines, <=35 Burmese characters per line, NO Chinese or foreign characters.
 7. Return ONLY a valid JSON array matching this exact format:
 [
@@ -298,8 +321,8 @@ CRITICAL INSTRUCTIONS (MUST FOLLOW STRICTLY):
     "endTime": 4.2,
     "originalText": "exact dialogue from video",
     "myanmarTranslation": "ရေဘူးတွေ အများကြီး ပေါ်လာတော့ သူ အံ့ဩသွားတယ်!",
-    "subtitleText": "ရေဘူးတွေ အများကြီး ပေါ်လာတော့\nသူ အံ့ဩသွားတယ်!",
-    "speaker": "Narrator (ဇာတ်ကြောင်းပြောသူ)",
+    "subtitleText": "ရေဘူးတွေ အများကြီး ပေါ်လာတော့\\nသူ အံ့ဩသွားတယ်!",
+    "speaker": "${speakerLabel}",
     "emotion": "surprised, amazed"
   }
 ]
@@ -312,10 +335,10 @@ ${JSON.stringify(items.map((it, idx) => ({ id: idx + 1, start: it.start, end: it
   let processedSegments: TranscriptSegment[] = [];
 
   try {
-    onProgress('✨ [Gemini AI Engine] - အချိန်မှတ်တမ်းအလိုက် ဇာတ်ကြောင်းပြော စာသားများကို Gemini မှ တည်ဆောက်နေပါသည်...');
+    onProgress(`✨ [Gemini AI Engine] - အချိန်မှတ်တမ်းအလိုက် ${speakerLabel} စာသားများကို Gemini မှ တည်ဆောက်နေပါသည်...`);
     const { text: geminiRes } = await callGeminiWithRotation(
       translationPrompt,
-      'You are a professional Myanmar single-narrator storyteller. Output pure valid JSON.',
+      'You are a professional Myanmar dubbing and storytelling specialist. Output pure valid JSON.',
       'gemini-3.1-flash-lite',
       undefined,
       { responseMimeType: 'application/json' }
@@ -341,7 +364,7 @@ ${JSON.stringify(items.map((it, idx) => ({ id: idx + 1, start: it.start, end: it
           originalText: item.originalText || item.text || '',
           myanmarTranslation: burmeseText,
           subtitleText: (item.subtitleText || burmeseText).replace(/[\u4e00-\u9fa5]/g, '').trim(),
-          speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
+          speaker: speakerLabel,
           emotion: item.emotion || 'Storytelling narrator',
           voice: 'Thiha', // Single Adult Male Narrator
           syllableCount: sylCount,

@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 import { ProjectState, SubtitleSettings, TranscriptSegment, AlightKeyframe, BlurBox, AspectRatioType } from '../types';
 import { getInterpolatedKeyframe, getFilterCss } from '../utils/alightMotionRenderer';
-import { extractBackgroundMusicFromVideo, extractBgmWithProgress } from '../utils/bgmExtractorClient';
+import { extractBgmWithProgress } from '../utils/bgmExtractorClient';
 import { inspectVideoFile } from '../utils/audioExtractor';
 import { PREVIEW_AUDIO_STARTED_EVENT, stopAllPreviewAudio } from '../utils/audioPreviewManager';
 import { UnifiedAudioMixer } from '../utils/audioMixerEngine';
@@ -256,8 +256,15 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
 
   // Handle Video File Upload + Automatic Video Inspection (Duration, Resolution, Audio Track)
   const handleFileUpload = (file: File) => {
-    if (!file || !file.type.startsWith('video/')) return;
+    const isVideoExt = /\.(mp4|mov|webm|mkv|m4v|avi)$/i.test(file?.name || '');
+    if (!file || (!file.type.startsWith('video/') && !isVideoExt)) return;
+    const prevBlobUrl = project.videoUrl && project.videoUrl.startsWith('blob:') ? project.videoUrl : null;
     const url = URL.createObjectURL(file);
+    if (prevBlobUrl && prevBlobUrl !== url) {
+      setTimeout(() => {
+        try { URL.revokeObjectURL(prevBlobUrl); } catch (_) {}
+      }, 2000);
+    }
     audioMixerRef.current?.stopAll();
     setBgmError(null);
     setLalalError(null);
@@ -320,9 +327,10 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
 
   // Extract vocal-removed Background music.mp3 using built-in server stem separator -> live 0%-100% progress -> attach as BGM
   const handleGenerateLalalBgm = async () => {
-    if ((!project.videoFile && !project.videoUrl) || isGeneratingLalalBgm) return;
+    if ((!project.videoFile && !project.videoUrl) || isGeneratingLalalBgm || isExtractingBgm) return;
     setIsGeneratingLalalBgm(true);
     setShowLalalBar(true);
+    setBgmError(null);
     setLalalError(null);
     setLalalPercent(1);
     setLalalStageLabel('Custom upload video မှ Background music.mp3 စတင်ခွဲထုတ်နေသည်...');
@@ -356,18 +364,24 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
 
   // Extract Background Music / SFX Only (Built-in fallback / quick toolbar toggle)
   const handleExtractBgmOnly = async () => {
-    if ((!project.videoFile && !project.videoUrl) || isExtractingBgm) return;
+    if ((!project.videoFile && !project.videoUrl) || isExtractingBgm || isGeneratingLalalBgm) return;
     setIsExtractingBgm(true);
+    setShowLalalBar(true);
     setBgmError(null);
     setLalalError(null);
+    setLalalPercent(1);
+    setLalalStageLabel('Background music.mp3 ခွဲထုတ်နေသည်...');
     try {
-      const res = await extractBackgroundMusicFromVideo(
+      const res = await extractBgmWithProgress(
         project.videoFile,
         project.videoUrl,
-        project.videoName
+        project.videoName,
+        (pct, label) => {
+          setLalalPercent(pct);
+          setLalalStageLabel(label);
+        }
       );
       setLalalPercent(100);
-      setShowLalalBar(true);
       setLalalStageLabel('100% — Background music.mp3 ကို BGM အဖြစ် ထည့်သွင်းပြီးပါပြီ!');
       setProject((prev) => ({
         ...prev,
@@ -377,7 +391,7 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
         bgmEngineUsed: res.engineUsed,
       }));
     } catch (err: any) {
-      setBgmError(err.message || 'နောက်ခံတီးလုံး ထုတ်ယူမှု မအောင်မြင်ပါ');
+      setBgmError(err?.message || 'နောက်ခံတီးလုံး ထုတ်ယူမှု မအောင်မြင်ပါ');
     } finally {
       setIsExtractingBgm(false);
     }
@@ -553,7 +567,11 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
             type="file"
             accept="video/*"
             className="hidden"
-            onChange={(e) => e.target.files?.[0] && handleFileUpload(e.target.files[0])}
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) handleFileUpload(file);
+              e.target.value = '';
+            }}
           />
         </div>
       </div>
@@ -1054,7 +1072,7 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
           <button
             type="button"
             onClick={handleExtractBgmOnly}
-            disabled={isExtractingBgm || !project.videoUrl}
+            disabled={isExtractingBgm || isGeneratingLalalBgm || !project.videoUrl}
             className={`px-2.5 py-1 rounded-md border text-[11px] font-bold flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50 ${
               project.useExtractedBgm && project.extractedBgmUrl
                 ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
@@ -1215,80 +1233,93 @@ export interface InteractiveBlurBoxProps {
 export const InteractiveBlurBox: React.FC<InteractiveBlurBoxProps> = ({ blurBox, onUpdate, onDelete }) => {
   const [isHovered, setIsHovered] = useState(false);
   const [showDeleteMenu, setShowDeleteMenu] = useState(false);
-  const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const boxRef = useRef<HTMLDivElement>(null);
 
-  // Mouse & Touch Dragging State
-  const [isDraggingMove, setIsDraggingMove] = useState(false);
-  const [isDraggingResize, setIsDraggingResize] = useState(false);
-  const startPosRef = useRef<{ mouseX: number; mouseY: number; boxX: number; boxY: number; boxW: number; boxH: number }>({
+  const [dragMode, setDragMode] = useState<'move' | 'resize' | null>(null);
+  const latestRef = useRef({ blurBox, onUpdate });
+  latestRef.current = { blurBox, onUpdate };
+
+  const startPosRef = useRef<{
+    mouseX: number;
+    mouseY: number;
+    boxX: number;
+    boxY: number;
+    boxW: number;
+    boxH: number;
+    didMove: boolean;
+  }>({
     mouseX: 0,
     mouseY: 0,
     boxX: blurBox.x,
     boxY: blurBox.y,
     boxW: blurBox.width,
     boxH: blurBox.height,
+    didMove: false,
   });
 
   const handlePressStart = () => {
+    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
     longPressTimerRef.current = setTimeout(() => {
-      setShowDeleteMenu(true);
-    }, 400);
+      if (!startPosRef.current.didMove) {
+        setShowDeleteMenu(true);
+      }
+    }, 450);
   };
 
   const handlePressEnd = () => {
     if (longPressTimerRef.current) {
       clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
     }
   };
 
-  const handleMoveStart = (e: React.MouseEvent | React.TouchEvent) => {
-    e.stopPropagation();
-    handlePressStart();
-    setIsDraggingMove(true);
-
-    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
-    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
-
+  const beginDrag = (mode: 'move' | 'resize', clientX: number, clientY: number) => {
+    const cur = latestRef.current.blurBox;
     startPosRef.current = {
       mouseX: clientX,
       mouseY: clientY,
-      boxX: blurBox.x,
-      boxY: blurBox.y,
-      boxW: blurBox.width,
-      boxH: blurBox.height,
+      boxX: cur.x,
+      boxY: cur.y,
+      boxW: cur.width,
+      boxH: cur.height,
+      didMove: false,
     };
+    setDragMode(mode);
   };
 
-  const handleResizeStart = (e: React.MouseEvent | React.TouchEvent) => {
+  const handleMovePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== undefined && e.button !== 0 && e.pointerType === 'mouse') return;
     e.stopPropagation();
-    setIsDraggingResize(true);
+    e.preventDefault();
+    handlePressStart();
+    beginDrag('move', e.clientX, e.clientY);
+  };
 
-    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
-    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
-
-    startPosRef.current = {
-      mouseX: clientX,
-      mouseY: clientY,
-      boxX: blurBox.x,
-      boxY: blurBox.y,
-      boxW: blurBox.width,
-      boxH: blurBox.height,
-    };
+  const handleResizePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== undefined && e.button !== 0 && e.pointerType === 'mouse') return;
+    e.stopPropagation();
+    e.preventDefault();
+    handlePressEnd();
+    beginDrag('resize', e.clientX, e.clientY);
   };
 
   useEffect(() => {
-    if (!isDraggingMove && !isDraggingResize) return;
+    if (!dragMode) return;
 
-    const handlePointerMove = (e: MouseEvent | TouchEvent) => {
-      const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
-      const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
+    const handlePointerMove = (e: PointerEvent) => {
+      e.preventDefault();
+      const { blurBox: cur, onUpdate: updateFn } = latestRef.current;
+      const deltaX = e.clientX - startPosRef.current.mouseX;
+      const deltaY = e.clientY - startPosRef.current.mouseY;
 
-      const deltaX = clientX - startPosRef.current.mouseX;
-      const deltaY = clientY - startPosRef.current.mouseY;
+      if (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3) {
+        startPosRef.current.didMove = true;
+        handlePressEnd();
+      }
 
-      let pxToPercentX = 0.2;
-      let pxToPercentY = 0.2;
+      let pxToPercentX = 0.25;
+      let pxToPercentY = 0.25;
       const parentEl = boxRef.current?.parentElement;
       if (parentEl) {
         const rect = parentEl.getBoundingClientRect();
@@ -1296,79 +1327,92 @@ export const InteractiveBlurBox: React.FC<InteractiveBlurBoxProps> = ({ blurBox,
         if (rect.height > 0) pxToPercentY = 100 / rect.height;
       }
 
-      if (isDraggingMove) {
-        const newX = Math.max(0, Math.min(100 - blurBox.width, startPosRef.current.boxX + deltaX * pxToPercentX));
-        const newY = Math.max(0, Math.min(100 - blurBox.height, startPosRef.current.boxY + deltaY * pxToPercentY));
-        onUpdate({ ...blurBox, x: parseFloat(newX.toFixed(1)), y: parseFloat(newY.toFixed(1)) });
-      } else if (isDraggingResize) {
-        const newW = Math.max(5, Math.min(100 - blurBox.x, startPosRef.current.boxW + deltaX * pxToPercentX));
-        const newH = Math.max(5, Math.min(100 - blurBox.y, startPosRef.current.boxH + deltaY * pxToPercentY));
-        onUpdate({ ...blurBox, width: parseFloat(newW.toFixed(1)), height: parseFloat(newH.toFixed(1)) });
+      if (dragMode === 'move') {
+        const newX = Math.max(0, Math.min(100 - cur.width, startPosRef.current.boxX + deltaX * pxToPercentX));
+        const newY = Math.max(0, Math.min(100 - cur.height, startPosRef.current.boxY + deltaY * pxToPercentY));
+        updateFn({ ...cur, x: parseFloat(newX.toFixed(1)), y: parseFloat(newY.toFixed(1)) });
+      } else if (dragMode === 'resize') {
+        const newW = Math.max(8, Math.min(100 - cur.x, startPosRef.current.boxW + deltaX * pxToPercentX));
+        const newH = Math.max(6, Math.min(100 - cur.y, startPosRef.current.boxH + deltaY * pxToPercentY));
+        updateFn({ ...cur, width: parseFloat(newW.toFixed(1)), height: parseFloat(newH.toFixed(1)) });
       }
     };
 
     const handlePointerUp = () => {
-      setIsDraggingMove(false);
-      setIsDraggingResize(false);
+      setDragMode(null);
       handlePressEnd();
     };
 
-    window.addEventListener('mousemove', handlePointerMove);
-    window.addEventListener('mouseup', handlePointerUp);
-    window.addEventListener('touchmove', handlePointerMove);
-    window.addEventListener('touchend', handlePointerUp);
+    window.addEventListener('pointermove', handlePointerMove, { passive: false });
+    window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerUp);
 
     return () => {
-      window.removeEventListener('mousemove', handlePointerMove);
-      window.removeEventListener('mouseup', handlePointerUp);
-      window.removeEventListener('touchmove', handlePointerMove);
-      window.removeEventListener('touchend', handlePointerUp);
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerUp);
     };
-  }, [isDraggingMove, isDraggingResize, blurBox]);
+  }, [dragMode]);
+
+  const isDragging = dragMode !== null;
 
   return (
     <div
       ref={boxRef}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
-      onMouseDown={handleMoveStart}
-      onTouchStart={handleMoveStart}
+      onPointerDown={handleMovePointerDown}
       onClick={(e) => {
         e.stopPropagation();
-        setShowDeleteMenu(!showDeleteMenu);
+        if (!startPosRef.current.didMove) {
+          setShowDeleteMenu((prev) => !prev);
+        }
       }}
-      className={`absolute z-20 cursor-move select-none rounded-md transition-all ${
-        isHovered || showDeleteMenu || isDraggingMove || isDraggingResize
-          ? 'border-2 border-dashed border-amber-400 bg-amber-500/10 shadow-xl ring-2 ring-amber-400/40'
-          : 'border border-amber-400/50 bg-black/10'
+      className={`absolute rounded-md select-none touch-none ${
+        isDragging
+          ? 'z-[35] cursor-grabbing transition-none border-2 border-dashed border-amber-300 bg-amber-500/15 shadow-2xl ring-2 ring-amber-400/60'
+          : isHovered || showDeleteMenu
+            ? 'z-[30] cursor-grab transition-colors border-2 border-dashed border-amber-400 bg-amber-500/10 shadow-xl ring-2 ring-amber-400/40'
+            : 'z-[25] cursor-grab transition-colors border border-amber-400/60 bg-black/15'
       }`}
       style={{
         left: `${blurBox.x}%`,
         top: `${blurBox.y}%`,
         width: `${blurBox.width}%`,
         height: `${blurBox.height}%`,
+        touchAction: 'none',
         backdropFilter: `blur(${blurBox.blurAmount}px)`,
         WebkitBackdropFilter: `blur(${blurBox.blurAmount}px)`,
       }}
+      title="လက်ဖြင့် ဖိဆွဲ၍ Video ပေါ် ကြိုက်တဲ့နေရာ ရွှေ့ပါ (Drag Blur Box)"
     >
+      {(isHovered || isDragging) && (
+        <span className="absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded bg-amber-950/95 border border-amber-400 text-[10px] text-amber-200 font-myanmar font-semibold whitespace-nowrap shadow pointer-events-none">
+          🖐️ ဖိဆွဲ၍ Blur ရွှေ့ပါ
+        </span>
+      )}
+
       {/* Resize Corner Handle at Bottom-Right */}
       <div
-        onMouseDown={handleResizeStart}
-        onTouchStart={handleResizeStart}
-        className="absolute bottom-0 right-0 w-5 h-5 bg-amber-400 hover:bg-amber-300 rounded-tl cursor-nwse-resize flex items-center justify-center text-zinc-950 shadow-md transition-transform"
-        title="လက်ဖြင့် ဆွဲ၍ အတိုအရှည် အနိမ့်အမြင့် ချိန်ရန် (Drag Corner to Resize)"
+        onPointerDown={handleResizePointerDown}
+        onClick={(e) => e.stopPropagation()}
+        style={{ touchAction: 'none' }}
+        className="absolute bottom-0 right-0 w-6 h-6 bg-amber-400 hover:bg-amber-300 rounded-tl-md cursor-nwse-resize touch-none flex items-center justify-center text-zinc-950 shadow-md"
+        title="ထောင့်စွန်းမှ ဆွဲ၍ အရွယ်အစား ချိန်ရန် (Drag Corner to Resize)"
       >
-        <span className="text-[10px] font-bold">↘</span>
+        <span className="text-[11px] font-black leading-none">↘</span>
       </div>
 
-      {/* Floating Delete Button (On Long-Press or Click) */}
-      {(showDeleteMenu || isHovered) && (
+      {/* Floating Delete Button (On Tap/Hover) */}
+      {(showDeleteMenu || isHovered) && !isDragging && (
         <button
+          type="button"
+          onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
             onDelete();
           }}
-          className="absolute -top-3 -right-3 z-30 px-2 py-1 bg-rose-600 hover:bg-rose-500 text-white font-bold text-[11px] rounded-full shadow-2xl border border-rose-300 flex items-center gap-1 cursor-pointer"
+          className="absolute -top-3 -right-3 z-40 px-2 py-1 bg-rose-600 hover:bg-rose-500 text-white font-bold text-[11px] rounded-full shadow-2xl border border-rose-300 flex items-center gap-1 cursor-pointer"
           title="Blur အကွက်ကို ဖျက်မည်"
         >
           <Trash2 className="w-3 h-3" />
@@ -1393,17 +1437,18 @@ export const InteractiveSubtitleOverlay: React.FC<InteractiveSubtitleOverlayProp
   const [isDragging, setIsDragging] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
   const startRef = useRef({ mouseX: 0, mouseY: 0, startOffsetX: 0, startOffsetY: 0 });
+  const latestUpdateRef = useRef(onUpdateOffset);
+  latestUpdateRef.current = onUpdateOffset;
 
-  const handlePointerDown = (e: React.MouseEvent | React.TouchEvent) => {
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== undefined && e.button !== 0 && e.pointerType === 'mouse') return;
     e.stopPropagation();
+    e.preventDefault();
     setIsDragging(true);
 
-    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
-    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
-
     startRef.current = {
-      mouseX: clientX,
-      mouseY: clientY,
+      mouseX: e.clientX,
+      mouseY: e.clientY,
       startOffsetX: settings.offsetX || 0,
       startOffsetY: settings.offsetY || 0,
     };
@@ -1412,14 +1457,12 @@ export const InteractiveSubtitleOverlay: React.FC<InteractiveSubtitleOverlayProp
   useEffect(() => {
     if (!isDragging) return;
 
-    const handlePointerMove = (e: MouseEvent | TouchEvent) => {
-      const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
-      const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
+    const handlePointerMove = (e: PointerEvent) => {
+      e.preventDefault();
+      const deltaX = e.clientX - startRef.current.mouseX;
+      const deltaY = e.clientY - startRef.current.mouseY;
 
-      const deltaX = clientX - startRef.current.mouseX;
-      const deltaY = clientY - startRef.current.mouseY;
-
-      onUpdateOffset(
+      latestUpdateRef.current(
         startRef.current.startOffsetX + deltaX,
         startRef.current.startOffsetY + deltaY
       );
@@ -1429,16 +1472,14 @@ export const InteractiveSubtitleOverlay: React.FC<InteractiveSubtitleOverlayProp
       setIsDragging(false);
     };
 
-    window.addEventListener('mousemove', handlePointerMove);
-    window.addEventListener('mouseup', handlePointerUp);
-    window.addEventListener('touchmove', handlePointerMove);
-    window.addEventListener('touchend', handlePointerUp);
+    window.addEventListener('pointermove', handlePointerMove, { passive: false });
+    window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerUp);
 
     return () => {
-      window.removeEventListener('mousemove', handlePointerMove);
-      window.removeEventListener('mouseup', handlePointerUp);
-      window.removeEventListener('touchmove', handlePointerMove);
-      window.removeEventListener('touchend', handlePointerUp);
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerUp);
     };
   }, [isDragging]);
 
@@ -1451,13 +1492,13 @@ export const InteractiveSubtitleOverlay: React.FC<InteractiveSubtitleOverlayProp
 
   return (
     <div
-      className={`absolute left-0 right-0 px-3 text-center z-20 flex items-center justify-center pointer-events-auto ${basePositionYClass}`}
+      className={`absolute left-0 right-0 px-3 text-center z-20 flex items-center justify-center pointer-events-none ${basePositionYClass}`}
     >
       <div
         onMouseEnter={() => setIsHovered(true)}
         onMouseLeave={() => setIsHovered(false)}
-        onMouseDown={handlePointerDown}
-        onTouchStart={handlePointerDown}
+        onPointerDown={handlePointerDown}
+        onClick={(e) => e.stopPropagation()}
         style={{
           fontFamily: `'${settings.fontFamily}', 'Pyidaungsu', 'Noto Sans Myanmar', sans-serif`,
           fontSize: `${settings.fontSize}px`,
@@ -1474,13 +1515,16 @@ export const InteractiveSubtitleOverlay: React.FC<InteractiveSubtitleOverlayProp
           maxWidth: '88%',
           wordBreak: 'break-word',
           overflowWrap: 'anywhere',
+          touchAction: 'none',
         }}
-        className={`relative px-4 py-1.5 rounded-lg font-semibold font-myanmar text-center whitespace-pre-wrap leading-relaxed select-none inline-block shadow-lg cursor-grab active:cursor-grabbing transition-all ${
-          isHovered || isDragging
-            ? 'ring-2 ring-cyan-400 ring-offset-2 ring-offset-black/60 shadow-cyan-500/30'
-            : ''
+        className={`relative px-4 py-1.5 rounded-lg font-semibold font-myanmar text-center whitespace-pre-wrap leading-relaxed select-none inline-block shadow-lg pointer-events-auto touch-none cursor-grab active:cursor-grabbing ${
+          isDragging
+            ? 'transition-none ring-2 ring-cyan-400 ring-offset-2 ring-offset-black/60 shadow-cyan-500/30'
+            : isHovered
+              ? 'transition-shadow ring-2 ring-cyan-400 ring-offset-2 ring-offset-black/60 shadow-cyan-500/30'
+              : 'transition-shadow'
         }`}
-        title="လက်ဖြင့် Mouse ဖြင့် ဖိဆွဲ၍ စာတန်းထိုး နေရာ စိတ်ကြိုက်ရွှေ့ပါ (Drag to Reposition Subtitle)"
+        title="လက်ဖြင့် ဖိဆွဲ၍ စာတန်းထိုး နေရာ စိတ်ကြိုက်ရွှေ့ပါ (Drag to Reposition Subtitle)"
       >
         {text}
         {(isHovered || isDragging) && (

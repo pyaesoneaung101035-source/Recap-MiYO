@@ -6,7 +6,6 @@ import { Step3CanvasCrop } from './components/Step3CanvasCrop';
 import { AiRecapStudio } from './components/AiRecapStudio';
 import { VoiceCloneStudio } from './components/VoiceCloneStudio';
 import { Step5StudioEditor } from './components/Step5StudioEditor';
-import { Step8AlightMotion } from './components/Step8AlightMotion';
 import { Step8ExportStudio } from './components/Step8ExportStudio';
 import { VideoPlayerView } from './components/VideoPlayerView';
 import { EdgePanel } from './components/EdgePanel';
@@ -215,7 +214,7 @@ export default function App() {
     (s) => project.currentTime >= s.startTime && project.currentTime <= s.endTime
   ) || project.segments[0] || null;
 
-  // 8 Steps configuration
+  // 6 Steps configuration (removed Step 6 Alight Motion slide; Pro Edition is built into Step 5)
   const steps: StepItem[] = [
     {
       number: 1,
@@ -254,15 +253,8 @@ export default function App() {
     },
     {
       number: 6,
-      id: 'motion',
-      title: 'အဆင့် ၆',
-      subtitle: 'Alight Motion Studio',
-      isComplete: project.keyframes.length > 0,
-    },
-    {
-      number: 7,
       id: 'export',
-      title: 'အဆင့် ၇',
+      title: 'အဆင့် ၆',
       subtitle: 'Export Studio (MP4)',
       isComplete: false,
     },
@@ -401,21 +393,10 @@ export default function App() {
         )}
 
         {currentStep === 6 && (
-          <Step8AlightMotion
-            project={project}
-            setProject={setProject}
-            onSeekTo={handleSeekTo}
-            onPrevStep={() => setCurrentStep(5)}
-            onNextStep={() => setCurrentStep(7)}
-            onOpenExportModal={() => setIsExportModalOpen(true)}
-          />
-        )}
-
-        {currentStep === 7 && (
           <Step8ExportStudio
             project={project}
             setProject={setProject}
-            onPrevStep={() => setCurrentStep(6)}
+            onPrevStep={() => setCurrentStep(5)}
           />
         )}
       </main>

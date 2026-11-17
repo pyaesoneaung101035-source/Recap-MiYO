@@ -131,17 +131,70 @@ function parseGradioCompleteData(sseText: string): any[] | null {
   return Array.isArray(parsed) ? parsed : null;
 }
 
-async function separateWithBsRoformerSpace(
+async function getAudioDurationSec(audioPath: string): Promise<number> {
+  try {
+    const { stdout } = await execAsync(
+      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${audioPath}"`
+    );
+    const val = parseFloat(stdout.trim());
+    return Number.isFinite(val) && val > 0 ? val : 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
+async function splitAudioIntoWavSegments(
   inputAudioPath: string,
+  workDir: string,
+  segmentSec = 45
+): Promise<string[]> {
+  fs.mkdirSync(workDir, { recursive: true });
+  const pattern = path.join(workDir, 'seg_%04d.wav');
+  await execAsync(
+    `ffmpeg -nostdin -loglevel error -y -i "${inputAudioPath}" -f segment -segment_time ${segmentSec} -reset_timestamps 1 -c:a pcm_s16le "${pattern}"`
+  );
+  return fs
+    .readdirSync(workDir)
+    .filter((f) => f.startsWith('seg_') && f.endsWith('.wav'))
+    .sort()
+    .map((f) => path.join(workDir, f));
+}
+
+async function concatWavSegments(segmentPaths: string[], outputPath: string, workDir: string): Promise<void> {
+  if (segmentPaths.length === 1) {
+    fs.copyFileSync(segmentPaths[0], outputPath);
+    return;
+  }
+  const listPath = path.join(workDir, `concat_${Date.now()}.txt`);
+  const listBody = segmentPaths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join('\n');
+  fs.writeFileSync(listPath, listBody, 'utf8');
+  await execAsync(
+    `ffmpeg -nostdin -loglevel error -y -f concat -safe 0 -i "${listPath}" -c:a pcm_s16le "${outputPath}"`
+  );
+}
+
+async function separateSingleWithBsRoformerSpace(
+  inputAudioPath: string,
+  outputDir: string,
+  tag: string,
   instStemPath: string,
-  vocalStemPath: string,
   onProgress?: (percent: number, stageLabel: string) => void
-): Promise<SeparationResult | null> {
+): Promise<boolean> {
   const spaceBase = 'https://hugging-apps-bs-roformer-leap-audio-separator.hf.space';
+  let tempUploadMp3: string | null = null;
   try {
     onProgress?.(36, 'BS-RoFormer AI Neural Engine ထံ အသံဖိုင် ပေးပို့နေသည်...');
-    const fileBuf = fs.readFileSync(inputAudioPath);
-    const ext = path.extname(inputAudioPath).toLowerCase() === '.mp3' ? '.mp3' : '.wav';
+    let uploadAudioPath = inputAudioPath;
+    if (path.extname(inputAudioPath).toLowerCase() !== '.mp3') {
+      tempUploadMp3 = path.join(outputDir, `${tag}_bs_upload.mp3`);
+      await execAsync(
+        `ffmpeg -nostdin -loglevel error -y -i "${inputAudioPath}" -vn -ac 2 -ar 44100 -c:a libmp3lame -q:a 2 "${tempUploadMp3}"`
+      );
+      uploadAudioPath = tempUploadMp3;
+    }
+
+    const fileBuf = fs.readFileSync(uploadAudioPath);
+    const ext = path.extname(uploadAudioPath).toLowerCase() === '.mp3' ? '.mp3' : '.wav';
     const mime = ext === '.mp3' ? 'audio/mpeg' : 'audio/wav';
     const fileName = `source_audio${ext}`;
 
@@ -193,17 +246,13 @@ async function separateWithBsRoformerSpace(
       throw new Error('Incomplete BS-RoFormer stem output');
     }
 
-    // With 'Standard — Vocals': [0] = Vocals stem, [1] = Instrumental residual (verify filename to be 100% safe)
     const item0 = parsedData[0];
     const item1 = parsedData[1];
     const name0 = String(item0?.orig_name || item0?.path || '').toLowerCase();
     const name1 = String(item1?.orig_name || item1?.path || '').toLowerCase();
 
     const instObj = name0.includes('instrumental') && !name1.includes('instrumental') ? item0 : item1;
-    const vocObj = instObj === item1 ? item0 : item1;
-
     const instUrl = instObj?.url || (instObj?.path ? `${spaceBase}/gradio_api/file=${instObj.path}` : null);
-    const vocUrl = vocObj?.url || (vocObj?.path ? `${spaceBase}/gradio_api/file=${vocObj.path}` : null);
     if (!instUrl) throw new Error('Instrumental track URL missing');
 
     onProgress?.(78, 'လူသံမပါသော Background music ကို ဒေါင်းလုဒ်ဆွဲယူနေသည်...');
@@ -211,8 +260,88 @@ async function separateWithBsRoformerSpace(
     if (!instRes.ok) throw new Error(`Instrumental download HTTP ${instRes.status}`);
     const instBuf = Buffer.from(await instRes.arrayBuffer());
     if (instBuf.length < 1000) throw new Error('Downloaded instrumental stem is empty');
-    fs.writeFileSync(instStemPath, instBuf);
 
+    const rawDlPath = path.join(outputDir, `${tag}_bs_dl.audio`);
+    fs.writeFileSync(rawDlPath, instBuf);
+    try {
+      await execAsync(
+        `ffmpeg -nostdin -loglevel error -y -i "${rawDlPath}" -ac 2 -ar 44100 -c:a pcm_s16le "${instStemPath}"`
+      );
+    } finally {
+      if (fs.existsSync(rawDlPath)) {
+        try { fs.unlinkSync(rawDlPath); } catch (_) {}
+      }
+    }
+
+    return fs.existsSync(instStemPath) && fs.statSync(instStemPath).size > 1000;
+  } catch (err: any) {
+    console.warn('BS-RoFormer AI Space separation unavailable, trying backup AI:', err?.message || err);
+    return false;
+  } finally {
+    if (tempUploadMp3 && fs.existsSync(tempUploadMp3)) {
+      try { fs.unlinkSync(tempUploadMp3); } catch (_) {}
+    }
+  }
+}
+
+async function separateWithBsRoformerSpace(
+  inputAudioPath: string,
+  outputDir: string,
+  jobId: string,
+  instStemPath: string,
+  _vocalStemPath: string,
+  onProgress?: (percent: number, stageLabel: string) => void
+): Promise<SeparationResult | null> {
+  const segDir = path.join(outputDir, `bs_segs_${jobId}`);
+  try {
+    const durationSec = await getAudioDurationSec(inputAudioPath);
+    if (durationSec <= 55) {
+      const ok = await separateSingleWithBsRoformerSpace(
+        inputAudioPath,
+        outputDir,
+        jobId,
+        instStemPath,
+        onProgress
+      );
+      if (!ok) return null;
+      return {
+        success: true,
+        engineUsed: 'bs_roformer_ai',
+        instrumentalStemPath: instStemPath,
+        statusMessage: 'BS-RoFormer AI ဖြင့် လူစကားပြောသံများ အပြည့်အဝ ဖယ်ရှားပြီး Background music.mp3 ခွဲထုတ်ပြီးပါပြီ',
+        isFallback: false,
+      };
+    }
+
+    onProgress?.(33, `ဗီဒီယိုအရှည် (${Math.round(durationSec)}s) ကို BS-RoFormer AI အပိုင်းခွဲ၍ ခွဲထုတ်နေသည်...`);
+    const segs = await splitAudioIntoWavSegments(inputAudioPath, segDir, 45);
+    const outInstSegs: string[] = [];
+
+    for (let i = 0; i < segs.length; i++) {
+      const segInst = path.join(segDir, `out_inst_${i}.wav`);
+      const basePct = 34 + Math.round((i / segs.length) * 52);
+      const spanPct = Math.max(4, Math.round(52 / segs.length));
+      const ok = await separateSingleWithBsRoformerSpace(
+        segs[i],
+        segDir,
+        `${jobId}_s${i}`,
+        segInst,
+        (subPct) => {
+          const frac = Math.max(0, Math.min(1, (subPct - 34) / 52));
+          onProgress?.(
+            Math.min(88, basePct + Math.round(frac * spanPct)),
+            `BS-RoFormer AI ဖြင့် Vocals ဖယ်ရှားနေသည်... (အပိုင်း ${i + 1}/${segs.length})`
+          );
+        }
+      );
+      if (!ok) return null;
+      outInstSegs.push(segInst);
+    }
+
+    await concatWavSegments(outInstSegs, instStemPath, segDir);
+    if (!fs.existsSync(instStemPath) || fs.statSync(instStemPath).size < 1000) {
+      return null;
+    }
     return {
       success: true,
       engineUsed: 'bs_roformer_ai',
@@ -221,9 +350,127 @@ async function separateWithBsRoformerSpace(
       isFallback: false,
     };
   } catch (err: any) {
-    console.warn('BS-RoFormer AI Space separation unavailable, trying backup AI:', err?.message || err);
+    console.warn('Segmented BS-RoFormer separation failed:', err?.message || err);
     return null;
+  } finally {
+    if (fs.existsSync(segDir)) {
+      try { fs.rmSync(segDir, { recursive: true, force: true }); } catch (_) {}
+    }
   }
+}
+
+let activeDemucsQueue: Promise<void> = Promise.resolve();
+
+function enqueueDemucsWork<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = activeDemucsQueue;
+  let release!: () => void;
+  activeDemucsQueue = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return prev.then(fn).finally(() => release());
+}
+
+async function runSingleLocalDemucsPass(
+  demucsBin: string,
+  inputAudioPath: string,
+  outTemp: string,
+  instOutPath: string,
+  vocOutPath: string | null,
+  onProgress?: (pctFraction: number) => void
+): Promise<boolean> {
+  try {
+    fs.mkdirSync('/tmp/torch_cache', { recursive: true });
+    fs.mkdirSync('/tmp/hf_cache', { recursive: true });
+  } catch (_) {}
+
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(
+      demucsBin,
+      [
+        '-n',
+        'htdemucs',
+        '--two-stems=vocals',
+        '-d',
+        'cpu',
+        '-j',
+        '1',
+        '--segment',
+        '7',
+        '--overlap',
+        '0.1',
+        '-o',
+        outTemp,
+        inputAudioPath,
+      ],
+      {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          TORCH_HOME: '/tmp/torch_cache',
+          HF_HOME: '/tmp/hf_cache',
+          OMP_NUM_THREADS: '2',
+          MKL_NUM_THREADS: '2',
+          OPENBLAS_NUM_THREADS: '2',
+          NUMEXPR_NUM_THREADS: '2',
+        },
+      }
+    );
+
+    let lastPct = -1;
+    let errBuf = '';
+    let settled = false;
+    const watchdog = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        try {
+          child.kill('SIGKILL');
+        } catch (_) {}
+        reject(new Error('Demucs segment processing timed out'));
+      }
+    }, 360000); // 6 minutes max per 45s segment
+
+    const handleChunk = (chunk: Buffer) => {
+      const text = chunk.toString('utf8');
+      errBuf = (errBuf + text).slice(-2000);
+      const matches = [...text.matchAll(/(\d{1,3})%\|/g)];
+      if (matches.length > 0) {
+        const pctVal = Math.max(0, Math.min(100, parseInt(matches[matches.length - 1][1], 10)));
+        if (pctVal !== lastPct) {
+          lastPct = pctVal;
+          onProgress?.(pctVal / 100);
+        }
+      }
+    };
+
+    child.stdout.on('data', handleChunk);
+    child.stderr.on('data', handleChunk);
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(watchdog);
+      reject(err);
+    });
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(watchdog);
+      if (code === 0) resolve();
+      else reject(new Error(`Demucs exited with code ${code}: ${errBuf.trim()}`));
+    });
+  });
+
+  const fileNameNoExt = path.basename(inputAudioPath, path.extname(inputAudioPath));
+  const demucsInst = path.join(outTemp, 'htdemucs', fileNameNoExt, 'no_vocals.wav');
+  const demucsVoc = path.join(outTemp, 'htdemucs', fileNameNoExt, 'vocals.wav');
+
+  if (fs.existsSync(demucsInst) && fs.statSync(demucsInst).size > 1000) {
+    fs.copyFileSync(demucsInst, instOutPath);
+    if (vocOutPath && fs.existsSync(demucsVoc)) {
+      fs.copyFileSync(demucsVoc, vocOutPath);
+    }
+    return true;
+  }
+  return false;
 }
 
 async function runLocalDemucsSeparation(
@@ -236,56 +483,81 @@ async function runLocalDemucsSeparation(
   onProgress?: (percent: number, stageLabel: string) => void
 ): Promise<SeparationResult | null> {
   const outTemp = path.join(outputDir, `demucs_out_${jobId}`);
+  const segDir = path.join(outputDir, `demucs_segs_${jobId}`);
   try {
     onProgress?.(32, 'Local Demucs v4 (htdemucs) AI Model စတင်ဖွင့်လှစ်နေသည်...');
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn(
+    const durationSec = await getAudioDurationSec(inputAudioPath);
+
+    if (durationSec <= 50) {
+      const ok = await runSingleLocalDemucsPass(
         demucsBin,
-        ['-n', 'htdemucs', '--two-stems=vocals', '-d', 'cpu', '--overlap', '0.1', '-o', outTemp, inputAudioPath],
-        {
-          stdio: ['ignore', 'pipe', 'pipe'],
-          env: {
-            ...process.env,
-            TORCH_HOME: '/tmp/torch_cache',
-            HF_HOME: '/tmp/hf_cache',
-          },
+        inputAudioPath,
+        outTemp,
+        instStemPath,
+        vocalStemPath,
+        (frac) => {
+          const pctVal = Math.round(frac * 100);
+          const mapped = 32 + Math.round(frac * 56);
+          onProgress?.(mapped, `Demucs v4 (htdemucs) AI ဖြင့် Vocals ဖယ်ရှားနေသည်... (${pctVal}%)`);
         }
       );
-
-      let lastPct = -1;
-      let errBuf = '';
-      const handleChunk = (chunk: Buffer) => {
-        const text = chunk.toString('utf8');
-        errBuf = (errBuf + text).slice(-2000);
-        const matches = [...text.matchAll(/(\d{1,3})%\|/g)];
-        if (matches.length > 0) {
-          const pctVal = Math.max(0, Math.min(100, parseInt(matches[matches.length - 1][1], 10)));
-          if (pctVal !== lastPct) {
-            lastPct = pctVal;
-            const mapped = 32 + Math.round((pctVal / 100) * 56); // 32% -> 88%
-            onProgress?.(mapped, `Demucs v4 (htdemucs) AI ဖြင့် Vocals ဖယ်ရှားနေသည်... (${pctVal}%)`);
-          }
-        }
-      };
-
-      child.stdout.on('data', handleChunk);
-      child.stderr.on('data', handleChunk);
-      child.on('error', reject);
-      child.on('close', (code) => {
-        if (code === 0) resolve();
-        else reject(new Error(`Demucs exited with code ${code}: ${errBuf.trim()}`));
-      });
-    });
-
-    const fileNameNoExt = path.basename(inputAudioPath, path.extname(inputAudioPath));
-    const demucsInst = path.join(outTemp, 'htdemucs', fileNameNoExt, 'no_vocals.wav');
-    const demucsVoc = path.join(outTemp, 'htdemucs', fileNameNoExt, 'vocals.wav');
-
-    if (fs.existsSync(demucsInst) && fs.statSync(demucsInst).size > 1000) {
-      fs.copyFileSync(demucsInst, instStemPath);
-      if (fs.existsSync(demucsVoc)) {
-        fs.copyFileSync(demucsVoc, vocalStemPath);
+      if (ok) {
+        return {
+          success: true,
+          engineUsed: 'demucs',
+          instrumentalStemPath: instStemPath,
+          vocalStemPath: fs.existsSync(vocalStemPath) ? vocalStemPath : undefined,
+          statusMessage: 'Demucs v4 AI (htdemucs) ဖြင့် လူစကားပြောသံများ ဖယ်ရှားပြီး Background music.mp3 ခွဲထုတ်ပြီးပါပြီ',
+          isFallback: false,
+        };
       }
+      return null;
+    }
+
+    // For >50s videos, split into 45s segments to prevent container CPU/RAM exhaustion and report segment progress cleanly
+    onProgress?.(32, `ဗီဒီယိုအရှည် (${Math.round(durationSec)}s) ကို Demucs v4 AI အပိုင်းခွဲ၍ စီမံနေသည်...`);
+    const segs = await splitAudioIntoWavSegments(inputAudioPath, segDir, 45);
+    const outInstSegs: string[] = [];
+    const outVocSegs: string[] = [];
+
+    for (let i = 0; i < segs.length; i++) {
+      const segOutTemp = path.join(outTemp, `s${i}`);
+      const segInst = path.join(segDir, `inst_${i}.wav`);
+      const segVoc = path.join(segDir, `voc_${i}.wav`);
+      const segStartPct = 32 + Math.round((i / segs.length) * 56);
+      const segSpanPct = 56 / segs.length;
+
+      onProgress?.(segStartPct, `Demucs v4 (htdemucs) ဖြင့် ခွဲထုတ်နေသည်... (အပိုင်း ${i + 1}/${segs.length})`);
+      const ok = await runSingleLocalDemucsPass(
+        demucsBin,
+        segs[i],
+        segOutTemp,
+        segInst,
+        segVoc,
+        (frac) => {
+          const mapped = Math.min(88, segStartPct + Math.round(frac * segSpanPct));
+          onProgress?.(
+            mapped,
+            `Demucs v4 (htdemucs) ဖြင့် Vocals ဖယ်ရှားနေသည်... (အပိုင်း ${i + 1}/${segs.length} · ${Math.round(frac * 100)}%)`
+          );
+        }
+      );
+      if (!ok) return null;
+      outInstSegs.push(segInst);
+      if (fs.existsSync(segVoc)) outVocSegs.push(segVoc);
+
+      if (fs.existsSync(segOutTemp)) {
+        try { fs.rmSync(segOutTemp, { recursive: true, force: true }); } catch (_) {}
+      }
+    }
+
+    onProgress?.(88, 'Demucs BGM အပိုင်းများကို တစ်ဆက်တည်း ပြန်လည်ပေါင်းစည်းနေသည်...');
+    await concatWavSegments(outInstSegs, instStemPath, segDir);
+    if (outVocSegs.length === outInstSegs.length) {
+      await concatWavSegments(outVocSegs, vocalStemPath, segDir).catch(() => {});
+    }
+
+    if (fs.existsSync(instStemPath) && fs.statSync(instStemPath).size > 1000) {
       return {
         success: true,
         engineUsed: 'demucs',
@@ -302,21 +574,22 @@ async function runLocalDemucsSeparation(
     return null;
   } finally {
     if (fs.existsSync(outTemp)) {
-      try {
-        fs.rmSync(outTemp, { recursive: true, force: true });
-      } catch (_) {}
+      try { fs.rmSync(outTemp, { recursive: true, force: true }); } catch (_) {}
+    }
+    if (fs.existsSync(segDir)) {
+      try { fs.rmSync(segDir, { recursive: true, force: true }); } catch (_) {}
     }
   }
 }
 
-async function separateWithDemucsSpace(
+async function separateSingleWithDemucsSpace(
   inputAudioPath: string,
   outputDir: string,
   jobId: string,
   instStemPath: string,
-  vocalStemPath: string,
+  vocalStemPath: string | null,
   onProgress?: (percent: number, stageLabel: string) => void
-): Promise<SeparationResult | null> {
+): Promise<boolean> {
   const spaceBase = 'https://teamup-tech-demucs.hf.space';
   let tempUploadMp3: string | null = null;
   const tempStemFiles: string[] = [];
@@ -385,8 +658,6 @@ async function separateWithDemucsSpace(
       throw new Error('Incomplete Demucs 4-stem output');
     }
 
-    // Returns order from /process: [0]=Drums, [1]=Bass, [2]=Vocals, [3]=Other
-    // Match by filename first to be resilient, falling back to documented index order
     const getUrl = (item: any) => item?.url || (item?.path ? `${spaceBase}/gradio_api/file=${item.path}` : null);
     const getName = (item: any) => String(item?.orig_name || item?.path || '').toLowerCase();
 
@@ -414,9 +685,8 @@ async function separateWithDemucsSpace(
       })
     );
 
-    // Download vocals stem on best-effort basis
     const vocalsUrl = getUrl(vocalsItem);
-    if (vocalsUrl) {
+    if (vocalsUrl && vocalStemPath) {
       try {
         const vRes = await fetch(vocalsUrl, { signal: AbortSignal.timeout(60000) });
         if (vRes.ok) {
@@ -427,10 +697,91 @@ async function separateWithDemucsSpace(
     }
 
     onProgress?.(85, 'Demucs Instrumental stems (Drums + Bass + Music) ပေါင်းစည်းနေသည်...');
-    // Sum additive stems without normalization attenuation so original music loudness is preserved
     await execAsync(
       `ffmpeg -nostdin -loglevel error -y -i "${tempStemFiles[0]}" -i "${tempStemFiles[1]}" -i "${tempStemFiles[2]}" -filter_complex "[0:a][1:a][2:a]amix=inputs=3:duration=longest:normalize=0,alimiter=limit=0.98[inst]" -map "[inst]" -c:a pcm_s16le "${instStemPath}"`
     );
+
+    return fs.existsSync(instStemPath) && fs.statSync(instStemPath).size > 1000;
+  } catch (err: any) {
+    console.warn('Demucs AI Space unavailable, trying backup separation engine:', err?.message || err);
+    return false;
+  } finally {
+    if (tempUploadMp3 && fs.existsSync(tempUploadMp3)) {
+      try { fs.unlinkSync(tempUploadMp3); } catch (_) {}
+    }
+    for (const f of tempStemFiles) {
+      if (fs.existsSync(f)) {
+        try { fs.unlinkSync(f); } catch (_) {}
+      }
+    }
+  }
+}
+
+async function separateWithDemucsSpace(
+  inputAudioPath: string,
+  outputDir: string,
+  jobId: string,
+  instStemPath: string,
+  vocalStemPath: string,
+  onProgress?: (percent: number, stageLabel: string) => void
+): Promise<SeparationResult | null> {
+  const segDir = path.join(outputDir, `demucs_space_segs_${jobId}`);
+  try {
+    const durationSec = await getAudioDurationSec(inputAudioPath);
+    if (durationSec <= 55) {
+      const ok = await separateSingleWithDemucsSpace(
+        inputAudioPath,
+        outputDir,
+        jobId,
+        instStemPath,
+        vocalStemPath,
+        onProgress
+      );
+      if (!ok) return null;
+      return {
+        success: true,
+        engineUsed: 'demucs_ai',
+        instrumentalStemPath: instStemPath,
+        vocalStemPath: fs.existsSync(vocalStemPath) ? vocalStemPath : undefined,
+        statusMessage: 'Demucs v4 AI (htdemucs) ဖြင့် လူစကားပြောသံများ ဖယ်ရှားပြီး Background music.mp3 ခွဲထုတ်ပြီးပါပြီ',
+        isFallback: false,
+      };
+    }
+
+    onProgress?.(34, `ဗီဒီယိုအရှည် (${Math.round(durationSec)}s) ကို Demucs v4 AI အပိုင်းခွဲ၍ ခွဲထုတ်နေသည်...`);
+    const segs = await splitAudioIntoWavSegments(inputAudioPath, segDir, 45);
+    const outInstSegs: string[] = [];
+    const outVocSegs: string[] = [];
+
+    for (let i = 0; i < segs.length; i++) {
+      const segInst = path.join(segDir, `inst_${i}.wav`);
+      const segVoc = path.join(segDir, `voc_${i}.wav`);
+      const basePct = 34 + Math.round((i / segs.length) * 52);
+      const spanPct = Math.max(4, Math.round(52 / segs.length));
+
+      const ok = await separateSingleWithDemucsSpace(
+        segs[i],
+        segDir,
+        `${jobId}_s${i}`,
+        segInst,
+        segVoc,
+        (subPct) => {
+          const frac = Math.max(0, Math.min(1, (subPct - 34) / 51));
+          onProgress?.(
+            Math.min(88, basePct + Math.round(frac * spanPct)),
+            `Demucs v4 AI ဖြင့် Vocals ဖယ်ရှားနေသည်... (အပိုင်း ${i + 1}/${segs.length})`
+          );
+        }
+      );
+      if (!ok) return null;
+      outInstSegs.push(segInst);
+      if (fs.existsSync(segVoc)) outVocSegs.push(segVoc);
+    }
+
+    await concatWavSegments(outInstSegs, instStemPath, segDir);
+    if (outVocSegs.length === outInstSegs.length) {
+      await concatWavSegments(outVocSegs, vocalStemPath, segDir).catch(() => {});
+    }
 
     if (fs.existsSync(instStemPath) && fs.statSync(instStemPath).size > 1000) {
       return {
@@ -445,16 +796,11 @@ async function separateWithDemucsSpace(
 
     return null;
   } catch (err: any) {
-    console.warn('Demucs AI Space unavailable, trying backup separation engine:', err?.message || err);
+    console.warn('Segmented Demucs Space separation failed:', err?.message || err);
     return null;
   } finally {
-    if (tempUploadMp3 && fs.existsSync(tempUploadMp3)) {
-      try { fs.unlinkSync(tempUploadMp3); } catch (_) {}
-    }
-    for (const f of tempStemFiles) {
-      if (fs.existsSync(f)) {
-        try { fs.unlinkSync(f); } catch (_) {}
-      }
+    if (fs.existsSync(segDir)) {
+      try { fs.rmSync(segDir, { recursive: true, force: true }); } catch (_) {}
     }
   }
 }
@@ -482,17 +828,19 @@ export async function separateAudioStems(
   const instStemPath = path.join(outputDir, `${jobId}_instrumental_stem.wav`);
   const vocalStemPath = path.join(outputDir, `${jobId}_vocal_stem.wav`);
 
-  // 1. Primary Engine: Real Local Demucs v4 (htdemucs) CLI — zero third-party quota limits
+  // 1. Primary Engine: Real Local Demucs v4 (htdemucs) CLI — serialized queue prevents OOM/CPU starvation on consecutive runs
   const demucsBin = await ensureLocalDemucsBinary(onProgress);
   if (demucsBin) {
-    const localRes = await runLocalDemucsSeparation(
-      demucsBin,
-      inputAudioPath,
-      outputDir,
-      jobId,
-      instStemPath,
-      vocalStemPath,
-      onProgress
+    const localRes = await enqueueDemucsWork(() =>
+      runLocalDemucsSeparation(
+        demucsBin,
+        inputAudioPath,
+        outputDir,
+        jobId,
+        instStemPath,
+        vocalStemPath,
+        onProgress
+      )
     );
     if (localRes) return localRes;
   }
@@ -509,7 +857,14 @@ export async function separateAudioStems(
   if (demucsRes) return demucsRes;
 
   // 3. Backup Neural AI Space: BS-RoFormer
-  const bsRes = await separateWithBsRoformerSpace(inputAudioPath, instStemPath, vocalStemPath, onProgress);
+  const bsRes = await separateWithBsRoformerSpace(
+    inputAudioPath,
+    outputDir,
+    jobId,
+    instStemPath,
+    vocalStemPath,
+    onProgress
+  );
   if (bsRes) return bsRes;
 
   // 5. Local FFmpeg Aggressive Vocal Cancellation Fallback (Center Channel Cancel + Deep Speech Notch)
@@ -649,8 +1004,39 @@ export interface BuiltinBgmJob {
 
 const builtinBgmJobs = new Map<string, BuiltinBgmJob>();
 
-export function getBuiltinBgmJob(jobId: string): BuiltinBgmJob | undefined {
-  return builtinBgmJobs.get(jobId);
+function getBgmJobFilePath(exportsDir: string, jobId: string): string {
+  const safeId = jobId.replace(/[^a-zA-Z0-9_-]/g, '');
+  return path.join(exportsDir, `.bgm_job_${safeId}.json`);
+}
+
+function saveBgmJob(job: BuiltinBgmJob, exportsDir?: string): void {
+  builtinBgmJobs.set(job.jobId, job);
+  if (exportsDir) {
+    try {
+      const filePath = getBgmJobFilePath(exportsDir, job.jobId);
+      const tmpPath = `${filePath}.tmp`;
+      fs.writeFileSync(tmpPath, JSON.stringify(job), 'utf8');
+      fs.renameSync(tmpPath, filePath);
+    } catch (_) {}
+  }
+}
+
+export function getBuiltinBgmJob(jobId: string, exportsDir?: string): BuiltinBgmJob | undefined {
+  const mem = builtinBgmJobs.get(jobId);
+  if (mem) return mem;
+  if (exportsDir) {
+    try {
+      const filePath = getBgmJobFilePath(exportsDir, jobId);
+      if (fs.existsSync(filePath)) {
+        const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as BuiltinBgmJob;
+        if (parsed && parsed.jobId) {
+          builtinBgmJobs.set(parsed.jobId, parsed);
+          return parsed;
+        }
+      }
+    } catch (_) {}
+  }
+  return undefined;
 }
 
 export async function startBuiltinBgmJob(params: {
@@ -667,13 +1053,25 @@ export async function startBuiltinBgmJob(params: {
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
-  builtinBgmJobs.set(jobId, initialJob);
+  saveBgmJob(initialJob, params.exportsDir);
 
+  const now = Date.now();
   for (const [oldId, oldJob] of builtinBgmJobs.entries()) {
-    if (Date.now() - oldJob.createdAt > 3600000) {
+    if (now - oldJob.createdAt > 3600000) {
       builtinBgmJobs.delete(oldId);
     }
   }
+  try {
+    for (const entry of fs.readdirSync(params.exportsDir)) {
+      if (entry.startsWith('.bgm_job_') && entry.endsWith('.json')) {
+        const full = path.join(params.exportsDir, entry);
+        const st = fs.statSync(full);
+        if (now - st.mtimeMs > 3600000) {
+          fs.unlinkSync(full);
+        }
+      }
+    }
+  } catch (_) {}
 
   (async () => {
     try {
@@ -685,11 +1083,14 @@ export async function startBuiltinBgmJob(params: {
         const maxTickPct = Math.min(92, activeFloor + 3);
         const nextPct = Math.min(maxTickPct, Math.max(activeFloor, cur.percent + 1));
         if (nextPct !== cur.percent) {
-          builtinBgmJobs.set(jobId, {
-            ...cur,
-            percent: nextPct,
-            updatedAt: Date.now(),
-          });
+          saveBgmJob(
+            {
+              ...cur,
+              percent: nextPct,
+              updatedAt: Date.now(),
+            },
+            params.exportsDir
+          );
         }
       }, 1500);
 
@@ -702,40 +1103,49 @@ export async function startBuiltinBgmJob(params: {
             activeFloor = pct;
             const cur = builtinBgmJobs.get(jobId);
             if (!cur) return;
-            builtinBgmJobs.set(jobId, {
-              ...cur,
-              percent: Math.max(cur.percent, pct),
-              stageLabel: label,
-              updatedAt: Date.now(),
-            });
+            saveBgmJob(
+              {
+                ...cur,
+                percent: Math.max(cur.percent, pct),
+                stageLabel: label,
+                updatedAt: Date.now(),
+              },
+              params.exportsDir
+            );
           }
         );
 
         const bgmUrl = `/uploads/exports/${path.basename(res.bgmMp3Path)}`;
-        builtinBgmJobs.set(jobId, {
-          jobId,
-          status: 'completed',
-          percent: 100,
-          stageLabel: '100% — Background music.mp3 ထုတ်ယူပြီး BGM အဖြစ် ထည့်သွင်းပြီးပါပြီ!',
-          createdAt: initialJob.createdAt,
-          updatedAt: Date.now(),
-          bgmUrl,
-          durationSec: res.durationSec,
-          engineUsed: res.engineUsed,
-        });
+        saveBgmJob(
+          {
+            jobId,
+            status: 'completed',
+            percent: 100,
+            stageLabel: '100% — Background music.mp3 ထုတ်ယူပြီး BGM အဖြစ် ထည့်သွင်းပြီးပါပြီ!',
+            createdAt: initialJob.createdAt,
+            updatedAt: Date.now(),
+            bgmUrl,
+            durationSec: res.durationSec,
+            engineUsed: res.engineUsed,
+          },
+          params.exportsDir
+        );
       } finally {
         clearInterval(ticker);
       }
     } catch (err: any) {
-      builtinBgmJobs.set(jobId, {
-        jobId,
-        status: 'error',
-        percent: 0,
-        stageLabel: 'Background music.mp3 ထုတ်ယူမှု မအောင်မြင်ပါ',
-        createdAt: initialJob.createdAt,
-        updatedAt: Date.now(),
-        error: err?.message || 'နောက်ခံတီးလုံး ခွဲထုတ်ခြင်း မအောင်မြင်ပါ',
-      });
+      saveBgmJob(
+        {
+          jobId,
+          status: 'error',
+          percent: 0,
+          stageLabel: 'Background music.mp3 ထုတ်ယူမှု မအောင်မြင်ပါ',
+          createdAt: initialJob.createdAt,
+          updatedAt: Date.now(),
+          error: err?.message || 'နောက်ခံတီးလုံး ခွဲထုတ်ခြင်း မအောင်မြင်ပါ',
+        },
+        params.exportsDir
+      );
     } finally {
       if (params.cleanupVideoAfter && fs.existsSync(params.videoPath)) {
         try {

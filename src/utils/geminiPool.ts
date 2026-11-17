@@ -535,6 +535,7 @@ function parseChunkJsonArray(rawText: string): any[] {
     try {
       const parsed = JSON.parse(candidate);
       if (Array.isArray(parsed)) return parsed;
+      if (parsed && Array.isArray(parsed.scenes)) return parsed.scenes;
       if (parsed && Array.isArray(parsed.segments)) return parsed.segments;
       if (parsed && Array.isArray(parsed.cues)) return parsed.cues;
       if (parsed && Array.isArray(parsed.items)) return parsed.items;
@@ -545,6 +546,12 @@ function parseChunkJsonArray(rawText: string): any[] {
   const direct = tryParse(cleaned);
   if (direct) return direct;
 
+  const objMatch = cleaned.match(/\{[\s\S]*\}/);
+  if (objMatch) {
+    const extractedObj = tryParse(objMatch[0]);
+    if (extractedObj) return extractedObj;
+  }
+
   const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
   if (arrayMatch) {
     const extracted = tryParse(arrayMatch[0]);
@@ -553,6 +560,53 @@ function parseChunkJsonArray(rawText: string): any[] {
 
   return [];
 }
+
+export const GEMINI_ENGINE_FIXED_PROMPT = `မြန်မာဘာသာ narrator script ရေးပေးပါ။
+
+ရည်ရွယ်ချက်က video ထဲက တကယ်မြင်ရတဲ့ action နဲ့ narrator စာသား
+ကွက်တိကိုက်ရမယ်။ Video ထဲမှာ မမြင်ရသေးတဲ့အရာကို အကြိုပြောခြင်း၊
+မူရင်းဇာတ်လမ်းထဲ မပါသော အချက်အလက်ထည့်ခြင်း မလုပ်ပါနှင့်။
+
+စည်းမျဉ်းများ -
+
+1. Scene တစ်ခုချင်းစီကို ခွဲပါ။
+2. Scene တစ်ခုမှာ မြင်ရတဲ့ action တစ်ခု သို့မဟုတ် ဆက်စပ် action နှစ်ခုထက်
+   မပိုပါစေနှင့်။
+3. Narrator စာသားကို မြန်မာလို သဘာဝကျတဲ့ storytelling ပုံစံရေးပါ။
+4. စာကြောင်းတိုတို၊ ပြောစကားပုံစံ၊ သဘာဝ pause ပါအောင်ရေးပါ။
+5. ဇာတ်ကောင်ရဲ့ စိတ်ခံစားချက်ကို မြင်ရတဲ့ facial expression/action
+   နဲ့ကိုက်မှသာ ထည့်ပါ။
+6. မမြင်ရသေးတဲ့အရာကို ကြိုမပြောပါနှင့်။
+7. Scene တစ်ခုချင်းအတွက် narration duration သည် scene duration
+   ထက် မရှည်ရပါ။
+8. Scene အစနဲ့ အဆုံး timestamp ကို video ထဲက action ပြောင်းတဲ့နေရာကို
+   အခြေခံပြီး သတ်မှတ်ပါ။
+9. မသေချာတဲ့ နာမည်၊ နေရာ၊ ငွေပမာဏကို မခန့်မှန်းပါနှင့်။
+   မသေချာလျှင် unclear အဖြစ် သတ်မှတ်ပါ။
+10. Output ကို JSON တစ်ခုတည်းအဖြစ် ထုတ်ပါ။ Markdown မသုံးပါနှင့်။
+
+Narrator style:
+- Natural Burmese storytelling
+- Clear and conversational
+- Slightly dramatic
+- Not overacted
+- Suitable for short drama recap video
+
+JSON format:
+{
+  "scenes": [
+    {
+      "scene_id": 1,
+      "start": "00:00.000",
+      "end": "00:00.000",
+      "visual_action": "မြန်မာလို အတိုချုပ်ဖော်ပြချက်",
+      "narration": "မြန်မာ narrator စာသား",
+      "delivery": "calm / surprised / suspenseful / dramatic",
+      "confidence": 0.0
+    }
+  ],
+  "uncertain_items": []
+}`;
 
 function isFatalGeminiError(err: any): boolean {
   const status = err?.status || err?.errorDetails?.statusCode;
@@ -677,7 +731,9 @@ MANDATORY STEP 3 RULES:
     onProgress?.(
       engine === 'videosubfinder_paddleocr'
         ? '🔍 [1/3] VideoSubFinder + PaddleOCR ဖြင့် Video ထဲမှ Subtitle စာတန်းထိုးများကို OCR ဖြင့် ရှာဖွေဖတ်ယူနေပါသည်...'
-        : '🎙️ [1/3] ဗီဒီယိုကို 0:30 (30s) AI/Whisper chunks များခွဲ၍ ပိုမိုတိကျစွာ အသံထုတ်ယူနေပါသည်...',
+        : engine === 'faster_whisper'
+          ? '⚡ [1/3] Faster-Whisper ဖြင့် ဗီဒီယို အသံဖိုင်ကို 0:30 Chunks များခွဲ၍ Speech-to-Text ထုတ်ယူနေပါသည်...'
+          : '🎙️ [1/3] ဗီဒီယိုကို 0:30 (30s) AI chunks များခွဲ၍ အသံထုတ်ယူနေပါသည်...',
       8
     );
 
@@ -692,13 +748,16 @@ MANDATORY STEP 3 RULES:
       throw new Error('ဗီဒီယို အပိုင်းများ ခွဲထုတ်၍မရပါ။ ဗီဒီယိုဖိုင် မှန်ကန်မှုကို စစ်ဆေးပါ။');
     }
 
-    const isSubFinderOcr = engine === 'videosubfinder_paddleocr' || scriptStyle === 'translation';
-    const framesPerBlock = isSubFinderOcr ? 14 : 6;
+    const isGeminiVisualEngine = engine === 'gemini';
+    const isSubFinderOcr = !isGeminiVisualEngine && (engine === 'videosubfinder_paddleocr' || scriptStyle === 'translation');
+    const framesPerBlock = isSubFinderOcr ? 14 : isGeminiVisualEngine ? 10 : 6;
 
     onProgress?.(
       isSubFinderOcr
         ? `🎥 [2/3] VideoSubFinder ဖြင့် Subtitle Bounding Strips (${totalParts} × 0:30 Chunks · 14 Frames) ကို OCR အတွက် ထုတ်ယူနေပါသည်...`
-        : `🎥 [2/3] မြင်ကွင်း Keyframes များကို (${totalParts} × 0:30 AI Chunks — high precision) ထုတ်ယူနေပါသည်...`,
+        : isGeminiVisualEngine
+          ? `🎥 [2/3] Gemini Engine ဖြင့် Action-Sync Scene Frames (${totalParts} × 0:30 Chunks · Full Scene) ထုတ်ယူနေပါသည်...`
+          : `🎥 [2/3] မြင်ကွင်း Keyframes များကို (${totalParts} × 0:30 Chunks) ထုတ်ယူနေပါသည်...`,
       20
     );
 
@@ -721,9 +780,11 @@ MANDATORY STEP 3 RULES:
     }
 
     onProgress?.(
-      isSubFinderOcr
-        ? `⚡ [3/3] PaddleOCR ဖြင့် Subtitle စာတန်းထိုးများကို OCR ဖတ်ယူပြီး မြန်မာဘာသာပြန်ဆိုနေပါသည် (Chunk 1/${totalParts})...`
-        : `⚡ [3/3] Gemini AI ဖြင့် 0:30 Chunk 1/${totalParts} မှ စတင် ခွဲခြမ်းနေပါသည်...`,
+      engine === 'videosubfinder_paddleocr'
+        ? `⚡ [3/3] PaddleOCR + Gemini ဖြင့် Subtitle စာတန်းထိုးများကို ဖတ်ယူ ဘာသာပြန်နေပါသည် (Chunk 1/${totalParts})...`
+        : engine === 'faster_whisper'
+          ? `⚡ [3/3] Faster-Whisper + Gemini ဖြင့် Speech-to-Text နှင့် ${scriptStyle.toUpperCase()} စာသား ထုတ်နေပါသည် (Chunk 1/${totalParts})...`
+          : `⚡ [3/3] Gemini Engine ဖြင့် Visual Action + Narrator Scene Script ရေးသားနေပါသည် (Chunk 1/${totalParts})...`,
       32
     );
 
@@ -744,7 +805,29 @@ MANDATORY STEP 3 RULES:
       const blockKfs = keyframesByPart.get(partNum) || [];
       const blockFrameParts = blockKfs.length > 0 ? buildTimestampedFrameParts(blockKfs, offsetSec) : [];
 
-      const chunkPrompt = `
+      const formatMmSsMs = (sec: number) => {
+        const s = Math.max(0, sec);
+        const mins = Math.floor(s / 60);
+        const secs = Math.floor(s % 60);
+        const ms = Math.floor((s % 1) * 1000);
+        return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+      };
+
+      const chunkPrompt = isGeminiVisualEngine
+        ? `${GEMINI_ENGINE_FIXED_PROMPT}
+
+[VIDEO CHUNK CONTEXT — Part ${partNum}/${totalParts}]
+- Video: "${videoTitle}"
+- Chunk Window: ${formatMinSec(offsetSec)} to ${formatMinSec(chunkEndSec)} (Chunk Duration: ${chunk.durationSeconds.toFixed(1)}s)
+- Report scene "start" and "end" timestamps strictly within "00:00.000" to "${formatMmSsMs(chunk.durationSeconds)}" (chunk-relative MM:SS.mmm timestamps based on exact "[Visual Frame @ ... | Chunk +Xs]" action changes).
+- Selected Mode (${scriptStyle.toUpperCase()}): ${
+            scriptStyle === 'translation'
+              ? 'Include direct accurate Burmese translation of visible subtitles/spoken dialogue in "narration" while keeping exact visual_action alignment.'
+              : scriptStyle === 'story'
+                ? 'Write engaging Burmese storytelling flow matching exact visible action in "narration".'
+                : 'Follow the exact Burmese Narrator Script rules above (short conversational storytelling lines with natural pause matching exact visible action).'
+          }${customContext ? `\n- Creator Note: ${customContext}` : ''}`
+        : `
 YOU ARE PROCESSING 30-SECOND (0:30) AI ANALYSIS CHUNK ${partNum} OF ${totalParts} FOR VIDEO "${videoTitle}".
 ACTIVE STEP 3 MODE: ${scriptStyle.toUpperCase()}
 ACTIVE ENGINE: ${engine.toUpperCase()}
@@ -792,7 +875,9 @@ CRITICAL RULES:
           retries++;
           const { text: chunkResText } = await callGeminiWithRotation(
             chunkPrompt,
-            strictSystemInstruction,
+            isGeminiVisualEngine
+              ? 'You are a precise Burmese visual-action narrator scriptwriter. Output ONLY valid JSON matching the requested { "scenes": [...], "uncertain_items": [] } schema without Markdown.'
+              : strictSystemInstruction,
             model,
             chunkPayload,
             { responseMimeType: 'application/json', timeoutMs: 60000 }
@@ -808,13 +893,13 @@ CRITICAL RULES:
           const blockHardEnd = offsetSec + chunk.durationSeconds;
 
           parsedChunk.forEach((item: any, idx: number) => {
-            const rawStartStr = String(item.start || item.startTime || '00:00:00,000');
-            const rawEndStr = String(item.end || item.endTime || '00:00:05,000');
-            const myanmarText = (item.text || item.myanmarTranslation || item.natural_burmese_translation || '').trim();
+            const rawStartStr = String(item.start || item.startTime || '00:00.000');
+            const rawEndStr = String(item.end || item.endTime || '00:04.000');
+            const myanmarText = (item.narration || item.text || item.myanmarTranslation || item.natural_burmese_translation || '').trim();
             if (!myanmarText) return;
 
-            const origText = (item.originalText || item.original_dialogue || myanmarText).trim();
-            const subText = (item.subtitleText || item.burmese_subtitle_text || myanmarText).trim();
+            const origText = (item.visual_action || item.originalText || item.original_dialogue || myanmarText).trim();
+            const subText = (item.subtitleText || item.burmese_subtitle_text || item.narration || myanmarText).trim();
 
             let relStart = parseTimestampToSeconds(rawStartStr);
             let relEnd = parseTimestampToSeconds(rawEndStr);
@@ -840,7 +925,7 @@ CRITICAL RULES:
 
             const minutePart = Math.floor(adjustedStartSec / MINUTE_BLOCK_SECONDS) + 1;
             partSegments.push({
-              id: `p${partNum}_${item.id || idx + 1}_${Date.now()}_${idx}`,
+              id: `p${partNum}_${item.scene_id || item.id || idx + 1}_${Date.now()}_${idx}`,
               startTime: parseFloat(adjustedStartSec.toFixed(2)),
               endTime: parseFloat(adjustedEndSec.toFixed(2)),
               duration: dur,
@@ -848,11 +933,13 @@ CRITICAL RULES:
               myanmarTranslation: myanmarText,
               subtitleText: subText.replace(/[\u4e00-\u9fa5]/g, '').trim(),
               speaker: styleCfg.speakerLabel,
-              emotion: item.emotion || item.speaking_emotion_and_delivery || 'Storytelling narrator, clear cadence',
+              emotion: item.delivery || item.emotion || item.speaking_emotion_and_delivery || 'calm',
               isOnScreen: false,
-              lipSyncNote: scriptStyle === 'translation'
-                ? 'Synced to original video voice & on-screen subtitle timing'
-                : 'Aligned to 0:30 part timeline (30s AI/Whisper chunks)',
+              lipSyncNote: isGeminiVisualEngine
+                ? `Scene ${item.scene_id || idx + 1} · Action-Synced${typeof item.confidence === 'number' ? ` (${Math.round(item.confidence * 100)}%)` : ''}`
+                : scriptStyle === 'translation'
+                  ? 'Synced to original video voice & on-screen subtitle timing'
+                  : 'Aligned to 0:30 part timeline (30s AI/Whisper chunks)',
               voice: 'Thiha',
               scriptStyle,
               syllableCount: sylCount,
@@ -861,7 +948,7 @@ CRITICAL RULES:
               playbackRate: 1.0,
               pauseLead: 0.1,
               pauseTrail: 0.15,
-              sceneShotId: `shot_c${partNum}_${idx + 1}`,
+              sceneShotId: `scene_${item.scene_id || `${partNum}_${idx + 1}`}`,
               minutePartIndex: minutePart,
               isHumanReviewed: false,
             });

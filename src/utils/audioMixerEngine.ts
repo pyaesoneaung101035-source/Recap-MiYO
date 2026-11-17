@@ -147,6 +147,13 @@ export class UnifiedAudioMixer {
 
   public preloadBgm(url: string | null | undefined): void {
     if (!url) return;
+    if (url.includes('/uploads/exports/bgm_')) {
+      for (const cachedUrl of Array.from(decodedBufferCache.keys())) {
+        if (cachedUrl !== url && cachedUrl.includes('/uploads/exports/bgm_')) {
+          decodedBufferCache.delete(cachedUrl);
+        }
+      }
+    }
     void loadAndDecodeAudioBuffer(url);
   }
 

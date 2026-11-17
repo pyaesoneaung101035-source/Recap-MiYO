@@ -15,7 +15,6 @@ import {
   Activity,
   ZoomIn,
   Trash2,
-  Plus,
   Type,
   Move,
   Film,
@@ -35,8 +34,8 @@ interface Step8AlightMotionSettingsProps {
   setProject: React.Dispatch<React.SetStateAction<ProjectState>>;
   selectedSegmentId: string | null;
   setSelectedSegmentId: (id: string | null) => void;
-  selectedKeyframeId: string | null;
-  setSelectedKeyframeId: (id: string | null) => void;
+  selectedKeyframeId?: string | null;
+  setSelectedKeyframeId?: (id: string | null) => void;
   isCatchUpModeActive: boolean;
   setIsCatchUpModeActive: (active: boolean) => void;
   onSeekTo: (time: number) => void;
@@ -54,8 +53,6 @@ export const Step8AlightMotionSettings: React.FC<Step8AlightMotionSettingsProps>
   setProject,
   selectedSegmentId,
   setSelectedSegmentId,
-  selectedKeyframeId,
-  setSelectedKeyframeId,
   isCatchUpModeActive,
   setIsCatchUpModeActive,
   onSeekTo,
@@ -84,11 +81,19 @@ export const Step8AlightMotionSettings: React.FC<Step8AlightMotionSettingsProps>
     project.segments[0] ||
     null;
 
-  // Currently selected keyframe
-  const currentKf =
-    project.keyframes.find((k) => k.id === selectedKeyframeId) ||
-    project.keyframes[0] ||
-    null;
+  // Base motion FX state
+  const activeMotion: AlightKeyframe = project.keyframes[0] || {
+    id: 'kf_0',
+    time: 0,
+    scale: 1.0,
+    posX: 0,
+    posY: 0,
+    rotation: 0,
+    opacity: 1,
+    blur: 0,
+    shakeIntensity: 0,
+    filter: 'none',
+  };
 
   // Move selected Audio + TTX segment to current video playhead time (Catch-Up)
   const handleCatchUpToPlayhead = () => {
@@ -189,41 +194,19 @@ export const Step8AlightMotionSettings: React.FC<Step8AlightMotionSettingsProps>
     onSeekTo(origStart);
   };
 
-  // Add keyframe at playhead
-  const handleAddKeyframe = () => {
-    const newKf: AlightKeyframe = {
-      id: 'kf_' + Math.random().toString(36).substring(2, 8),
-      time: parseFloat(project.currentTime.toFixed(2)),
-      scale: 1.15,
-      posX: 0,
-      posY: 0,
-      rotation: 0,
-      opacity: 1,
-      blur: 0,
-      shakeIntensity: 0,
-      filter: 'none',
-    };
-
-    setProject((prev) => ({
-      ...prev,
-      keyframes: [...prev.keyframes, newKf].sort((a, b) => a.time - b.time),
-    }));
-    setSelectedKeyframeId(newKf.id);
-  };
-
-  const handleUpdateKeyframe = (id: string, updates: Partial<AlightKeyframe>) => {
-    setProject((prev) => ({
-      ...prev,
-      keyframes: prev.keyframes.map((k) => (k.id === id ? { ...k, ...updates } : k)),
-    }));
-  };
-
-  const handleDeleteKeyframe = (id: string) => {
-    setProject((prev) => ({
-      ...prev,
-      keyframes: prev.keyframes.filter((k) => k.id !== id),
-    }));
-    if (selectedKeyframeId === id) setSelectedKeyframeId(null);
+  const handleUpdateMotion = (updates: Partial<AlightKeyframe>) => {
+    setProject((prev) => {
+      if (!prev.keyframes || prev.keyframes.length === 0) {
+        return {
+          ...prev,
+          keyframes: [{ ...activeMotion, ...updates }],
+        };
+      }
+      return {
+        ...prev,
+        keyframes: prev.keyframes.map((k) => ({ ...k, ...updates })),
+      };
+    });
   };
 
   const handleApplyPreset = (presetName: 'smoothZoom' | 'impactShake' | 'dhammaAura') => {
@@ -331,182 +314,24 @@ export const Step8AlightMotionSettings: React.FC<Step8AlightMotionSettingsProps>
             </select>
           </div>
 
-          {/* Add Keyframe Action & Selector */}
-          <div className="flex items-center justify-between gap-2">
-            <button
-              onClick={handleAddKeyframe}
-              className="flex-1 py-2 bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 shadow-md shadow-amber-500/20"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>Add Keyframe at {project.currentTime.toFixed(2)}s</span>
-            </button>
-
-            {currentKf && (
-              <button
-                onClick={() => handleDeleteKeyframe(currentKf.id)}
-                className="p-2 bg-zinc-800 hover:bg-rose-950/60 text-zinc-400 hover:text-rose-300 rounded-lg transition-colors border border-zinc-700"
-                title="Delete current keyframe"
+          <div className="space-y-3.5 p-3 rounded-xl bg-zinc-950/70 border border-zinc-800">
+            {/* Color Grade Filters */}
+            <div className="space-y-1.5">
+              <span className="text-zinc-300 font-medium">Color Grade (အရောင်စစ် Filters):</span>
+              <select
+                value={activeMotion.filter}
+                onChange={(e) => handleUpdateMotion({ filter: e.target.value as any })}
+                className="w-full px-2.5 py-1.5 bg-zinc-900 border border-zinc-700 rounded-lg text-xs text-zinc-200 focus:outline-none"
               >
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-
-          {/* Keyframe Selector */}
-          <div className="space-y-1">
-            <label className="text-zinc-400 text-[11px]">Selected Keyframe:</label>
-            <select
-              value={currentKf?.id || ''}
-              onChange={(e) => {
-                setSelectedKeyframeId(e.target.value);
-                const k = project.keyframes.find((kf) => kf.id === e.target.value);
-                if (k) onSeekTo(k.time);
-              }}
-              className="w-full px-2.5 py-1.5 bg-zinc-950 border border-zinc-700 rounded-lg text-xs font-mono text-zinc-100 focus:outline-none"
-            >
-              {project.keyframes.map((k, idx) => (
-                <option key={k.id} value={k.id}>
-                  Keyframe #{idx + 1} at {k.time.toFixed(2)}s (Scale: {k.scale}x, Shake: {k.shakeIntensity})
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {currentKf && (
-            <div className="space-y-3.5 p-3 rounded-xl bg-zinc-950/70 border border-zinc-800">
-              {/* Scale / Zoom */}
-              <div className="space-y-1.5">
-                <div className="flex justify-between">
-                  <span className="text-zinc-300 font-medium">Scale (အနီးအဝေး Zoom):</span>
-                  <span className="font-mono text-amber-400 font-bold">{currentKf.scale.toFixed(2)}x</span>
-                </div>
-                <input
-                  type="range"
-                  min={0.8}
-                  max={2.5}
-                  step={0.05}
-                  value={currentKf.scale}
-                  onChange={(e) => handleUpdateKeyframe(currentKf.id, { scale: parseFloat(e.target.value) })}
-                  className="w-full h-2.5 bg-zinc-700 rounded-lg accent-amber-400 cursor-pointer shadow-inner"
-                />
-                <div className="flex gap-1.5 pt-0.5">
-                  {[1.0, 1.2, 1.5, 2.0].map((s) => (
-                    <button
-                      key={s}
-                      onClick={() => handleUpdateKeyframe(currentKf.id, { scale: s })}
-                      className={`flex-1 py-0.5 rounded text-[10px] font-mono border ${
-                        currentKf.scale === s
-                          ? 'bg-amber-950 border-amber-500 text-amber-300'
-                          : 'bg-zinc-900 border-zinc-800 text-zinc-400'
-                      }`}
-                    >
-                      {s}x
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Camera Shake Intensity */}
-              <div className="space-y-1.5">
-                <div className="flex justify-between">
-                  <span className="text-zinc-300 font-medium">Camera Shake (တုန်ခါမှု):</span>
-                  <span className="font-mono text-rose-400 font-bold">{currentKf.shakeIntensity}</span>
-                </div>
-                <input
-                  type="range"
-                  min={0}
-                  max={10}
-                  step={1}
-                  value={currentKf.shakeIntensity}
-                  onChange={(e) => handleUpdateKeyframe(currentKf.id, { shakeIntensity: parseInt(e.target.value) })}
-                  className="w-full h-1.5 bg-zinc-800 rounded accent-rose-400"
-                />
-                <div className="flex gap-1.5 pt-0.5">
-                  {[0, 2, 5, 8].map((lvl) => (
-                    <button
-                      key={lvl}
-                      onClick={() => handleUpdateKeyframe(currentKf.id, { shakeIntensity: lvl })}
-                      className={`flex-1 py-0.5 rounded text-[10px] font-mono border ${
-                        currentKf.shakeIntensity === lvl
-                          ? 'bg-rose-950 border-rose-500 text-rose-300'
-                          : 'bg-zinc-900 border-zinc-800 text-zinc-400'
-                      }`}
-                    >
-                      {lvl === 0 ? 'Off' : `Lvl ${lvl}`}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Rotation Angle */}
-              <div className="space-y-1.5">
-                <div className="flex justify-between">
-                  <span className="text-zinc-300 font-medium">Rotation (အလှည့်ဒီဂရီ):</span>
-                  <span className="font-mono text-cyan-400 font-bold">{currentKf.rotation}°</span>
-                </div>
-                <input
-                  type="range"
-                  min={-180}
-                  max={180}
-                  step={5}
-                  value={currentKf.rotation}
-                  onChange={(e) => handleUpdateKeyframe(currentKf.id, { rotation: parseInt(e.target.value) })}
-                  className="w-full h-1.5 bg-zinc-800 rounded accent-cyan-400"
-                />
-              </div>
-
-              {/* Pan Offset X & Y */}
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <div className="flex justify-between text-[11px] text-zinc-400">
-                    <span>Pan X:</span>
-                    <span className="font-mono">{currentKf.posX}px</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={-150}
-                    max={150}
-                    step={5}
-                    value={currentKf.posX}
-                    onChange={(e) => handleUpdateKeyframe(currentKf.id, { posX: parseInt(e.target.value) })}
-                    className="w-full h-1.5 bg-zinc-800 rounded accent-zinc-400"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <div className="flex justify-between text-[11px] text-zinc-400">
-                    <span>Pan Y:</span>
-                    <span className="font-mono">{currentKf.posY}px</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={-150}
-                    max={150}
-                    step={5}
-                    value={currentKf.posY}
-                    onChange={(e) => handleUpdateKeyframe(currentKf.id, { posY: parseInt(e.target.value) })}
-                    className="w-full h-1.5 bg-zinc-800 rounded accent-zinc-400"
-                  />
-                </div>
-              </div>
-
-              {/* Color Grade Filters */}
-              <div className="space-y-1.5">
-                <span className="text-zinc-300 font-medium">Color Grade (အရောင်စစ် Filters):</span>
-                <select
-                  value={currentKf.filter}
-                  onChange={(e) => handleUpdateKeyframe(currentKf.id, { filter: e.target.value as any })}
-                  className="w-full px-2.5 py-1.5 bg-zinc-900 border border-zinc-700 rounded-lg text-xs text-zinc-200 focus:outline-none"
-                >
-                  <option value="none">Normal (မူလအရောင်)</option>
-                  <option value="cinematic">Cinematic Grade</option>
-                  <option value="warm">Warm Film Tone</option>
-                  <option value="vintage">Vintage Sepia</option>
-                  <option value="cyber">Cyberpunk Hue</option>
-                  <option value="dhamma_gold">Dhamma Serene Gold</option>
-                </select>
-              </div>
+                <option value="none">Normal (မူလအရောင်)</option>
+                <option value="cinematic">Cinematic Grade</option>
+                <option value="warm">Warm Film Tone</option>
+                <option value="vintage">Vintage Sepia</option>
+                <option value="cyber">Cyberpunk Hue</option>
+                <option value="dhamma_gold">Dhamma Serene Gold</option>
+              </select>
             </div>
-          )}
+          </div>
 
           {/* Quick 1-Click Presets */}
           <div className="space-y-1.5">

@@ -185,10 +185,10 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
     pushHistory();
     const newBox = {
       id: 'blur_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
-      x: 10,
-      y: 70,
-      width: 80,
-      height: 15,
+      x: 20,
+      y: 68,
+      width: 60,
+      height: 14,
       blurAmount: 24,
       name: `Blur #${(project.blurBoxes?.length || 0) + 1}`,
     };
@@ -846,8 +846,8 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
   const sidebarItems = [
     { id: 'home', label: 'Home', icon: Home, onClick: () => onJumpToStep(1) },
     { id: 'editor', label: 'Video Editor', icon: Clapperboard, active: true, onClick: () => {} },
-    { id: 'keyframes', label: 'Keyframes', icon: Sparkles, onClick: () => onJumpToStep(7) },
-    { id: 'crop', label: 'Canvas Crop', icon: Settings, onClick: () => onJumpToStep(6) },
+    { id: 'keyframes', label: 'Pro FX', icon: Sparkles, onClick: () => setIsProPanelOpen((prev) => !prev) },
+    { id: 'blur', label: 'Blur Box', icon: EyeOff, onClick: () => setIsBlurPanelOpen((prev) => !prev) },
   ];
 
   return (
@@ -902,7 +902,7 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
             onClick={onNextStep}
             className="px-3.5 py-1.5 rounded-lg bg-gradient-to-r from-[#6366F1] to-[#8B5CF6] hover:brightness-110 text-xs font-bold text-white flex items-center gap-1 cursor-pointer shadow-md shadow-violet-600/25"
           >
-            <span>အဆင့် ၆ (Canvas Crop)</span>
+            <span>အဆင့် ၆ (Export MP4)</span>
             <ArrowRight className="w-3.5 h-3.5" />
           </button>
         </div>
@@ -1408,9 +1408,9 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
                   </button>
                   <button
                     type="button"
-                    onClick={() => onJumpToStep(7)}
+                    onClick={() => setIsProPanelOpen((prev) => !prev)}
                     className="p-1.5 rounded-md text-zinc-300 hover:text-white hover:bg-[#252339] cursor-pointer"
-                    title="Alight Motion Keyframes (Step 7)"
+                    title="Pro Edition (Alight Motion & Subtitle Settings)"
                   >
                     <AlignJustify className="w-3.5 h-3.5" />
                   </button>
@@ -1903,8 +1903,11 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
               </div>
 
               <div className="p-3 bg-[#110F1B] max-h-[360px] overflow-y-auto space-y-3">
+                <div className="px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200 font-myanmar">
+                  💡 Video မျက်နှာပြင်ပေါ်ရှိ Blur အကွက်ကို Subtitle ကဲ့သို့ လက်ဖြင့် ဖိဆွဲပြီး ကြိုက်တဲ့နေရာ ရွှေ့နိုင်သလို ထောင့်စွန်း (↘) မှ ဆွဲ၍ အရွယ်အစား ချိန်နိုင်ပါသည်။
+                </div>
                 {(!project.blurBoxes || project.blurBoxes.length === 0) ? (
-                  <div className="text-center py-8 text-zinc-400 text-xs font-myanmar">
+                  <div className="text-center py-6 text-zinc-400 text-xs font-myanmar">
                     Blur box မရှိသေးပါ။ အထက်ပါ &quot;Add Blur Box&quot; ကိုနှိပ်၍ Privacy Blur ထည့်ပါ။
                   </div>
                 ) : (
@@ -2009,8 +2012,6 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
                   setProject={setProject}
                   selectedSegmentId={selectedSegmentId}
                   setSelectedSegmentId={setSelectedSegmentId}
-                  selectedKeyframeId={null}
-                  setSelectedKeyframeId={() => {}}
                   isCatchUpModeActive={false}
                   setIsCatchUpModeActive={() => {}}
                   onSeekTo={handleSeek}
