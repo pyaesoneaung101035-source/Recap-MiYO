@@ -37,6 +37,7 @@ interface VideoPlayerViewProps {
   onCatchUpPlace?: (time: number) => void;
   selectedSegmentName?: string;
   showLalalBgmGenerator?: boolean;
+  forceMuteOriginalAudio?: boolean;
 }
 
 export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
@@ -47,10 +48,12 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
   onCatchUpPlace,
   selectedSegmentName,
   showLalalBgmGenerator = false,
+  forceMuteOriginalAudio = false,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioMixerRef = useRef<UnifiedAudioMixer | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const lastTimeUpdateMsRef = useRef<number>(0);
 
   const getMixer = () => {
     if (!audioMixerRef.current) {
@@ -132,29 +135,59 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
     }
   }, [project.isPlaying, project.playbackRate, project.currentTime, project.segments]);
 
-  // Preload & decode BGM MP3 + all Voice Clone clips in memory so playback never stutters
+  // Reset playback state cleanly whenever the loaded video source changes
+  useEffect(() => {
+    audioMixerRef.current?.stopAll();
+    lastTimeUpdateMsRef.current = 0;
+    if (videoRef.current) {
+      videoRef.current.playbackRate = project.playbackRate || 1.0;
+    }
+  }, [project.videoUrl]);
+
+  // Preload & decode BGM MP3 + (when in Voice Studio steps) Voice Clone clips in memory
   useEffect(() => {
     const mixer = getMixer();
     if (project.extractedBgmUrl) {
       mixer.preloadBgm(project.extractedBgmUrl);
     }
-    if (project.segments.length > 0) {
+    if (forceMuteOriginalAudio && project.segments.length > 0) {
       mixer.preloadVoices(project.segments);
     }
-  }, [project.extractedBgmUrl, project.segments]);
+  }, [project.extractedBgmUrl, project.segments, forceMuteOriginalAudio]);
 
   // Unified Web Audio Mixer: combines Vocal-Removed BGM + Voice Clone into ONE glitch-free hardware bus
+  // In Step 2 (!forceMuteOriginalAudio), NEVER mute original video audio for leftover voice clone segments;
+  // only mute original audio in Step 2 when user mutes OR toggles extracted BGM ON.
   const hasClonedVoices = project.segments.some((s) => Boolean(s.audioUrl));
+  const shouldPlayVoicesInMixer = Boolean(forceMuteOriginalAudio && !project.isVoiceMuted && hasClonedVoices);
+  const useBgm = Boolean(
+    project.extractedBgmUrl &&
+      (forceMuteOriginalAudio ? project.useExtractedBgm !== false : project.useExtractedBgm)
+  );
+  const effectiveBgmVolume =
+    project.bgmVolume !== undefined ? project.bgmVolume : (forceMuteOriginalAudio ? 0.5 : 0.35);
   const shouldMuteOriginalVocals = Boolean(
-    isMuted || (project.useExtractedBgm && project.extractedBgmUrl) || (hasClonedVoices && !project.isVoiceMuted)
+    forceMuteOriginalAudio || isMuted || useBgm
   );
 
+  const enforceVideoMuteState = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.defaultMuted = shouldMuteOriginalVocals;
+    v.muted = shouldMuteOriginalVocals;
+    v.volume = shouldMuteOriginalVocals ? 0 : videoVolume;
+  };
+
+  const getTargetPlaybackRate = () => {
+    const t = videoRef.current ? videoRef.current.currentTime : project.currentTime;
+    const curSeg = project.segments.find((s) => t >= s.startTime && t <= s.endTime);
+    const baseVideoSpeed = project.playbackRate || 1.0;
+    const segSpeedMultiplier = curSeg?.videoPlaybackRate || 1.0;
+    return parseFloat(Math.max(0.25, Math.min(3.0, baseVideoSpeed * segSpeedMultiplier)).toFixed(2));
+  };
+
   useEffect(() => {
-    const useBgm = Boolean(project.useExtractedBgm && project.extractedBgmUrl);
-    if (videoRef.current) {
-      videoRef.current.muted = shouldMuteOriginalVocals;
-      videoRef.current.volume = shouldMuteOriginalVocals ? 0 : videoVolume;
-    }
+    enforceVideoMuteState();
 
     const mixer = getMixer();
     mixer.sync({
@@ -164,10 +197,10 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
       isMuted,
       bgmUrl: project.extractedBgmUrl,
       isBgmEnabled: useBgm,
-      bgmVolume,
-      segments: project.segments,
+      bgmVolume: effectiveBgmVolume,
+      segments: shouldPlayVoicesInMixer ? project.segments : [],
       voiceSpeed: project.voicePlaybackRate || 1.0,
-      isVoiceEnabled: !project.isVoiceMuted,
+      isVoiceEnabled: shouldPlayVoicesInMixer,
       voiceVolume: clonedVolume,
     });
   }, [
@@ -180,31 +213,42 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
     project.voicePlaybackRate,
     project.isVoiceMuted,
     videoVolume,
-    bgmVolume,
+    effectiveBgmVolume,
     clonedVolume,
     isMuted,
+    useBgm,
     shouldMuteOriginalVocals,
+    shouldPlayVoicesInMixer,
+    forceMuteOriginalAudio,
   ]);
 
   const handleTogglePlay = () => {
     const willPlay = !project.isPlaying;
     const mixer = getMixer();
+    enforceVideoMuteState();
+    lastTimeUpdateMsRef.current = 0;
     setProject((prev) => ({ ...prev, isPlaying: willPlay }));
     if (willPlay) {
       stopAllPreviewAudio();
       mixer.unlock();
+      if (videoRef.current) {
+        const rate = getTargetPlaybackRate();
+        if (Math.abs(videoRef.current.playbackRate - rate) > 0.02) {
+          videoRef.current.playbackRate = rate;
+        }
+      }
       mixer.sync(
         {
           isPlaying: true,
-          currentTime: project.currentTime,
+          currentTime: videoRef.current ? videoRef.current.currentTime : project.currentTime,
           playbackRate: videoRef.current?.playbackRate || project.playbackRate || 1.0,
           isMuted,
           bgmUrl: project.extractedBgmUrl,
-          isBgmEnabled: Boolean(project.useExtractedBgm && project.extractedBgmUrl),
-          bgmVolume,
-          segments: project.segments,
+          isBgmEnabled: useBgm,
+          bgmVolume: effectiveBgmVolume,
+          segments: shouldPlayVoicesInMixer ? project.segments : [],
           voiceSpeed: project.voicePlaybackRate || 1.0,
-          isVoiceEnabled: !project.isVoiceMuted,
+          isVoiceEnabled: shouldPlayVoicesInMixer,
           voiceVolume: clonedVolume,
         },
         true
@@ -217,6 +261,8 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
   // Handle video seek with immediate audio alignment
   const handleSeek = (newTime: number) => {
     if (!videoRef.current) return;
+    enforceVideoMuteState();
+    lastTimeUpdateMsRef.current = 0;
     videoRef.current.currentTime = newTime;
     setProject((prev) => ({ ...prev, currentTime: newTime }));
 
@@ -229,11 +275,11 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
         playbackRate: videoRef.current?.playbackRate || project.playbackRate || 1.0,
         isMuted,
         bgmUrl: project.extractedBgmUrl,
-        isBgmEnabled: Boolean(project.useExtractedBgm && project.extractedBgmUrl),
-        bgmVolume,
-        segments: project.segments,
+        isBgmEnabled: useBgm,
+        bgmVolume: effectiveBgmVolume,
+        segments: shouldPlayVoicesInMixer ? project.segments : [],
         voiceSpeed: project.voicePlaybackRate || 1.0,
-        isVoiceEnabled: !project.isVoiceMuted,
+        isVoiceEnabled: shouldPlayVoicesInMixer,
         voiceVolume: clonedVolume,
       },
       true
@@ -244,13 +290,38 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
     }
   };
 
-  // Video time update loop
+  // Video time update loop: sync Web Audio immediately, throttle root React state updates to ~11fps on mobile
   const handleTimeUpdate = () => {
-    if (!videoRef.current) return;
+    const v = videoRef.current;
+    if (!v) return;
+    const t = v.currentTime || 0;
+
+    getMixer().sync(
+      {
+        isPlaying: !v.paused && !v.ended && project.isPlaying,
+        currentTime: t,
+        playbackRate: v.playbackRate || project.playbackRate || 1.0,
+        isMuted,
+        bgmUrl: project.extractedBgmUrl,
+        isBgmEnabled: useBgm,
+        bgmVolume: effectiveBgmVolume,
+        segments: shouldPlayVoicesInMixer ? project.segments : [],
+        voiceSpeed: project.voicePlaybackRate || 1.0,
+        isVoiceEnabled: shouldPlayVoicesInMixer,
+        voiceVolume: clonedVolume,
+      },
+      false
+    );
+
+    const now = performance.now();
+    if (!v.paused && !v.ended && now - lastTimeUpdateMsRef.current < 85) {
+      return;
+    }
+    lastTimeUpdateMsRef.current = now;
     setProject((prev) => ({
       ...prev,
-      currentTime: videoRef.current?.currentTime || 0,
-      videoDuration: videoRef.current?.duration || prev.videoDuration,
+      currentTime: t,
+      videoDuration: v.duration || prev.videoDuration,
     }));
   };
 
@@ -266,6 +337,9 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
       }, 2000);
     }
     audioMixerRef.current?.stopAll();
+    try {
+      sessionStorage.removeItem('motion_recap_session_bgm_url');
+    } catch (_) {}
     setBgmError(null);
     setLalalError(null);
     setLalalPercent(0);
@@ -276,12 +350,41 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
       videoFile: file,
       videoUrl: url,
       videoName: file.name,
+      videoDuration: 0,
       currentTime: 0,
       isPlaying: false,
+      playbackRate: 1.0,
+      voicePlaybackRate: 1.0,
+      volume: 0.8,
+      isMuted: false,
+      voiceVolume: 1.0,
+      isVoiceMuted: false,
+      segments: [],
       extractedBgmUrl: null,
       useExtractedBgm: false,
       bgmEngineUsed: null,
       videoInspection: null,
+      frameCrop: {
+        fitMode: 'cover',
+        scale: 1.0,
+        posX: 0,
+        posY: 0,
+        backgroundStyle: 'blur',
+      },
+      keyframes: [
+        {
+          id: 'kf_0',
+          time: 0,
+          scale: 1.0,
+          posX: 0,
+          posY: 0,
+          rotation: 0,
+          opacity: 1,
+          blur: 0,
+          shakeIntensity: 0,
+          filter: 'none',
+        },
+      ],
     }));
     inspectVideoFile(file, file.name)
       .then((info) => {
@@ -306,6 +409,9 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
   const handleLoadDemo = () => {
     const demoUrl = '/api/narrator/sample-video';
     audioMixerRef.current?.stopAll();
+    try {
+      sessionStorage.removeItem('motion_recap_session_bgm_url');
+    } catch (_) {}
     setBgmError(null);
     setLalalError(null);
     setLalalPercent(0);
@@ -319,9 +425,37 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
       videoDuration: 12,
       currentTime: 0,
       isPlaying: false,
+      playbackRate: 1.0,
+      voicePlaybackRate: 1.0,
+      volume: 0.8,
+      isMuted: false,
+      voiceVolume: 1.0,
+      isVoiceMuted: false,
+      segments: [],
       extractedBgmUrl: null,
       useExtractedBgm: false,
       bgmEngineUsed: null,
+      frameCrop: {
+        fitMode: 'cover',
+        scale: 1.0,
+        posX: 0,
+        posY: 0,
+        backgroundStyle: 'blur',
+      },
+      keyframes: [
+        {
+          id: 'kf_0',
+          time: 0,
+          scale: 1.0,
+          posX: 0,
+          posY: 0,
+          rotation: 0,
+          opacity: 1,
+          blur: 0,
+          shakeIntensity: 0,
+          filter: 'none',
+        },
+      ],
     }));
   };
 
@@ -441,11 +575,9 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
     }
   };
 
-  // Interpolated Alight Motion keyframe properties
+  // Interpolated Alight Motion keyframe properties (camera shake disabled so uploaded video remains steady)
   const kf = getInterpolatedKeyframe(project.keyframes, project.currentTime);
   const filterCss = getFilterCss(kf.filter);
-  const shakeOffsetX = kf.shakeIntensity > 0 ? (Math.random() - 0.5) * kf.shakeIntensity * 4 : 0;
-  const shakeOffsetY = kf.shakeIntensity > 0 ? (Math.random() - 0.5) * kf.shakeIntensity * 4 : 0;
 
   const ratio = project.aspectRatio || '9:16';
   const crop = project.frameCrop || {
@@ -455,6 +587,14 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
     posY: 0,
     backgroundStyle: 'blur',
   };
+  const totalScale = kf.scale * (crop.scale || 1.0);
+  const totalPosX = kf.posX + (crop.posX || 0);
+  const totalPosY = kf.posY + (crop.posY || 0);
+  const hasVideoTransform =
+    Math.abs(totalScale - 1) > 0.001 ||
+    Math.abs(totalPosX) > 0.01 ||
+    Math.abs(totalPosY) > 0.01 ||
+    Math.abs(kf.rotation) > 0.01;
 
   const getContainerAspectClass = () => {
     switch (ratio) {
@@ -596,6 +736,7 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
             {crop.fitMode === 'contain' && crop.backgroundStyle === 'blur' && (
               <video
                 src={project.videoUrl}
+                preload="metadata"
                 className="absolute inset-0 w-full h-full object-cover filter blur-xl opacity-40 scale-110 pointer-events-none"
                 muted
               />
@@ -603,11 +744,11 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
 
             {/* Catch-Up Mode Active Overlay Banner */}
             {isCatchUpModeActive && (
-              <div className="absolute top-2 left-2 right-2 z-30 bg-emerald-950/95 border border-emerald-500/80 px-3 py-1.5 rounded-lg text-xs text-emerald-200 flex items-center justify-between shadow-2xl backdrop-blur-md animate-pulse">
+              <div className="absolute top-2 left-2 right-2 z-30 bg-emerald-950/95 border border-emerald-500/80 px-3 py-1.5 rounded-lg text-xs text-emerald-200 flex items-center justify-between shadow-2xl backdrop-blur-md">
                 <div className="flex items-center gap-2 truncate">
                   <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 shrink-0"></span>
                   <span className="font-myanmar truncate font-medium">
-                    🎯 Catch-Up Mode: ဗီဒီယို Scrub Bar သို့မဟုတ် ဗီဒီယိုပေါ်တွင် Click နှိပ်လိုက်သည့် အချိန်သို့ အသံ & TTX ကွက်တိ ရောက်သွားပါမည်။
+                    🎯 Catch-Up Mode
                   </span>
                 </div>
                 {selectedSegmentName && (
@@ -620,15 +761,21 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
 
             {/* Direct Visible HTML5 Video with Platform Crop & Fit Transform */}
             <div
-              className="w-full h-full flex items-center justify-center transition-transform duration-75 overflow-hidden"
+              className="w-full h-full flex items-center justify-center overflow-hidden"
               style={{
-                transform: `scale(${kf.scale * (crop.scale || 1.0)}) translate(${(kf.posX + shakeOffsetX) + (crop.posX || 0)}px, ${(kf.posY + shakeOffsetY) + (crop.posY || 0)}px) rotate(${kf.rotation}deg)`,
+                ...(hasVideoTransform
+                  ? {
+                      transform: `scale(${totalScale}) translate(${totalPosX}px, ${totalPosY}px) rotate(${kf.rotation}deg)`,
+                    }
+                  : {}),
                 opacity: Math.max(0, Math.min(1, kf.opacity)),
               }}
             >
               <video
+                key={project.videoUrl}
                 ref={videoRef}
                 src={project.videoUrl}
+                preload="auto"
                 muted={shouldMuteOriginalVocals}
                 className={`w-full h-full cursor-pointer ${
                   crop.fitMode === 'cover' ? 'object-cover' : 'object-contain'
@@ -638,10 +785,27 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
                 }}
                 playsInline
                 onClick={handleTogglePlay}
+                onPlay={() => {
+                  enforceVideoMuteState();
+                  if (videoRef.current) {
+                    const rate = getTargetPlaybackRate();
+                    if (Math.abs(videoRef.current.playbackRate - rate) > 0.02) {
+                      videoRef.current.playbackRate = rate;
+                    }
+                  }
+                }}
+                onVolumeChange={() => {
+                  if (shouldMuteOriginalVocals) enforceVideoMuteState();
+                }}
                 onTimeUpdate={handleTimeUpdate}
                 onLoadedMetadata={() => {
+                  enforceVideoMuteState();
                   if (videoRef.current) {
                     const v = videoRef.current;
+                    const rate = getTargetPlaybackRate();
+                    if (Math.abs(v.playbackRate - rate) > 0.02) {
+                      v.playbackRate = rate;
+                    }
                     const vw = v.videoWidth || 1;
                     const vh = v.videoHeight || 1;
                     const ratioVal = vw / vh;
@@ -796,23 +960,19 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
             <div className="w-14 h-14 rounded-2xl bg-zinc-800/80 border border-zinc-700/60 flex items-center justify-center text-zinc-400 group-hover:text-cyan-400 group-hover:border-cyan-500/40 group-hover:scale-105 transition-all mb-3 shadow-lg">
               <Upload className="w-7 h-7" />
             </div>
-            <h3 className="text-sm font-semibold text-zinc-100 mb-1">
-              Custom Upload Video ထည့်သွင်းရန် (Click or Drag File Here)
+            <h3 className="text-sm font-semibold text-zinc-100 mb-3">
+              Upload Video
             </h3>
-            <p className="text-xs text-zinc-400 max-w-sm font-myanmar leading-relaxed">
-              MP4, WebM, MOV ဖိုင်များကို တင်လိုက်သည်နှင့် ဗီဒီယို ပေါ်လာမည်ဖြစ်ပြီး အသံနှင့် စာတန်းထိုးများကို ကွက်တိ တိုက်ဆိုင်ပြင်ဆင်နိုင်ပါမည်။
-            </p>
-            <div className="mt-4 flex items-center gap-2">
-              <span className="text-[11px] text-zinc-500">သို့မဟုတ် ချက်ချင်း စမ်းသပ်ရန်</span>
+            <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={(e) => {
                   e.stopPropagation();
                   handleLoadDemo();
                 }}
-                className="px-2.5 py-1 text-xs text-cyan-400 bg-cyan-950/60 border border-cyan-800/60 rounded-md hover:bg-cyan-900/60 transition-colors"
+                className="px-3 py-1.5 text-xs text-cyan-400 bg-cyan-950/60 border border-cyan-800/60 rounded-lg hover:bg-cyan-900/60 transition-colors cursor-pointer"
               >
-                Sample Action Video စမ်းတင်မည်
+                Sample Action Video
               </button>
             </div>
           </div>
@@ -824,24 +984,19 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
       {showLalalBgmGenerator && project.videoUrl && (
         <div className="px-4 py-3.5 bg-zinc-950/95 border-b border-zinc-800/80 space-y-3">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="flex items-start gap-2.5">
+            <div className="flex items-center gap-2.5">
               <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-500/20 to-emerald-500/20 border border-cyan-500/30 flex items-center justify-center shrink-0">
                 <Music className="w-4 h-4 text-cyan-300" />
               </div>
-              <div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-xs font-bold text-white font-display">
-                    Auto Background Music (.mp3) Generator
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-bold text-white font-display">
+                  Background Music (.mp3) Generator
+                </span>
+                {project.useExtractedBgm && project.extractedBgmUrl && (
+                  <span className="px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/40 text-[10px] font-bold text-emerald-300">
+                    ✓ BGM.mp3 Active
                   </span>
-                  {project.useExtractedBgm && project.extractedBgmUrl && (
-                    <span className="px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/40 text-[10px] font-bold text-emerald-300">
-                      ✓ BGM.mp3 Active
-                    </span>
-                  )}
-                </div>
-                <p className="text-[11px] text-zinc-400 font-myanmar mt-0.5">
-                  Custom Upload Video ထဲမှ လူစကားပြောသံ (Vocals) များကို Demucs v4 AI (htdemucs) ဖြင့် ဖယ်ရှားပြီး Background music.mp3 ကို BGM အဖြစ် ထည့်သွင်းပေးပါမည် (API Key မလိုပါ)။
-                </p>
+                )}
               </div>
             </div>
 
@@ -1023,28 +1178,52 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
         </div>
 
         {/* Video Speed Only Controls (Video Only - Audio Unaffected) */}
-        <div className="flex items-center gap-2.5 bg-zinc-900 px-3 py-1.5 rounded-lg border border-zinc-800">
+        <div className="flex items-center gap-2 bg-zinc-900 px-3 py-1.5 rounded-lg border border-zinc-800">
           <div className="flex items-center gap-1.5">
             <FastForward className="w-3.5 h-3.5 text-cyan-400" />
             <span className="text-xs font-medium text-zinc-300">Video Speed:</span>
-            <span className="text-xs font-mono-num text-cyan-400 font-semibold">
-              {project.playbackRate.toFixed(2)}x
-            </span>
           </div>
 
-          <input
-            type="range"
-            min={0.25}
-            max={2.5}
-            step={0.05}
-            value={project.playbackRate}
-            onChange={(e) => {
-              const val = parseFloat(e.target.value);
-              setProject((prev) => ({ ...prev, playbackRate: val }));
-            }}
-            className="w-20 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-cyan-400"
-            title="Video Speed Only Adjustment: Scales video playback without altering voice audio speed"
-          />
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() =>
+                setProject((prev) => ({
+                  ...prev,
+                  playbackRate: parseFloat(Math.max(0.25, (prev.playbackRate || 1.0) - 0.1).toFixed(2)),
+                }))
+              }
+              className="w-6 h-6 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-bold text-xs flex items-center justify-center cursor-pointer"
+              title="Video Speed နှေးမည် (-0.1x)"
+            >
+              -
+            </button>
+            <button
+              type="button"
+              onClick={() => setProject((prev) => ({ ...prev, playbackRate: 1.0 }))}
+              className={`px-2 py-0.5 rounded font-mono-num text-xs font-bold cursor-pointer transition-colors ${
+                Math.abs((project.playbackRate || 1.0) - 1.0) > 0.02
+                  ? 'bg-amber-500/25 border border-amber-400/60 text-amber-300'
+                  : 'bg-cyan-500/15 border border-cyan-500/30 text-cyan-300'
+              }`}
+              title="1.00x ပုံမှန်နှုန်းသို့ ပြန်ထားရန် နှိပ်ပါ (BGM Audio ကို မထိခိုက်ပါ)"
+            >
+              {(project.playbackRate || 1.0).toFixed(2)}x
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                setProject((prev) => ({
+                  ...prev,
+                  playbackRate: parseFloat(Math.min(2.5, (prev.playbackRate || 1.0) + 0.1).toFixed(2)),
+                }))
+              }
+              className="w-6 h-6 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-bold text-xs flex items-center justify-center cursor-pointer"
+              title="Video Speed မြန်မည် (+0.1x)"
+            >
+              +
+            </button>
+          </div>
 
           <button
             onClick={() =>
@@ -1135,12 +1314,12 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
               {isMuted ? <VolumeX className="w-3.5 h-3.5 text-rose-400" /> : <Volume2 className="w-3.5 h-3.5" />}
             </button>
             <span className="text-[11px] text-zinc-400">
-              {project.useExtractedBgm && project.extractedBgmUrl ? 'BGM Vol:' : 'Video Vol:'}
+              {useBgm || (forceMuteOriginalAudio && project.extractedBgmUrl) ? 'BGM Vol:' : 'Video Vol:'}
             </span>
-            {hasClonedVoices && !project.useExtractedBgm && !project.isVoiceMuted && (
+            {shouldMuteOriginalVocals && (
               <span
                 className="px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-[9px] text-emerald-300 font-myanmar"
-                title="Voice Clone အသံနှင့် မထပ်စေရန် မူရင်း Video လူအသံကို အလိုအလျောက် ပိတ်ထားပါသည်"
+                title="မူရင်း Video လူအသံကို ပိတ်ထားပြီး BGM နှင့် Voice Clone ကိုသာ ဖွင့်ထားပါသည်"
               >
                 🔇 Original Muted
               </span>
@@ -1150,15 +1329,23 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
               min={0}
               max={1}
               step={0.05}
-              value={isMuted ? 0 : (project.useExtractedBgm && project.extractedBgmUrl ? bgmVolume : videoVolume)}
+              value={isMuted ? 0 : (useBgm || (forceMuteOriginalAudio && project.extractedBgmUrl) ? effectiveBgmVolume : videoVolume)}
               onChange={(e) => {
                 const val = parseFloat(e.target.value);
-                setProject((prev) => ({
-                  ...prev,
-                  ...(prev.useExtractedBgm && prev.extractedBgmUrl ? { bgmVolume: val } : { volume: val }),
-                  isMuted: val === 0,
-                }));
+                setProject((prev) => {
+                  const useBgmControl = Boolean(prev.extractedBgmUrl && (forceMuteOriginalAudio || prev.useExtractedBgm));
+                  return {
+                    ...prev,
+                    ...(useBgmControl
+                      ? { bgmVolume: val, useExtractedBgm: val > 0 }
+                      : forceMuteOriginalAudio
+                      ? {}
+                      : { volume: val }),
+                    isMuted: val === 0,
+                  };
+                });
               }}
+              style={{ touchAction: 'pan-y' }}
               className="w-16 h-1 bg-zinc-800 rounded appearance-none accent-zinc-400"
             />
           </div>
@@ -1168,7 +1355,14 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
           {/* Cloned Voice Volume */}
           <div className="flex items-center gap-1.5">
             <Volume1 className="w-3.5 h-3.5 text-emerald-400" />
-            <span className="text-[11px] text-emerald-300">Voice Vol:</span>
+            <button
+              type="button"
+              onClick={() => setProject((prev) => ({ ...prev, voiceVolume: 1.0, isVoiceMuted: false }))}
+              className="text-[11px] text-emerald-300 hover:text-emerald-200 cursor-pointer"
+              title="Voice Vol 100% သို့ ပြန်ထားရန် နှိပ်ပါ"
+            >
+              Voice Vol ({Math.round(clonedVolume * 100)}%):
+            </button>
             <input
               type="range"
               min={0}
@@ -1177,8 +1371,9 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
               value={clonedVolume}
               onChange={(e) => {
                 const val = parseFloat(e.target.value);
-                setProject((prev) => ({ ...prev, voiceVolume: val }));
+                setProject((prev) => ({ ...prev, voiceVolume: val, isVoiceMuted: val === 0 }));
               }}
+              style={{ touchAction: 'pan-y' }}
               className="w-16 h-1 bg-zinc-800 rounded appearance-none accent-emerald-400"
             />
           </div>
@@ -1492,7 +1687,7 @@ export const InteractiveSubtitleOverlay: React.FC<InteractiveSubtitleOverlayProp
 
   return (
     <div
-      className={`absolute left-0 right-0 px-3 text-center z-20 flex items-center justify-center pointer-events-none ${basePositionYClass}`}
+      className={`absolute left-0 right-0 px-3 text-center z-[60] flex items-center justify-center pointer-events-none ${basePositionYClass}`}
     >
       <div
         onMouseEnter={() => setIsHovered(true)}

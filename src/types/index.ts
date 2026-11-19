@@ -23,6 +23,7 @@ export type AiMode = 'Dubbing' | 'Recap' | 'Subtitle' | 'Long to Short' | 'Gemin
 export type Step3ScriptStyle = 'narrator' | 'story' | 'translation';
 
 export type VoiceOption =
+  | 'RecapPro'
   | 'Thiha'
   | 'KyawKyaw'
   | 'AungAung'
@@ -56,6 +57,7 @@ export type VoiceOption =
 export type TtsEngineMode = 'auto' | 'gemini' | 'neural' | 'nara';
 
 export type VoiceToneOption =
+  | 'recap_pro'
   | 'natural'
   | 'warm'
   | 'deep'

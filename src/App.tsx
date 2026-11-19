@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Header } from './components/Header';
 import { StepWizardNav, StepItem } from './components/StepWizardNav';
 import { Step1GeminiKeys } from './components/Step1GeminiKeys';
@@ -31,7 +31,7 @@ const defaultSegments: TranscriptSegment[] = [
     originalText: '修仙界？本精灵给你的第一个任务很简单。',
     myanmarTranslation: 'ကျင့်ကြံရေးလောကကြီးထဲမှာ သူ့ကိုပေးလိုက်တဲ့ ပထမဆုံးတာဝန်က အရမ်းရိုးရှင်းတယ်လို့ ဆိုပါတယ်။',
     subtitleText: 'ပထမဆုံးတာဝန်က အရမ်းရိုးရှင်းတယ်လို့ ဆိုပါတယ်။',
-    voice: 'Thiha',
+    voice: 'RecapPro',
     speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
     emotion: 'Storytelling',
     isOnScreen: false,
@@ -48,7 +48,7 @@ const defaultSegments: TranscriptSegment[] = [
     originalText: '所以，不要害怕，勇往直前吧！',
     myanmarTranslation: 'ဒါကြောင့် မကြောက်ဘဲ ရှေ့ကို ရဲရဲဝံ့ဝံ့သာ တက်လှမ်းဖို့ တိုက်တွန်းလိုက်ပါတော့တယ်။',
     subtitleText: 'မကြောက်ဘဲ ရှေ့ကို ရဲရဲဝံ့ဝံ့ တက်လှမ်းဖို့ တိုက်တွန်းလိုက်တယ်။',
-    voice: 'Thiha',
+    voice: 'RecapPro',
     speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
     emotion: 'Storytelling',
     isOnScreen: false,
@@ -73,18 +73,6 @@ const defaultKeyframes: AlightKeyframe[] = [
     shakeIntensity: 0,
     filter: 'none',
   },
-  {
-    id: 'kf_1',
-    time: 4.0,
-    scale: 1.08,
-    posX: 0,
-    posY: 0,
-    rotation: 0,
-    opacity: 1,
-    blur: 0,
-    shakeIntensity: 0.5,
-    filter: 'cinematic',
-  },
 ];
 
 const initialProjectState: ProjectState = {
@@ -100,9 +88,9 @@ const initialProjectState: ProjectState = {
   step3ScriptStyle: 'narrator',
   recapSlotSeconds: 30,
   voiceStyle: 'recap',
-  voiceTone: 'natural',
-  voicePitch: 0,
-  lockedVoice: 'Thiha',
+  voiceTone: 'recap_pro',
+  voicePitch: -5,
+  lockedVoice: 'RecapPro',
   smartSyncFrameLock: true,
   volume: 0.8,
   isMuted: false,
@@ -162,24 +150,51 @@ export default function App() {
   const [project, setProject] = useState<ProjectState>(() => {
     try {
       const saved = localStorage.getItem('motion_recap_project_state');
+      const sessionVideoUrl = typeof window !== 'undefined' ? sessionStorage.getItem('motion_recap_session_video_url') : null;
+      const sessionBgmUrl = typeof window !== 'undefined' ? sessionStorage.getItem('motion_recap_session_bgm_url') : null;
       if (saved) {
         const parsed = JSON.parse(saved);
-        const hasDeadBlobVideo = typeof parsed.videoUrl === 'string' && parsed.videoUrl.startsWith('blob:');
-        const hasDeadBlobBgm = typeof parsed.extractedBgmUrl === 'string' && parsed.extractedBgmUrl.startsWith('blob:');
+        const resolvedVideoUrl = parsed.videoUrl && !parsed.videoUrl.startsWith('blob:') ? parsed.videoUrl : (sessionVideoUrl || parsed.videoUrl || null);
+        const hasValidSessionOrServerVideo = Boolean(resolvedVideoUrl && !resolvedVideoUrl.startsWith('blob:')) || Boolean(sessionVideoUrl && sessionVideoUrl === resolvedVideoUrl);
+        const resolvedBgmUrl = hasValidSessionOrServerVideo
+          ? (parsed.extractedBgmUrl && !parsed.extractedBgmUrl.startsWith('blob:') ? parsed.extractedBgmUrl : (sessionBgmUrl || parsed.extractedBgmUrl || null))
+          : null;
+        const hasDeadBlobVideo = !resolvedVideoUrl && typeof parsed.videoUrl === 'string' && parsed.videoUrl.startsWith('blob:');
         const cleanedSegments = Array.isArray(parsed.segments)
           ? parsed.segments.map((s: any) => ({
               ...s,
-              audioUrl: typeof s?.audioUrl === 'string' && s.audioUrl.startsWith('blob:') ? undefined : s?.audioUrl,
+              audioUrl:
+                !hasValidSessionOrServerVideo ||
+                (typeof s?.audioUrl === 'string' && s.audioUrl.startsWith('blob:'))
+                  ? undefined
+                  : s?.audioUrl,
             }))
           : initialProjectState.segments;
+        const rawKeyframes = Array.isArray(parsed.keyframes) ? parsed.keyframes : defaultKeyframes;
+        const cleanedKeyframes = rawKeyframes
+          .filter((kf: any) => !(kf?.id === 'kf_1' && Number(kf?.time) === 4 && Number(kf?.shakeIntensity) === 0.5))
+          .map((kf: any) => ({
+            ...kf,
+            shakeIntensity: 0,
+          }));
         return {
           ...initialProjectState,
           ...parsed,
           videoFile: null, // File object cannot be serialized
-          videoUrl: hasDeadBlobVideo ? null : (parsed.videoUrl ?? null),
+          videoUrl: resolvedVideoUrl,
           videoDuration: hasDeadBlobVideo ? 0 : (parsed.videoDuration ?? 0),
-          extractedBgmUrl: hasDeadBlobBgm ? null : (parsed.extractedBgmUrl ?? null),
+          playbackRate: hasValidSessionOrServerVideo ? (parsed.playbackRate || 1.0) : 1.0,
+          extractedBgmUrl: resolvedBgmUrl,
+          useExtractedBgm: hasValidSessionOrServerVideo ? Boolean(resolvedBgmUrl && parsed.useExtractedBgm) : false,
+          bgmEngineUsed: resolvedBgmUrl ? parsed.bgmEngineUsed : null,
           segments: cleanedSegments,
+          keyframes: cleanedKeyframes.length > 0 ? cleanedKeyframes : defaultKeyframes,
+        };
+      } else if (sessionVideoUrl) {
+        return {
+          ...initialProjectState,
+          videoUrl: sessionVideoUrl,
+          extractedBgmUrl: sessionBgmUrl,
         };
       }
     } catch (e) {
@@ -187,6 +202,27 @@ export default function App() {
     }
     return initialProjectState;
   });
+
+  // Save videoUrl and extractedBgmUrl to sessionStorage whenever they update (and clear when reset)
+  useEffect(() => {
+    try {
+      if (project.videoUrl && project.videoUrl.startsWith('blob:')) {
+        sessionStorage.setItem('motion_recap_session_video_url', project.videoUrl);
+      } else if (!project.videoUrl) {
+        sessionStorage.removeItem('motion_recap_session_video_url');
+      }
+    } catch (_) {}
+  }, [project.videoUrl]);
+
+  useEffect(() => {
+    try {
+      if (project.extractedBgmUrl && project.extractedBgmUrl.startsWith('blob:')) {
+        sessionStorage.setItem('motion_recap_session_bgm_url', project.extractedBgmUrl);
+      } else if (!project.extractedBgmUrl) {
+        sessionStorage.removeItem('motion_recap_session_bgm_url');
+      }
+    } catch (_) {}
+  }, [project.extractedBgmUrl]);
 
   // Save project state to localStorage on modification
   useEffect(() => {
@@ -200,6 +236,28 @@ export default function App() {
       console.warn('Failed to cache project state:', e);
     }
   }, [project.videoName, project.aspectRatio, project.frameCrop, project.segments, project.keyframes, project.subtitleSettings, project.blurBoxes, project.logoConfig, project.globalColorFilter, project.extractedBgmUrl, project.useExtractedBgm, project.bgmVolume, project.bgmEngineUsed]);
+
+  // Auto-enable extracted BGM across Steps 3, 4, 5, 6 when extractedBgmUrl exists
+  const prevStepRef = useRef<number>(currentStep);
+  useEffect(() => {
+    const enteringStudioSteps =
+      currentStep >= 3 && (prevStepRef.current < 3 || (prevStepRef.current === currentStep && !project.useExtractedBgm));
+    prevStepRef.current = currentStep;
+
+    if (enteringStudioSteps && project.extractedBgmUrl) {
+      setProject((prev) => {
+        const nextVol = prev.bgmVolume && prev.bgmVolume > 0 ? prev.bgmVolume : 0.55;
+        if (prev.useExtractedBgm === true && prev.bgmVolume === nextVol) {
+          return prev;
+        }
+        return {
+          ...prev,
+          useExtractedBgm: true,
+          bgmVolume: nextVol,
+        };
+      });
+    }
+  }, [currentStep, project.extractedBgmUrl]);
 
   // Handle Seek
   const handleSeekTo = (time: number) => {
@@ -313,19 +371,14 @@ export default function App() {
         {currentStep === 2 && (
           <div className="space-y-6">
             <div className="ios-card p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div>
-                <div className="flex items-center gap-2.5">
-                  <span className="w-7 h-7 rounded-full bg-cyan-400/20 text-cyan-300 border border-cyan-400/40 flex items-center justify-center text-xs font-bold font-mono shadow-sm">
-                    2
-                  </span>
-                  <h2 className="text-lg font-bold text-white font-display tracking-tight flex items-center gap-2">
-                    <Film className="w-5 h-5 text-cyan-400" />
-                    <span>ဗီဒီယို တင်ရန် & Live Player Studio</span>
-                  </h2>
-                </div>
-                <p className="text-xs text-zinc-400 font-myanmar mt-1">
-                  မူရင်း MP4 / MOV ဗီဒီယိုကို Drag & Drop ဖြင့် တင်ပါ သို့မဟုတ် နမူနာဗီဒီယိုဖြင့် စမ်းသပ်ကြည့်ရှုပါ
-                </p>
+              <div className="flex items-center gap-2.5">
+                <span className="w-7 h-7 rounded-full bg-cyan-400/20 text-cyan-300 border border-cyan-400/40 flex items-center justify-center text-xs font-bold font-mono shadow-sm">
+                  2
+                </span>
+                <h2 className="text-lg font-bold text-white font-display tracking-tight flex items-center gap-2">
+                  <Film className="w-5 h-5 text-cyan-400" />
+                  <span>ဗီဒီယို တင်ရန် & Live Player Studio</span>
+                </h2>
               </div>
 
               <div className="flex items-center gap-3 shrink-0">

@@ -52,7 +52,7 @@ export async function loadAndDecodeAudioBuffer(url: string): Promise<AudioBuffer
       if (!ctx) return null;
       const res = await fetch(url);
       if (!res.ok) {
-        failedDecodeUntil.set(url, Date.now() + 8000);
+        failedDecodeUntil.set(url, Date.now() + 2500);
         return null;
       }
       const arrayBuf = await res.arrayBuffer();
@@ -61,7 +61,7 @@ export async function loadAndDecodeAudioBuffer(url: string): Promise<AudioBuffer
       failedDecodeUntil.delete(url);
       return decoded;
     } catch (err) {
-      failedDecodeUntil.set(url, Date.now() + 8000);
+      failedDecodeUntil.set(url, Date.now() + 2500);
       console.warn('[AudioMixer] Decode failed for', url, err);
       return null;
     } finally {
@@ -107,12 +107,15 @@ export class UnifiedAudioMixer {
 
   private voiceSource: AudioBufferSourceNode | null = null;
   private voicePlayingKey = ''; // `${segId}::${audioUrl}`
-  private voiceClipEndedKey = '';
+  private completedVoiceKeys = new Set<string>();
+  private lastActiveSegKey = '';
   private voiceAnchorCtxTime = 0;
   private voiceAnchorOffset = 0;
   private voiceRate = 1.0;
   private voicePlayToken = 0;
 
+  private lastVideoTime = -1;
+  private wasPlaying = false;
   private lastSyncParams: MixerSyncParams | null = null;
 
   private ensureGraph(): AudioContext | null {
@@ -123,11 +126,11 @@ export class UnifiedAudioMixer {
       this.bgmGain = ctx.createGain();
       this.voiceGain = ctx.createGain();
       this.compressor = ctx.createDynamicsCompressor();
-      this.compressor.threshold.value = -14;
-      this.compressor.knee.value = 12;
-      this.compressor.ratio.value = 4;
-      this.compressor.attack.value = 0.004;
-      this.compressor.release.value = 0.14;
+      this.compressor.threshold.value = -3;
+      this.compressor.knee.value = 6;
+      this.compressor.ratio.value = 1.8;
+      this.compressor.attack.value = 0.005;
+      this.compressor.release.value = 0.15;
 
       this.masterGain = ctx.createGain();
       this.masterGain.gain.value = 1.0;
@@ -195,25 +198,50 @@ export class UnifiedAudioMixer {
       this.voiceSource = null;
     }
     this.voicePlayingKey = '';
-    this.voiceClipEndedKey = '';
   }
 
   public stopAll(): void {
     this.stopBgmNode();
     this.stopVoiceNode();
+    this.completedVoiceKeys.clear();
+    this.lastActiveSegKey = '';
+    this.lastVideoTime = -1;
+    this.wasPlaying = false;
   }
 
-  private startBgmAt(url: string, offsetSec: number, rate: number): void {
+  private startBgmAt(url: string, offsetSec: number): void {
     const ctx = this.ensureGraph();
     if (!ctx || !this.bgmGain) return;
 
+    this.stopBgmNode();
+
     const cached = decodedBufferCache.get(url);
     if (cached) {
-      this.stopBgmNode();
+      if (ctx.state === 'suspended') {
+        const token = ++this.bgmPlayToken;
+        this.bgmPlayingUrl = url;
+        void ctx.resume()
+          .then(() => {
+            if (token !== this.bgmPlayToken) return;
+            const latest = this.lastSyncParams;
+            if (!latest || !latest.isPlaying || !latest.isBgmEnabled || latest.bgmUrl !== url) {
+              this.bgmPlayingUrl = '';
+              return;
+            }
+            this.startBgmAt(url, Math.max(0, latest.currentTime));
+          })
+          .catch(() => {
+            if (token === this.bgmPlayToken) {
+              this.bgmPlayingUrl = '';
+            }
+          });
+        return;
+      }
       if (offsetSec >= cached.duration - 0.04) return;
       const src = ctx.createBufferSource();
       src.buffer = cached;
-      src.playbackRate.value = rate;
+      // BGM ALWAYS plays at natural 1.0x pitch and tempo (unaffected by Video Speed slow-mo)
+      src.playbackRate.value = 1.0;
       src.connect(this.bgmGain);
       const safeOffset = Math.max(0, Math.min(offsetSec, Math.max(0, cached.duration - 0.05)));
       src.start(0, safeOffset);
@@ -221,7 +249,7 @@ export class UnifiedAudioMixer {
       this.bgmPlayingUrl = url;
       this.bgmAnchorCtxTime = ctx.currentTime;
       this.bgmAnchorOffset = safeOffset;
-      this.bgmRate = rate;
+      this.bgmRate = 1.0;
       src.onended = () => {
         if (this.bgmSource === src) {
           this.bgmSource = null;
@@ -236,15 +264,19 @@ export class UnifiedAudioMixer {
     const requestedAtWallMs = performance.now();
     this.bgmPlayingUrl = url; // prevent redundant requests while decoding
     void loadAndDecodeAudioBuffer(url).then((buf) => {
-      if (!buf || token !== this.bgmPlayToken) return;
+      if (token !== this.bgmPlayToken) return;
+      if (!buf) {
+        this.bgmPlayingUrl = '';
+        return;
+      }
       const latest = this.lastSyncParams;
       if (!latest || !latest.isPlaying || !latest.isBgmEnabled || latest.bgmUrl !== url) {
         this.bgmPlayingUrl = '';
         return;
       }
       const elapsedWall = (performance.now() - requestedAtWallMs) / 1000;
-      const compensatedOffset = Math.max(latest.currentTime, offsetSec + elapsedWall * rate);
-      this.startBgmAt(url, compensatedOffset, latest.playbackRate || rate);
+      const compensatedOffset = Math.max(latest.currentTime, offsetSec + elapsedWall);
+      this.startBgmAt(url, compensatedOffset);
     });
   }
 
@@ -257,12 +289,33 @@ export class UnifiedAudioMixer {
     const ctx = this.ensureGraph();
     if (!ctx || !this.voiceGain) return;
 
+    this.stopVoiceNode();
+
     const cached = decodedBufferCache.get(url);
     if (cached) {
-      this.stopVoiceNode();
+      if (ctx.state === 'suspended') {
+        const token = ++this.voicePlayToken;
+        this.voicePlayingKey = key;
+        void ctx.resume()
+          .then(() => {
+            if (token !== this.voicePlayToken) return;
+            const latest = this.lastSyncParams;
+            if (!latest || !latest.isPlaying || !latest.isVoiceEnabled) {
+              this.voicePlayingKey = '';
+              return;
+            }
+            this.startVoiceAt(key, url, offsetSec, rate);
+          })
+          .catch(() => {
+            if (token === this.voicePlayToken) {
+              this.voicePlayingKey = '';
+            }
+          });
+        return;
+      }
       if (offsetSec >= cached.duration - 0.04) {
         this.voicePlayingKey = key;
-        this.voiceClipEndedKey = key;
+        this.completedVoiceKeys.add(key);
         return;
       }
       const src = ctx.createBufferSource();
@@ -273,14 +326,13 @@ export class UnifiedAudioMixer {
       src.start(0, safeOffset);
       this.voiceSource = src;
       this.voicePlayingKey = key;
-      this.voiceClipEndedKey = '';
       this.voiceAnchorCtxTime = ctx.currentTime;
       this.voiceAnchorOffset = safeOffset;
       this.voiceRate = rate;
       src.onended = () => {
         if (this.voiceSource === src) {
           this.voiceSource = null;
-          this.voiceClipEndedKey = key;
+          this.completedVoiceKeys.add(key);
         }
       };
       return;
@@ -289,17 +341,24 @@ export class UnifiedAudioMixer {
     const token = ++this.voicePlayToken;
     const requestedAtWallMs = performance.now();
     this.voicePlayingKey = key;
-    this.voiceClipEndedKey = '';
     void loadAndDecodeAudioBuffer(url).then((buf) => {
-      if (!buf || token !== this.voicePlayToken) return;
+      if (token !== this.voicePlayToken) return;
+      if (!buf) {
+        this.voicePlayingKey = '';
+        return;
+      }
       const latest = this.lastSyncParams;
       if (!latest || !latest.isPlaying || !latest.isVoiceEnabled) {
         this.voicePlayingKey = '';
         return;
       }
       const elapsedWall = (performance.now() - requestedAtWallMs) / 1000;
-      const compensatedOffset = offsetSec + elapsedWall * rate;
-      if (compensatedOffset >= buf.duration - 0.04) return;
+      const compensatedOffset = offsetSec === 0 && elapsedWall < 0.4 ? 0 : offsetSec + elapsedWall * rate;
+      if (compensatedOffset >= buf.duration - 0.04) {
+        this.voicePlayingKey = key;
+        this.completedVoiceKeys.add(key);
+        return;
+      }
       this.startVoiceAt(key, url, compensatedOffset, rate);
     });
   }
@@ -313,6 +372,14 @@ export class UnifiedAudioMixer {
       void ctx.resume();
     }
 
+    const justStartedPlaying = params.isPlaying && !this.wasPlaying;
+    const isDiscontinuousSeek =
+      forceReseek ||
+      (this.lastVideoTime >= 0 && Math.abs(params.currentTime - this.lastVideoTime) > 1.8);
+    const effectiveReseek = isDiscontinuousSeek || justStartedPlaying;
+    this.lastVideoTime = params.currentTime;
+    this.wasPlaying = params.isPlaying;
+
     // Master gain
     const targetMaster = params.isMuted ? 0 : 1.0;
     this.masterGain.gain.setTargetAtTime(targetMaster, ctx.currentTime, 0.03);
@@ -324,10 +391,18 @@ export class UnifiedAudioMixer {
       params.voiceSpeed,
       true
     );
-    const isNarratorActive = Boolean(activeMatch && activeMatch.segment.audioUrl && params.isVoiceEnabled);
+    const seg = activeMatch?.segment || null;
+    const segKey = seg && seg.audioUrl ? `${seg.id}::${seg.audioUrl}` : '';
 
-    // Smooth BGM Ducking (55% during narrator speech so voice sits cleanly on top of BGM)
-    const duckFactor = isNarratorActive ? 0.55 : 1.0;
+    const isVoiceActuallySpeaking = Boolean(
+      params.isPlaying &&
+        params.isVoiceEnabled &&
+        segKey &&
+        (this.voiceSource || !this.completedVoiceKeys.has(segKey))
+    );
+
+    // Smooth BGM Ducking (42% during narrator speech so voice stays crystal-clear above BGM)
+    const duckFactor = isVoiceActuallySpeaking ? 0.42 : 1.0;
     const targetBgmGain =
       params.isBgmEnabled && !params.isMuted
         ? Math.max(0, Math.min(1.0, params.bgmVolume * duckFactor))
@@ -336,7 +411,7 @@ export class UnifiedAudioMixer {
 
     const targetVoiceGain =
       params.isVoiceEnabled && !params.isMuted
-        ? Math.max(0, Math.min(1.2, params.voiceVolume))
+        ? Math.max(0, Math.min(1.5, params.voiceVolume))
         : 0;
     this.voiceGain.gain.setTargetAtTime(targetVoiceGain, ctx.currentTime, 0.03);
 
@@ -344,33 +419,20 @@ export class UnifiedAudioMixer {
     if (!params.isPlaying) {
       if (this.bgmSource || this.bgmPlayingUrl) this.stopBgmNode();
       if (this.voiceSource || this.voicePlayingKey) this.stopVoiceNode();
+      this.completedVoiceKeys.clear();
+      this.lastActiveSegKey = '';
       return;
     }
 
-    // 1. Synchronize BGM BufferSource
-    const safeRate = Math.max(0.25, Math.min(2.5, params.playbackRate || 1.0));
+    // 1. Synchronize BGM BufferSource (always at 1.00x normal speed/pitch, never warped by Video Speed)
     if (params.isBgmEnabled && params.bgmUrl && params.bgmVolume > 0) {
       const cachedBgm = decodedBufferCache.get(params.bgmUrl);
-      if (cachedBgm && params.currentTime >= cachedBgm.duration - 0.05) {
+      if (cachedBgm && effectiveReseek && params.currentTime >= cachedBgm.duration - 0.05) {
         if (this.bgmSource || this.bgmPlayingUrl) this.stopBgmNode();
       } else {
         const sameUrl = this.bgmPlayingUrl === params.bgmUrl;
-        if (!sameUrl || forceReseek) {
-          this.startBgmAt(params.bgmUrl, Math.max(0, params.currentTime), safeRate);
-        } else if (this.bgmSource) {
-          if (Math.abs(this.bgmRate - safeRate) > 0.02) {
-            this.bgmSource.playbackRate.setValueAtTime(safeRate, ctx.currentTime);
-            this.bgmAnchorOffset =
-              this.bgmAnchorOffset + (ctx.currentTime - this.bgmAnchorCtxTime) * this.bgmRate;
-            this.bgmAnchorCtxTime = ctx.currentTime;
-            this.bgmRate = safeRate;
-          }
-          const liveBgmPos =
-            this.bgmAnchorOffset + (ctx.currentTime - this.bgmAnchorCtxTime) * this.bgmRate;
-          // Only seek BGM if user truly jumped > 0.75s (prevents micro-seeking stutters!)
-          if (Math.abs(liveBgmPos - params.currentTime) > 0.75) {
-            this.startBgmAt(params.bgmUrl, Math.max(0, params.currentTime), safeRate);
-          }
+        if (!sameUrl || effectiveReseek) {
+          this.startBgmAt(params.bgmUrl, Math.max(0, params.currentTime));
         }
       }
     } else if (this.bgmSource || this.bgmPlayingUrl) {
@@ -378,38 +440,59 @@ export class UnifiedAudioMixer {
     }
 
     // 2. Synchronize Voice Clone BufferSource
-    const seg = activeMatch?.segment || null;
+    // IMPORTANT: Once a segment begins playing, never replay or cut/re-seek it mid-sentence in the same pass!
+    if (effectiveReseek) {
+      this.completedVoiceKeys.clear();
+    } else if (this.lastActiveSegKey && this.lastActiveSegKey !== segKey) {
+      // Playhead exited previous segment window: allow it to play again only if playhead re-enters later
+      this.completedVoiceKeys.delete(this.lastActiveSegKey);
+    }
+    this.lastActiveSegKey = segKey;
+
     if (seg && seg.audioUrl && activeMatch && params.isVoiceEnabled) {
-      const segKey = `${seg.id}::${seg.audioUrl}`;
       const segSpeed = activeMatch.window.speed;
       const expectedSrcTime = Math.max(0, params.currentTime - activeMatch.window.startTime) * segSpeed;
       const cachedVoice = decodedBufferCache.get(seg.audioUrl);
       const clipDur = cachedVoice ? cachedVoice.duration : (seg.audioDuration || 0);
 
-      if (clipDur > 0 && expectedSrcTime >= clipDur - 0.02) {
-        if (this.voiceSource) this.stopVoiceNode();
-      } else if (
-        this.voicePlayingKey !== segKey ||
-        forceReseek ||
-        (this.voiceClipEndedKey === segKey && clipDur > 0 && expectedSrcTime < clipDur - 0.35)
-      ) {
-        this.startVoiceAt(segKey, seg.audioUrl, expectedSrcTime, segSpeed);
-      } else if (this.voiceSource) {
-        if (Math.abs(this.voiceRate - segSpeed) > 0.02) {
+      if (effectiveReseek) {
+        if (clipDur > 0 && expectedSrcTime >= clipDur - 0.04) {
+          this.stopVoiceNode();
+          this.completedVoiceKeys.add(segKey);
+          this.voicePlayingKey = segKey;
+        } else {
+          const cleanStart = expectedSrcTime < 0.35 ? 0 : expectedSrcTime;
+          this.startVoiceAt(segKey, seg.audioUrl, cleanStart, segSpeed);
+        }
+      } else if (this.completedVoiceKeys.has(segKey)) {
+        // Already finished speaking in this pass — never repeat!
+      } else if (this.voicePlayingKey === segKey) {
+        // Currently playing or awaiting decode/resume for this exact segment — let it finish cleanly!
+        if (this.voiceSource && Math.abs(this.voiceRate - segSpeed) > 0.02) {
           this.voiceSource.playbackRate.setValueAtTime(segSpeed, ctx.currentTime);
           this.voiceAnchorOffset =
             this.voiceAnchorOffset + (ctx.currentTime - this.voiceAnchorCtxTime) * this.voiceRate;
           this.voiceAnchorCtxTime = ctx.currentTime;
           this.voiceRate = segSpeed;
         }
-        const liveVoicePos =
-          this.voiceAnchorOffset + (ctx.currentTime - this.voiceAnchorCtxTime) * this.voiceRate;
-        if (Math.abs(liveVoicePos - expectedSrcTime) > 0.65) {
-          this.startVoiceAt(segKey, seg.audioUrl, expectedSrcTime, segSpeed);
+      } else {
+        // Entered a new segment naturally during continuous playback
+        if (clipDur > 0 && expectedSrcTime >= clipDur - 0.05) {
+          this.stopVoiceNode();
+          this.completedVoiceKeys.add(segKey);
+          this.voicePlayingKey = segKey;
+        } else {
+          const cleanStart = expectedSrcTime < 0.45 ? 0 : expectedSrcTime;
+          this.startVoiceAt(segKey, seg.audioUrl, cleanStart, segSpeed);
         }
       }
-    } else if (this.voiceSource || this.voicePlayingKey) {
-      this.stopVoiceNode();
+    } else if (!params.isVoiceEnabled || effectiveReseek) {
+      if (this.voiceSource || this.voicePlayingKey) {
+        this.stopVoiceNode();
+      }
+    } else if (!this.voiceSource && this.voicePlayingKey) {
+      // Previous segment finished cleanly and playhead is in silence gap
+      this.voicePlayingKey = '';
     }
   }
 

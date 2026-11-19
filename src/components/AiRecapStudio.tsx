@@ -142,6 +142,31 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
     }));
   };
 
+  const handleApplyReferenceNarratorPreset = () => {
+    setSelectedPartFilter('all');
+    setProject((prev) => ({
+      ...prev,
+      step3ScriptStyle: 'narrator',
+      lockedVoice: 'RecapPro',
+      ttsEngine: 'auto',
+      voiceStyle: 'recap',
+      voiceTone: 'recap_pro',
+      voicePitch: -5,
+      segments: prev.segments.map((s) => ({
+        ...s,
+        voice: 'RecapPro',
+        style: 'recap',
+        tone: 'recap_pro',
+        pitch: -5,
+        scriptStyle: 'narrator',
+        speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
+      })),
+    }));
+    setStatusMessage(
+      '🎬 နမူနာ Video စတိုင် (Min Khant · Recap Pro 135Hz Baritone + Blended Narrator) ကို ချိန်ညှိပြီးပါပြီ! Generate နှိပ်၍ တိုက်ရိုက် ထုတ်ယူနိုင်ပါသည်။'
+    );
+  };
+
   const handlePolishNarrationStyle = async () => {
     if (!project.segments.length || isPolishing || isGenerating) return;
     setIsPolishing(true);
@@ -412,9 +437,9 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
     setStatusMessage(`၁. [${engineName}] မူရင်းဗီဒီယို ကြာချိန်၊ ရုပ်ထွက်နှင့် အသံလှိုင်းကို စစ်ဆေးနေပါသည်...`);
     setErrorMessage(null);
 
-    const lockedVoice = project.lockedVoice || 'Thiha';
-    const narratorTone = project.voiceTone || 'natural';
-    const narratorPitch = project.voicePitch ?? 0;
+    const lockedVoice = project.lockedVoice || 'RecapPro';
+    const narratorTone = project.voiceTone || 'recap_pro';
+    const narratorPitch = project.voicePitch ?? -5;
 
     try {
       const inspection = await inspectVideoFile(
@@ -613,20 +638,10 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
           <span className="w-8 h-8 rounded-full bg-gradient-to-tr from-cyan-400 to-teal-400 text-zinc-950 font-black flex items-center justify-center text-xs shadow-lg">
             {stepNumber}
           </span>
-          <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-base font-bold text-white font-display tracking-tight flex items-center gap-2">
-                <Sparkles className="w-4 h-4 text-cyan-400" />
-                <span>အဆင့် {stepNumber} — AI Narrator Script & Dubbing Engine (Gemini API)</span>
-              </h2>
-              <span className="px-2.5 py-0.5 rounded-full bg-cyan-500/10 border border-cyan-500/20 text-cyan-300 font-mono text-[10px] font-bold">
-                Gemini API Natural Localization
-              </span>
-            </div>
-            <p className="text-xs text-zinc-400 font-myanmar mt-0.5">
-              Custom Upload Video ကို အဆင့် (၁ မှ ၃) အတိုင်း စစ်ဆေး + 0:30 AI/Whisper Parts ဖြင့် တိကျစွာ ဘာသာပြန် + Single Narrator စာသား ထုတ်ပေးပါမည်။ (Narrator အသံညှိ & 0:30 Part Sync ကို အဆင့် ၄ Generate All Voices တွင် ဆက်လုပ်ပါမည်။)
-            </p>
-          </div>
+          <h2 className="text-base font-bold text-white font-display tracking-tight flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-cyan-400" />
+            <span>အဆင့် {stepNumber} — AI Narrator Script & Dubbing Engine</span>
+          </h2>
         </div>
 
         <div className="flex items-center gap-2.5 shrink-0">
@@ -664,131 +679,100 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
               <span className="w-6 h-6 rounded-lg bg-cyan-400 text-zinc-950 flex items-center justify-center text-xs font-black shadow">
                 ၁
               </span>
-              <h3 className="text-sm font-black text-white font-display flex items-center gap-2">
-                <span>ထုတ်ချင်တဲ့ ပုံစံရွေး</span>
-                <span className="text-xs font-normal text-zinc-400 font-myanmar">(Narrator / Story / Translation)</span>
+              <h3 className="text-sm font-black text-white font-display">
+                ထုတ်ချင်တဲ့ ပုံစံရွေး
               </h3>
             </div>
-            <span className="text-[11px] font-mono px-2.5 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-bold">
-              Active: {scriptStyle.toUpperCase()}
-            </span>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={handleApplyReferenceNarratorPreset}
+                className={`px-3 py-1 rounded-xl text-[11px] font-black transition-all flex items-center gap-1.5 cursor-pointer border shadow ${
+                  scriptStyle === 'narrator' && project.lockedVoice === 'RecapPro' && project.voiceTone === 'recap_pro'
+                    ? 'bg-gradient-to-r from-amber-400 to-orange-400 text-zinc-950 border-amber-300 shadow-amber-500/25'
+                    : 'bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 border-amber-400/40'
+                }`}
+                title="တင်ထားသော နမူနာ Video မှ Narrator စတိုင် (Visual Hook + 3rd-Person Recap + Character Beats) နှင့် 135Hz Baritone အသံ Tone ကို တစ်ချက်တည်း ချိန်ညှိမည်"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>🎬 နမူနာ Video စတိုင် (RecapPro 135Hz + Narrator)</span>
+              </button>
+              <span className="text-[11px] font-mono px-2.5 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-bold">
+                Active: {scriptStyle.toUpperCase()}
+              </span>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             {/* 1. NARRATOR */}
             <div
               onClick={() => selectStep3Style('narrator')}
-              className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
+              className={`p-3.5 rounded-2xl border transition-all cursor-pointer flex items-center justify-between gap-3 ${
                 scriptStyle === 'narrator'
                   ? 'bg-gradient-to-br from-cyan-500/20 via-teal-500/10 to-black/60 border-cyan-400 shadow-xl ring-2 ring-cyan-400/50'
                   : 'bg-black/40 border-white/10 hover:border-white/25 hover:bg-white/[0.03]'
               }`}
             >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
-                    scriptStyle === 'narrator' ? 'bg-cyan-400 text-zinc-950 font-black shadow-md' : 'bg-cyan-400/20 text-cyan-300 border border-cyan-400/40'
-                  }`}>
-                    <Mic className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-black text-white font-display">1. Narrator</h4>
-                    <span className="text-[10px] text-cyan-300 font-mono">Spoken Voiceover</span>
-                  </div>
-                </div>
-                <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all ${
-                  scriptStyle === 'narrator' ? 'bg-cyan-400 border-cyan-400 text-zinc-950' : 'border-white/30'
+              <div className="flex items-center gap-2.5">
+                <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
+                  scriptStyle === 'narrator' ? 'bg-cyan-400 text-zinc-950 font-black shadow-md' : 'bg-cyan-400/20 text-cyan-300 border border-cyan-400/40'
                 }`}>
-                  {scriptStyle === 'narrator' && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                  <Mic className="w-4 h-4" />
                 </div>
+                <h4 className="text-sm font-black text-white font-display">1. Narrator</h4>
               </div>
-              <p className="text-[11px] text-zinc-300 font-myanmar leading-relaxed">
-                Video ကို စာအုပ်ဆန်ဆန် စာသားမဟုတ်ဘဲ အပြင်မှာ စကားပြောနေတဲ့အတိုင်း တကယ့် Narrator အသံထွက်စေမည့် သဘာဝစကားပြော စာသားထုတ်ပေးပါမည်။
-              </p>
-              <div className="pt-1">
-                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                  scriptStyle === 'narrator' ? 'bg-cyan-400/30 text-cyan-200 border border-cyan-400/50' : 'bg-white/5 text-zinc-400'
-                }`}>
-                  {scriptStyle === 'narrator' ? '✓ ရွေးချယ်ထားသည်' : 'ရွေးချယ်ရန် နှိပ်ပါ'}
-                </span>
+              <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all shrink-0 ${
+                scriptStyle === 'narrator' ? 'bg-cyan-400 border-cyan-400 text-zinc-950' : 'border-white/30'
+              }`}>
+                {scriptStyle === 'narrator' && <Check className="w-3.5 h-3.5 stroke-[3]" />}
               </div>
             </div>
 
             {/* 2. STORY */}
             <div
               onClick={() => selectStep3Style('story')}
-              className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
+              className={`p-3.5 rounded-2xl border transition-all cursor-pointer flex items-center justify-between gap-3 ${
                 scriptStyle === 'story'
                   ? 'bg-gradient-to-br from-emerald-500/20 via-teal-500/10 to-black/60 border-emerald-400 shadow-xl ring-2 ring-emerald-400/50'
                   : 'bg-black/40 border-white/10 hover:border-white/25 hover:bg-white/[0.03]'
               }`}
             >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
-                    scriptStyle === 'story' ? 'bg-emerald-400 text-zinc-950 font-black shadow-md' : 'bg-emerald-400/20 text-emerald-300 border border-emerald-400/40'
-                  }`}>
-                    <BookOpen className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-black text-white font-display">2. Story</h4>
-                    <span className="text-[10px] text-emerald-300 font-mono">Storytelling Narrative</span>
-                  </div>
-                </div>
-                <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all ${
-                  scriptStyle === 'story' ? 'bg-emerald-400 border-emerald-400 text-zinc-950' : 'border-white/30'
+              <div className="flex items-center gap-2.5">
+                <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
+                  scriptStyle === 'story' ? 'bg-emerald-400 text-zinc-950 font-black shadow-md' : 'bg-emerald-400/20 text-emerald-300 border border-emerald-400/40'
                 }`}>
-                  {scriptStyle === 'story' && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                  <BookOpen className="w-4 h-4" />
                 </div>
+                <h4 className="text-sm font-black text-white font-display">2. Story</h4>
               </div>
-              <p className="text-[11px] text-zinc-300 font-myanmar leading-relaxed">
-                Video တစ်ခုလုံးကို လူတစ်ယောက် Story ပြောပြနေသလိုမျိုး ဇာတ်အိမ်ဖွဲ့ပြီး ဆွဲဆောင်မှုရှိတဲ့ ဇာတ်လမ်းဆန်ဆန် စာသားထုတ်ပေးပါမည်။
-              </p>
-              <div className="pt-1">
-                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                  scriptStyle === 'story' ? 'bg-emerald-400/30 text-emerald-200 border border-emerald-400/50' : 'bg-white/5 text-zinc-400'
-                }`}>
-                  {scriptStyle === 'story' ? '✓ ရွေးချယ်ထားသည်' : 'ရွေးချယ်ရန် နှိပ်ပါ'}
-                </span>
+              <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all shrink-0 ${
+                scriptStyle === 'story' ? 'bg-emerald-400 border-emerald-400 text-zinc-950' : 'border-white/30'
+              }`}>
+                {scriptStyle === 'story' && <Check className="w-3.5 h-3.5 stroke-[3]" />}
               </div>
             </div>
 
             {/* 3. TRANSLATION */}
             <div
               onClick={() => selectStep3Style('translation')}
-              className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
+              className={`p-3.5 rounded-2xl border transition-all cursor-pointer flex items-center justify-between gap-3 ${
                 scriptStyle === 'translation'
                   ? 'bg-gradient-to-br from-amber-500/20 via-orange-500/10 to-black/60 border-amber-400 shadow-xl ring-2 ring-amber-400/50'
                   : 'bg-black/40 border-white/10 hover:border-white/25 hover:bg-white/[0.03]'
               }`}
             >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
-                    scriptStyle === 'translation' ? 'bg-amber-400 text-zinc-950 font-black shadow-md' : 'bg-amber-400/20 text-amber-300 border border-amber-400/40'
-                  }`}>
-                    <Languages className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-black text-white font-display">3. Translation</h4>
-                    <span className="text-[10px] text-amber-300 font-mono">Direct Subtitle & Speech</span>
-                  </div>
-                </div>
-                <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all ${
-                  scriptStyle === 'translation' ? 'bg-amber-400 border-amber-400 text-zinc-950' : 'border-white/30'
+              <div className="flex items-center gap-2.5">
+                <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
+                  scriptStyle === 'translation' ? 'bg-amber-400 text-zinc-950 font-black shadow-md' : 'bg-amber-400/20 text-amber-300 border border-amber-400/40'
                 }`}>
-                  {scriptStyle === 'translation' && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                  <Languages className="w-4 h-4" />
                 </div>
+                <h4 className="text-sm font-black text-white font-display">3. Translation</h4>
               </div>
-              <p className="text-[11px] text-zinc-300 font-myanmar leading-relaxed">
-                Video ထဲက Chinese/English Subtitle နှင့် Voice အသံတွေကို အကုန်အစင် ဖတ်ယူပြီး မူရင်းအတိုင်း တိကျတဲ့ မြန်မာဘာသာပြန် စာသားထုတ်ပေးပါမည်။
-              </p>
-              <div className="pt-1">
-                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                  scriptStyle === 'translation' ? 'bg-amber-400/30 text-amber-200 border border-amber-400/50' : 'bg-white/5 text-zinc-400'
-                }`}>
-                  {scriptStyle === 'translation' ? '✓ ရွေးချယ်ထားသည်' : 'ရွေးချယ်ရန် နှိပ်ပါ'}
-                </span>
+              <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all shrink-0 ${
+                scriptStyle === 'translation' ? 'bg-amber-400 border-amber-400 text-zinc-950' : 'border-white/30'
+              }`}>
+                {scriptStyle === 'translation' && <Check className="w-3.5 h-3.5 stroke-[3]" />}
               </div>
             </div>
           </div>
@@ -801,9 +785,8 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
               <span className="w-6 h-6 rounded-lg bg-teal-400 text-zinc-950 flex items-center justify-center text-xs font-black shadow">
                 ၂
               </span>
-              <h3 className="text-sm font-black text-white font-display flex items-center gap-2">
-                <span>Video TTS ထုတ်မည့် Engine</span>
-                <span className="text-xs font-normal text-zinc-400 font-myanmar">(Assembly, Vd+OCR, Faster whisper, Gemini)</span>
+              <h3 className="text-sm font-black text-white font-display">
+                Video TTS ထုတ်မည့် Engine
               </h3>
             </div>
             <span className="text-[11px] font-mono px-2.5 py-0.5 rounded-full bg-teal-500/15 text-teal-300 border border-teal-500/30 font-bold">
@@ -815,174 +798,105 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
             {/* 1. Assembly */}
             <div
               onClick={() => setSelectedEngine('assemblyai')}
-              className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
+              className={`p-3.5 rounded-2xl border transition-all cursor-pointer flex items-center justify-between gap-2 ${
                 selectedEngine === 'assemblyai'
                   ? 'bg-blue-500/20 border-blue-400 shadow-xl ring-2 ring-blue-400/50'
                   : 'bg-black/40 border-white/10 hover:border-white/25 hover:bg-white/[0.03]'
               }`}
             >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
-                    selectedEngine === 'assemblyai' ? 'bg-blue-400 text-zinc-950 font-black shadow-md' : 'bg-blue-400/20 text-blue-300 border border-blue-400/40'
-                  }`}>
-                    <Radio className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-black text-white font-display">Assembly</h4>
-                    <span className="text-[10px] text-blue-300 font-mono">Assembly Generate</span>
-                  </div>
-                </div>
-                <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all ${
-                  selectedEngine === 'assemblyai' ? 'bg-blue-400 border-blue-400 text-zinc-950' : 'border-white/30'
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
+                  selectedEngine === 'assemblyai' ? 'bg-blue-400 text-zinc-950 font-black shadow-md' : 'bg-blue-400/20 text-blue-300 border border-blue-400/40'
                 }`}>
-                  {selectedEngine === 'assemblyai' && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                  <Radio className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <h4 className="text-sm font-black text-white font-display truncate">Assembly</h4>
+                  <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-bold inline-block mt-0.5 ${
+                    hasAssemblyAiKey
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                      : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                  }`}>
+                    {hasAssemblyAiKey ? 'Connected' : 'Requires Token'}
+                  </span>
                 </div>
               </div>
-              <p className="text-[11px] text-zinc-300 font-myanmar leading-relaxed">
-                AssemblyAI API ဖြင့် Speech-to-Text ပြုလုပ်ပြီး Gemini API မှ မြန်မာဘာသာပြန်ဆို၍ စာသား ထုတ်ပေးပါမည်။
-              </p>
-              <div className="flex items-center justify-between gap-2 pt-1">
-                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                  selectedEngine === 'assemblyai' ? 'bg-blue-400/30 text-blue-200 border border-blue-400/50' : 'bg-white/5 text-zinc-400'
-                }`}>
-                  {selectedEngine === 'assemblyai' ? '✓ ရွေးချယ်ထားသည်' : 'ရွေးချယ်ရန် နှိပ်ပါ'}
-                </span>
-                {hasAssemblyAiKey ? (
-                  <span className="text-[9px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-bold">
-                    Connected
-                  </span>
-                ) : (
-                  <span className="text-[9px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-bold">
-                    Requires Token
-                  </span>
-                )}
+              <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all shrink-0 ${
+                selectedEngine === 'assemblyai' ? 'bg-blue-400 border-blue-400 text-zinc-950' : 'border-white/30'
+              }`}>
+                {selectedEngine === 'assemblyai' && <Check className="w-3.5 h-3.5 stroke-[3]" />}
               </div>
             </div>
 
             {/* 2. Vd+OCR */}
             <div
               onClick={() => setSelectedEngine('videosubfinder_paddleocr')}
-              className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
+              className={`p-3.5 rounded-2xl border transition-all cursor-pointer flex items-center justify-between gap-2 ${
                 selectedEngine === 'videosubfinder_paddleocr'
                   ? 'bg-cyan-500/20 border-cyan-400 shadow-xl ring-2 ring-cyan-400/50'
                   : 'bg-black/40 border-white/10 hover:border-white/25 hover:bg-white/[0.03]'
               }`}
             >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
-                    selectedEngine === 'videosubfinder_paddleocr' ? 'bg-cyan-400 text-zinc-950 font-black shadow-md' : 'bg-cyan-400/20 text-cyan-300 border border-cyan-400/40'
-                  }`}>
-                    <ScanText className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-black text-white font-display">Vd+OCR</h4>
-                    <span className="text-[10px] text-cyan-300 font-mono">VideoSubFinder + PaddleOCR</span>
-                  </div>
-                </div>
-                <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all ${
-                  selectedEngine === 'videosubfinder_paddleocr' ? 'bg-cyan-400 border-cyan-400 text-zinc-950' : 'border-white/30'
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
+                  selectedEngine === 'videosubfinder_paddleocr' ? 'bg-cyan-400 text-zinc-950 font-black shadow-md' : 'bg-cyan-400/20 text-cyan-300 border border-cyan-400/40'
                 }`}>
-                  {selectedEngine === 'videosubfinder_paddleocr' && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                  <ScanText className="w-4 h-4" />
                 </div>
+                <h4 className="text-sm font-black text-white font-display truncate">Vd+OCR</h4>
               </div>
-              <p className="text-[11px] text-zinc-300 font-myanmar leading-relaxed">
-                Custom Upload Video မှ Subtitle စာတန်းထိုးများကို Hardsub OCR ဖြင့် ရှာဖွေဖတ်ယူပြီး Transcript နှင့် မြန်မာဘာသာပြန် ထုတ်ပေးပါမည်။
-              </p>
-              <div className="flex items-center justify-between gap-2 pt-1">
-                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                  selectedEngine === 'videosubfinder_paddleocr' ? 'bg-cyan-400/30 text-cyan-200 border border-cyan-400/50' : 'bg-white/5 text-zinc-400'
-                }`}>
-                  {selectedEngine === 'videosubfinder_paddleocr' ? '✓ ရွေးချယ်ထားသည်' : 'ရွေးချယ်ရန် နှိပ်ပါ'}
-                </span>
-                <span className="text-[9px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-bold">
-                  ★ Subtitle OCR (Recommended)
-                </span>
+              <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all shrink-0 ${
+                selectedEngine === 'videosubfinder_paddleocr' ? 'bg-cyan-400 border-cyan-400 text-zinc-950' : 'border-white/30'
+              }`}>
+                {selectedEngine === 'videosubfinder_paddleocr' && <Check className="w-3.5 h-3.5 stroke-[3]" />}
               </div>
             </div>
 
             {/* 3. Faster whisper */}
             <div
               onClick={() => setSelectedEngine('faster_whisper')}
-              className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
+              className={`p-3.5 rounded-2xl border transition-all cursor-pointer flex items-center justify-between gap-2 ${
                 selectedEngine === 'faster_whisper'
                   ? 'bg-emerald-500/20 border-emerald-400 shadow-xl ring-2 ring-emerald-400/50'
                   : 'bg-black/40 border-white/10 hover:border-white/25 hover:bg-white/[0.03]'
               }`}
             >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
-                    selectedEngine === 'faster_whisper' ? 'bg-emerald-400 text-zinc-950 font-black shadow-md' : 'bg-emerald-400/20 text-emerald-300 border border-emerald-400/40'
-                  }`}>
-                    <Zap className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-black text-white font-display">Faster whisper</h4>
-                    <span className="text-[10px] text-emerald-300 font-mono">Faster-Whisper Generate</span>
-                  </div>
-                </div>
-                <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all ${
-                  selectedEngine === 'faster_whisper' ? 'bg-emerald-400 border-emerald-400 text-zinc-950' : 'border-white/30'
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
+                  selectedEngine === 'faster_whisper' ? 'bg-emerald-400 text-zinc-950 font-black shadow-md' : 'bg-emerald-400/20 text-emerald-300 border border-emerald-400/40'
                 }`}>
-                  {selectedEngine === 'faster_whisper' && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                  <Zap className="w-4 h-4" />
                 </div>
+                <h4 className="text-sm font-black text-white font-display truncate">Faster whisper</h4>
               </div>
-              <p className="text-[11px] text-zinc-300 font-myanmar leading-relaxed">
-                Faster-whisper (CPU mode int8) ဖြင့် အသံဖိုင်မှ Speech-to-Text အမြန် ပြုလုပ်ပြီး Gemini ဖြင့် မြန်မာဘာသာပြန်ဆို စာသားထုတ်ပေးပါမည်။
-              </p>
-              <div className="flex items-center justify-between gap-2 pt-1">
-                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                  selectedEngine === 'faster_whisper' ? 'bg-emerald-400/30 text-emerald-200 border border-emerald-400/50' : 'bg-white/5 text-zinc-400'
-                }`}>
-                  {selectedEngine === 'faster_whisper' ? '✓ ရွေးချယ်ထားသည်' : 'ရွေးချယ်ရန် နှိပ်ပါ'}
-                </span>
-                <span className="text-[9px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-bold">
-                  High-Speed CPU
-                </span>
+              <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all shrink-0 ${
+                selectedEngine === 'faster_whisper' ? 'bg-emerald-400 border-emerald-400 text-zinc-950' : 'border-white/30'
+              }`}>
+                {selectedEngine === 'faster_whisper' && <Check className="w-3.5 h-3.5 stroke-[3]" />}
               </div>
             </div>
 
             {/* 4. Gemini */}
             <div
               onClick={() => setSelectedEngine('gemini')}
-              className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
+              className={`p-3.5 rounded-2xl border transition-all cursor-pointer flex items-center justify-between gap-2 ${
                 selectedEngine === 'gemini'
                   ? 'bg-violet-500/20 border-violet-400 shadow-xl ring-2 ring-violet-400/50'
                   : 'bg-black/40 border-white/10 hover:border-white/25 hover:bg-white/[0.03]'
               }`}
             >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
-                    selectedEngine === 'gemini' ? 'bg-violet-400 text-zinc-950 font-black shadow-md' : 'bg-violet-400/20 text-violet-300 border border-violet-400/40'
-                  }`}>
-                    <Sparkles className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-black text-white font-display">Gemini</h4>
-                    <span className="text-[10px] text-violet-300 font-mono">Gemini Engine (Visual Sync)</span>
-                  </div>
-                </div>
-                <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all ${
-                  selectedEngine === 'gemini' ? 'bg-violet-400 border-violet-400 text-zinc-950' : 'border-white/30'
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
+                  selectedEngine === 'gemini' ? 'bg-violet-400 text-zinc-950 font-black shadow-md' : 'bg-violet-400/20 text-violet-300 border border-violet-400/40'
                 }`}>
-                  {selectedEngine === 'gemini' && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                  <Sparkles className="w-4 h-4" />
                 </div>
+                <h4 className="text-sm font-black text-white font-display truncate">Gemini</h4>
               </div>
-              <p className="text-[11px] text-zinc-300 font-myanmar leading-relaxed">
-                Video ထဲက Action ပြောင်းလဲမှု + မျက်နှာအမူအရာအတိုင်း ကွက်တိကိုက်ညီသော Scene-by-Scene မြန်မာ Narrator Script (Prompt အသေ) ဖြင့် ထုတ်ပေးပါမည်။
-              </p>
-              <div className="flex items-center justify-between gap-2 pt-1">
-                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                  selectedEngine === 'gemini' ? 'bg-violet-400/30 text-violet-200 border border-violet-400/50' : 'bg-white/5 text-zinc-400'
-                }`}>
-                  {selectedEngine === 'gemini' ? '✓ ရွေးချယ်ထားသည်' : 'ရွေးချယ်ရန် နှိပ်ပါ'}
-                </span>
-                <span className="text-[9px] px-2 py-0.5 rounded-full bg-violet-500/20 text-violet-300 border border-violet-500/30 font-bold">
-                  Action-Synced Prompt
-                </span>
+              <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all shrink-0 ${
+                selectedEngine === 'gemini' ? 'bg-violet-400 border-violet-400 text-zinc-950' : 'border-white/30'
+              }`}>
+                {selectedEngine === 'gemini' && <Check className="w-3.5 h-3.5 stroke-[3]" />}
               </div>
             </div>
           </div>
@@ -995,14 +909,9 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
               <span className="w-6 h-6 rounded-lg bg-gradient-to-tr from-sky-400 to-teal-400 text-zinc-950 flex items-center justify-center text-xs font-black shadow">
                 ၃
               </span>
-              <div>
-                <h3 className="text-sm font-black text-white font-display">
-                  Generate မည်
-                </h3>
-                <span className="text-[11px] text-zinc-400 font-myanmar">
-                  ၁၊ ၂ ရွေးထားသည့်အတိုင်း အတိအကျ စတင်ထုတ်ယူပါမည်
-                </span>
-              </div>
+              <h3 className="text-sm font-black text-white font-display">
+                Generate မည်
+              </h3>
             </div>
 
             <div className="flex items-center gap-2">
@@ -1027,7 +936,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
 
             {/* Single Narrator Voice Selector right beside Generate */}
             <select
-              value={project.lockedVoice || 'Thiha'}
+              value={project.lockedVoice || 'RecapPro'}
               onChange={(e) =>
                 setProject((prev) => ({ ...prev, lockedVoice: e.target.value as VoiceOption }))
               }
@@ -1131,7 +1040,6 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
 
             <div className="flex items-center justify-between text-[10px] text-zinc-400 font-mono">
               <span>⚡ {selectedGeminiModel} · {getEngineFullLabel(selectedEngine)} ({scriptStyle.toUpperCase()})</span>
-              <span>100% ရောက်ရှိလျှင် ပြီးဆုံးပါမည်</span>
             </div>
           </div>
         )}
@@ -1160,12 +1068,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
             </div>
             <div>
               <span className="font-bold text-white font-myanmar text-sm block">
-                ✓ {scriptStyle === 'story' ? 'Story' : scriptStyle === 'translation' ? 'Translation' : 'Narrator'} စာသား + 0:30 စီ {totalParts} ပိုင်း ({project.segments.length} Segments) အောင်မြင်စွာ ထွက်ရှိပါပြီ
-              </span>
-              <span className="text-[11px] text-zinc-300 font-myanmar">
-                {project.videoInspection
-                  ? `Video: ${project.videoInspection.resolution} · ${formatMinSec(project.videoInspection.duration)} · အဆင့် ၄ (Generate All Voices) တွင် အသံ + 0:30 Sync ထုတ်နိုင်ပါသည်`
-                  : 'အသံထုတ်ရန်နှင့် 0:30 Part Sync ညှိရန် အဆင့် ၄ (TTS Studio) သို့ သွားပါ'}
+                ✓ {scriptStyle === 'story' ? 'Story' : scriptStyle === 'translation' ? 'Translation' : 'Narrator'} ({project.segments.length} Segments)
               </span>
             </div>
           </div>
@@ -1444,6 +1347,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
                       className="px-2.5 py-1 rounded-lg bg-zinc-900 border border-white/10 text-xs text-emerald-400 font-semibold focus:outline-none cursor-pointer"
                     >
                       <optgroup label="Male Voices (Adult Burmese)">
+                        <option value="RecapPro">Min Khant · Recap Pro (🎬 135Hz Reference)</option>
                         <option value="Thiha">Thiha (Adult Male)</option>
                         <option value="KyawKyaw">Kyaw Kyaw (Adult Male)</option>
                         <option value="AungAung">Aung Aung</option>
@@ -1689,12 +1593,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
             <div className="p-4 border-b border-white/10 flex items-center justify-between bg-zinc-950/70">
               <div className="flex items-center gap-2.5">
                 <FileText className="w-5 h-5 text-sky-400" />
-                <div>
-                  <h3 className="text-sm font-bold text-white">Chinese to Burmese Dubbing Plan (10-Point Specification)</h3>
-                  <p className="text-[11px] text-zinc-400 font-myanmar">
-                    အချိန်ကိုက် မြန်မာစကားပြော အပြည့်အစုံ ဇယားနှင့် JSON အချက်အလက်များ
-                  </p>
-                </div>
+                <h3 className="text-sm font-bold text-white">Chinese to Burmese Dubbing Plan (10-Point Specification)</h3>
               </div>
 
               <div className="flex items-center gap-2">
@@ -1790,9 +1689,7 @@ export const AiRecapStudio: React.FC<AiRecapStudioProps> = ({
           <div />
         )}
 
-        <span className="text-xs text-zinc-400 font-myanmar hidden sm:inline">
-          သဘာဝကျသော Narrator Script ထုတ်ယူပြီးပါက နောက်အဆင့် (TTS Studio) သို့ သွားပါ
-        </span>
+        <div />
 
         {onNextStep && (
           <button

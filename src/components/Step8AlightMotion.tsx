@@ -163,6 +163,7 @@ export const Step8AlightMotion: React.FC<Step8AlightMotionProps> = ({
             isCatchUpModeActive={isCatchUpModeActive}
             onCatchUpPlace={handleCatchUpPlace}
             selectedSegmentName={selectedSegment ? `Selected: #${project.segments.findIndex(s => s.id === selectedSegment.id) + 1} (${selectedSegment.voice})` : undefined}
+            forceMuteOriginalAudio={true}
           />
         </div>
 

@@ -20,6 +20,7 @@ export interface VoiceTonePreset {
 }
 
 export const VOICE_TONE_PRESETS: VoiceTonePreset[] = [
+  { id: 'recap_pro', label: 'Reference Recap (135Hz)', myanmarLabel: 'နမူနာ Video စတိုင် Baritone', pitchPct: -5, badge: '🎬 -5%' },
   { id: 'natural', label: 'Natural', myanmarLabel: 'သဘာဝအတိုင်း (ပုံမှန်)', pitchPct: 0, badge: '🎙️ 0%' },
   { id: 'warm', label: 'Warm & Rich', myanmarLabel: 'နွေးထွေးကြင်နာ', pitchPct: -2, badge: '☕ -2%' },
   { id: 'deep', label: 'Deep Bass', myanmarLabel: 'နက်နဲသြဇာရှိ', pitchPct: -8, badge: '🎬 -8%' },
@@ -56,7 +57,16 @@ export interface VoiceProfile {
 }
 
 export const VOICE_PROFILES: Record<VoiceOption, VoiceProfile> = {
-  // 4 DISTINCT MALE VOICES (ကျား ၄ ဦး - Reality Human 24kHz Studio)
+  // REFERENCE VIDEO MATCHED MALE NARRATOR + 4 DISTINCT MALE VOICES (Reality Human 24kHz Studio)
+  RecapPro: {
+    name: 'Min Khant (Recap Pro)',
+    myanmarName: 'မင်းခန့် · Recap Pro',
+    gender: 'male',
+    toneTitle: '🎬 နမူနာ Video စတိုင် 135Hz Warm Chest-Baritone Narrator (Short-Drama Recap)',
+    geminiVoice: 'Charon',
+    desc: 'နမူနာ Video မှ 135Hz Warm Chest-Baritone Narrator အသံ + 215Hz အံ့ဩတက်ကြွ အသံနိမ့်မြင့် စတိုင်',
+    sampleGreeting: 'ရေဘူးတွေ အများကြီး ပေါ်လာတော့ သူ အံ့ဩသွားတယ်။ ဖေချန်ထားခဲ့တာ ရတနာပွားခွက်ပဲ ဆိုတာ သူ နားလည်သွားတယ်!',
+  },
   Thiha: {
     name: 'Thiha',
     myanmarName: 'သီဟ',

@@ -6,7 +6,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import os from 'os';
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import dotenv from 'dotenv';
 import multer from 'multer';
@@ -694,6 +694,321 @@ async function startServer() {
     }
   });
 
+  // 12b. Remux / transcode WebM export fallback to real MP4
+  app.post('/api/video/remux-mp4', safeUploadVideo, async (req, res) => {
+    const inputPath = req.file?.path;
+    if (!inputPath || !fs.existsSync(inputPath)) {
+      return res.status(400).json({ error: 'Missing video file for MP4 conversion' });
+    }
+    const outputPath = path.join(EXPORTS_DIR, `remux_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.mp4`);
+    try {
+      await execFileAsync(
+        'ffmpeg',
+        [
+          '-y',
+          '-i',
+          inputPath,
+          '-c:v',
+          'libx264',
+          '-preset',
+          'veryfast',
+          '-pix_fmt',
+          'yuv420p',
+          '-c:a',
+          'aac',
+          '-b:a',
+          '192k',
+          '-movflags',
+          '+faststart',
+          outputPath,
+        ],
+        { timeout: 180000 }
+      );
+      res.setHeader('Content-Type', 'video/mp4');
+      res.sendFile(outputPath, () => {
+        try {
+          if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+        } catch {}
+        try {
+          if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+        } catch {}
+      });
+    } catch (err: any) {
+      try {
+        if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+      } catch {}
+      try {
+        if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+      } catch {}
+      console.error('MP4 remux error:', err);
+      return res.status(500).json({ error: err?.message || 'MP4 conversion failed' });
+    }
+  });
+
+  // 12c. Real FFmpeg Asynchronous Background Job Queue (for Step 7 ffmpeg-skill integration)
+  interface FfmpegJobInfo {
+    status: 'queued' | 'processing' | 'completed' | 'error';
+    progress: number;
+    downloadUrl?: string;
+    filename?: string;
+    fileSizeMb?: string;
+    error?: string;
+    child?: any;
+    startTime?: number;
+  }
+  const ffmpegJobs = new Map<string, FfmpegJobInfo>();
+
+  app.post('/api/ffmpeg/start-job', safeUploadVideo, async (req, res) => {
+    const inputPath = req.file?.path;
+    const preset = req.body?.preset || 'compress';
+    const resolution = req.body?.resolution || '1080p';
+    const fps = req.body?.fps || '30';
+    const videoCodec = req.body?.videoCodec || 'libx264';
+    const quality = req.body?.quality || 'medium';
+
+    if (!inputPath || !fs.existsSync(inputPath)) {
+      return res.status(400).json({ error: 'Backend Not Connected: Source video file missing' });
+    }
+
+    const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const outputFilename = `ffmpeg_skill_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.mp4`;
+    const outputPath = path.join(EXPORTS_DIR, outputFilename);
+
+    let ffmpegArgs: string[] = [];
+    let scaleFilter = 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2';
+    if (resolution === '4k') scaleFilter = 'scale=3840:2160:force_original_aspect_ratio=decrease,pad=3840:2160:(ow-iw)/2:(oh-ih)/2';
+    else if (resolution === '720p') scaleFilter = 'scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2';
+    else if (resolution === '480p') scaleFilter = 'scale=854:480:force_original_aspect_ratio=decrease,pad=854:480:(ow-iw)/2:(oh-ih)/2';
+
+    let crfVal = '23';
+    if (quality === 'low') crfVal = '28';
+    else if (quality === 'high') crfVal = '18';
+
+    if (preset === 'compress') {
+      ffmpegArgs = ['-y', '-i', inputPath, '-vf', scaleFilter, '-c:v', videoCodec, '-crf', crfVal, '-r', String(fps), '-preset', 'fast', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', outputPath];
+    } else if (preset === 'vertical_crop') {
+      ffmpegArgs = [
+        '-y',
+        '-i',
+        inputPath,
+        '-vf',
+        'split [original][copy];[copy]scale=1080:1920,boxblur=28:5,setsar=1[bg];[original]scale=1080:1920:force_original_aspect_ratio=decrease,setsar=1[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2',
+        '-c:v',
+        videoCodec,
+        '-crf',
+        crfVal,
+        '-r',
+        String(fps),
+        '-c:a',
+        'aac',
+        outputPath,
+      ];
+    } else if (preset === 'extract_audio') {
+      const audioOutPath = path.join(EXPORTS_DIR, `audio_${Date.now()}.mp3`);
+      ffmpegArgs = ['-y', '-i', inputPath, '-vn', '-acodec', 'libmp3lame', '-ab', '192k', audioOutPath];
+    } else {
+      ffmpegArgs = ['-y', '-i', inputPath, '-vf', scaleFilter, '-c:v', videoCodec, '-crf', crfVal, '-r', String(fps), '-c:a', 'aac', '-movflags', '+faststart', outputPath];
+    }
+
+    const jobInfo: FfmpegJobInfo = {
+      status: 'processing',
+      progress: 3,
+      startTime: Date.now(),
+    };
+    ffmpegJobs.set(jobId, jobInfo);
+
+    const child = spawn('ffmpeg', ffmpegArgs);
+    jobInfo.child = child;
+
+    let totalDurationSec = 10;
+    child.stderr.on('data', (data: Buffer) => {
+      const line = data.toString();
+      const durMatch = line.match(/Duration: (\d{2}):(\d{2}):(\d{2})\.(\d{2})/);
+      if (durMatch) {
+        const hrs = parseInt(durMatch[1], 10);
+        const mins = parseInt(durMatch[2], 10);
+        const secs = parseInt(durMatch[3], 10);
+        totalDurationSec = hrs * 3600 + mins * 60 + secs;
+      }
+      const timeMatch = line.match(/time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})/);
+      if (timeMatch && totalDurationSec > 0) {
+        const hrs = parseInt(timeMatch[1], 10);
+        const mins = parseInt(timeMatch[2], 10);
+        const secs = parseInt(timeMatch[3], 10);
+        const curSecs = hrs * 3600 + mins * 60 + secs;
+        const pct = Math.min(98, Math.max(5, Math.round((curSecs / totalDurationSec) * 100)));
+        jobInfo.progress = pct;
+      }
+    });
+
+    child.on('close', (code: number) => {
+      try {
+        if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+      } catch {}
+
+      if (code === 0) {
+        let finalFile = outputPath;
+        if (preset === 'extract_audio') {
+          const files = fs.readdirSync(EXPORTS_DIR);
+          const match = files.find((f) => f.startsWith('audio_') && f.endsWith('.mp3'));
+          if (match) finalFile = path.join(EXPORTS_DIR, match);
+        }
+
+        if (fs.existsSync(finalFile) && fs.statSync(finalFile).size > 0) {
+          const stat = fs.statSync(finalFile);
+          jobInfo.status = 'completed';
+          jobInfo.progress = 100;
+          jobInfo.downloadUrl = `/uploads/exports/${path.basename(finalFile)}`;
+          jobInfo.filename = path.basename(finalFile);
+          jobInfo.fileSizeMb = (stat.size / (1024 * 1024)).toFixed(2) + ' MB';
+        } else {
+          jobInfo.status = 'error';
+          jobInfo.error = 'FFmpeg completed with exit code 0 but output file is missing.';
+        }
+      } else {
+        jobInfo.status = 'error';
+        jobInfo.error = `FFmpeg exited with error code ${code}`;
+      }
+    });
+
+    return res.json({ success: true, jobId });
+  });
+
+  app.get('/api/ffmpeg/status/:jobId', (req, res) => {
+    const jobId = req.params.jobId;
+    const job = ffmpegJobs.get(jobId);
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+    return res.json({
+      success: true,
+      status: job.status,
+      progress: job.progress,
+      downloadUrl: job.downloadUrl,
+      filename: job.filename,
+      fileSizeMb: job.fileSizeMb,
+      error: job.error,
+    });
+  });
+
+  app.post('/api/ffmpeg/cancel/:jobId', (req, res) => {
+    const jobId = req.params.jobId;
+    const job = ffmpegJobs.get(jobId);
+    if (job && job.child) {
+      try {
+        job.child.kill('SIGKILL');
+      } catch {}
+      job.status = 'error';
+      job.error = 'Cancelled by user';
+    }
+    return res.json({ success: true });
+  });
+
+  // 12d. Run Individual FFmpeg Skill Tool Endpoint
+  app.post('/api/ffmpeg/run-tool', safeUploadVideo, async (req, res) => {
+    const inputPath = req.file?.path;
+    const toolId = req.body?.toolId || 'compress';
+    const params = req.body?.params ? JSON.parse(req.body.params) : {};
+
+    if (!inputPath || !fs.existsSync(inputPath)) {
+      return res.status(400).json({ error: 'Source video missing for tool execution' });
+    }
+
+    const outputFilename = `tool_${toolId}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.mp4`;
+    const outputPath = path.join(EXPORTS_DIR, outputFilename);
+
+    let ffmpegArgs: string[] = [];
+    switch (toolId) {
+      case 'trim':
+        const startTime = params.startTime || '00:00:00';
+        const duration = Number(params.duration) || 10;
+        ffmpegArgs = ['-y', '-ss', startTime, '-i', inputPath, '-t', String(duration), '-c', 'copy', outputPath];
+        break;
+      case 'crop':
+        const w = params.width || 1080;
+        const h = params.height || 1920;
+        const x = params.x || 0;
+        const y = params.y || 0;
+        ffmpegArgs = ['-y', '-i', inputPath, '-vf', `crop=${w}:${h}:${x}:${y}`, '-c:v', 'libx264', '-crf', '23', '-c:a', 'aac', outputPath];
+        break;
+      case 'resize':
+      case 'aspect_ratio':
+        const resPreset = params.resolution || params.ratio || '1080p';
+        let scaleStr = 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2';
+        if (resPreset === '480p' || resPreset === '4:5') scaleStr = 'scale=1080:1350:force_original_aspect_ratio=decrease,pad=1080:1350:(ow-iw)/2:(oh-ih)/2';
+        else if (resPreset === '720p' || resPreset === '1:1') scaleStr = 'scale=1080:1080:force_original_aspect_ratio=decrease,pad=1080:1080:(ow-iw)/2:(oh-ih)/2';
+        else if (resPreset === '16:9') scaleStr = 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2';
+        ffmpegArgs = ['-y', '-i', inputPath, '-vf', scaleStr, '-c:v', 'libx264', '-crf', '23', '-c:a', 'aac', outputPath];
+        break;
+      case 'extract_audio':
+        const audioOut = path.join(EXPORTS_DIR, `audio_${Date.now()}.mp3`);
+        ffmpegArgs = ['-y', '-i', inputPath, '-vn', '-acodec', 'libmp3lame', '-ab', params.bitrate || '192k', audioOut];
+        break;
+      case 'blur_filter':
+      case 'bg_blur':
+        const sigma = params.sigma || params.blurAmount || 20;
+        ffmpegArgs = [
+          '-y',
+          '-i',
+          inputPath,
+          '-vf',
+          `split [original][copy];[copy]scale=1080:1920,boxblur=${sigma}:5,setsar=1[bg];[original]scale=1080:1920:force_original_aspect_ratio=decrease,setsar=1[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2`,
+          '-c:v',
+          'libx264',
+          '-crf',
+          '23',
+          '-c:a',
+          'aac',
+          outputPath,
+        ];
+        break;
+      case 'speed_adj':
+        const speed = Number(params.speedRate) || 1.0;
+        const pts = (1 / speed).toFixed(3);
+        ffmpegArgs = ['-y', '-i', inputPath, '-filter_complex', `[0:v]setpts=${pts}*PTS[v];[0:a]atempo=${speed}[a]`, '-map', '[v]', '-map', '[a]', outputPath];
+        break;
+      default:
+        ffmpegArgs = ['-y', '-i', inputPath, '-c:v', 'libx264', '-crf', '23', '-c:a', 'aac', '-movflags', '+faststart', outputPath];
+        break;
+    }
+
+    try {
+      await execFileAsync('ffmpeg', ffmpegArgs, { timeout: 300000 });
+      let finalFile = outputPath;
+      if (toolId === 'extract_audio') {
+        const files = fs.readdirSync(EXPORTS_DIR);
+        const match = files.find((f) => f.startsWith('audio_') && f.endsWith('.mp3'));
+        if (match) finalFile = path.join(EXPORTS_DIR, match);
+      }
+
+      if (!fs.existsSync(finalFile) || fs.statSync(finalFile).size === 0) {
+        throw new Error('Tool output file not generated');
+      }
+
+      const stat = fs.statSync(finalFile);
+      const fileSizeMb = (stat.size / (1024 * 1024)).toFixed(2) + ' MB';
+      const downloadUrl = `/uploads/exports/${path.basename(finalFile)}`;
+
+      try {
+        if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+      } catch {}
+
+      return res.json({
+        success: true,
+        downloadUrl,
+        filename: path.basename(finalFile),
+        fileSizeMb,
+        statusMessage: `Tool ${toolId} executed successfully`,
+      });
+    } catch (err: any) {
+      try {
+        if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+      } catch {}
+      console.error(`Tool ${toolId} execution error:`, err);
+      return res.status(500).json({ success: false, error: err?.message || 'Tool execution failed' });
+    }
+  });
+
   // 13a. Chunked upload endpoint for BGM extraction (idempotent per-chunk files, safe against retries & proxy limits)
   app.post('/api/audio/bgm/upload-chunk', safeUploadChunk, (req, res) => {
     try {
@@ -1163,6 +1478,10 @@ async function startServer() {
 
       // 8+ Curated Human Reality Character Voices (Gemini Voice Mapping)
       const geminiVoiceMap: Record<string, { voice: string; persona: string }> = {
+        RecapPro: {
+          voice: 'Charon',
+          persona: 'Authentic Burmese TikTok & short-drama video recap male narrator anchored in a warm chest-baritone (~135Hz fundamental) with crisp upfront studio presence and lively expressive upward inflection (up to ~210Hz) on moments of surprise, intrigue, or questions. Brisk steady storytelling rhythm (~3.6 syllables/sec), short crisp 0.18s breath pauses between clauses, clear everyday Burmese diction, seamlessly blending 3rd-person plot narration with brief quoted dialogue without switching speakers.',
+        },
         Thiha: {
           voice: 'Puck',
           persona: 'Ultra-realistic, warm, dignified Burmese male native speaker. Natural everyday conversational cadence, authentic human breath pauses, warm chest resonance, crystal-clear diction, zero robotic artifact',
@@ -1277,6 +1596,7 @@ async function startServer() {
       };
 
       const toneDirectiveMap: Record<string, string> = {
+        recap_pro: 'Reference Short-Drama Baritone (~135Hz anchor): Warm resonant chest baritone with crisp upfront vocal clarity, brisk natural storytelling pace (~3.6 syl/sec), and lively upward emotional lifts on surprises or questions without monotone flattening.',
         natural: 'Balanced Natural Tone: Keep pitch steady in the speaker’s core midrange timbre throughout every sentence.',
         warm: 'Warm Chest Tone: Soft, comforting, slightly lower warm vocal resonance.',
         deep: 'Deep & Resonant Tone: Richer low-pitched chest voice with calm baritone gravity.',
@@ -1348,7 +1668,9 @@ async function startServer() {
               throw new Error(`No audio returned from ${modelName}`);
             }
             const rawWav = Buffer.from(base64Audio, 'base64');
-            return appendWavSilencePadding(rawWav, 0.1);
+            const applyRecapMastering = voice === 'RecapPro' || String(tone).toLowerCase() === 'recap_pro';
+            const masteredWav = applyRecapMastering ? await masterGeminiRecapProWav(rawWav) : rawWav;
+            return appendWavSilencePadding(masteredWav, 0.1);
           };
 
           try {
@@ -1426,6 +1748,7 @@ async function startServer() {
         NaraHtetMyat: 'htet-myat',
         NaraShoon: 'shoon',
         NaraThazin: 'thazin',
+        RecapPro: 'ko-banyar',
         Thiha: 'ko-banyar',
         KyawKyaw: 'ko-banyar',
         MinThway: 'ko-banyar',
@@ -1822,6 +2145,33 @@ async function startServer() {
 }
 
 
+
+// Applies warm chest-baritone EQ + clear presence & tight recap compression matching reference narrator
+async function masterGeminiRecapProWav(wavBuffer: Buffer): Promise<Buffer> {
+  if (wavBuffer.length < 44) return wavBuffer;
+  const tmpIn = path.join(os.tmpdir(), `gem_recap_in_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.wav`);
+  const tmpOut = path.join(os.tmpdir(), `gem_recap_out_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.wav`);
+  try {
+    fs.writeFileSync(tmpIn, wavBuffer);
+    await execFileAsync('ffmpeg', [
+      '-y',
+      '-i', tmpIn,
+      '-af', 'highpass=f=80,equalizer=f=155:t=q:w=1.1:g=2.5,equalizer=f=3100:t=q:w=1.0:g=2.2,acompressor=threshold=-16dB:ratio=2.4:attack=8:release=85,alimiter=limit=0.95',
+      tmpOut,
+    ], { timeout: 12000 });
+    if (fs.existsSync(tmpOut)) {
+      const outBuf = fs.readFileSync(tmpOut);
+      if (outBuf.length > 44) return outBuf;
+    }
+    return wavBuffer;
+  } catch (err: any) {
+    console.warn('Gemini RecapPro WAV mastering skipped:', err?.message || err);
+    return wavBuffer;
+  } finally {
+    try { if (fs.existsSync(tmpIn)) fs.unlinkSync(tmpIn); } catch (_) {}
+    try { if (fs.existsSync(tmpOut)) fs.unlinkSync(tmpOut); } catch (_) {}
+  }
+}
 
 // Appends clean silence padding to the end of a WAV buffer with smooth cosine anti-pop taper
 function appendWavSilencePadding(wavBuffer: Buffer, paddingSeconds = 0.25): Buffer {

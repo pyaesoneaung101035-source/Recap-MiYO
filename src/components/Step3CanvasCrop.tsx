@@ -369,6 +369,7 @@ export const Step3CanvasCrop: React.FC<Step3CanvasCropProps> = ({
             project={project}
             setProject={setProject}
             activeSegment={null}
+            forceMuteOriginalAudio={true}
           />
         </div>
       </div>

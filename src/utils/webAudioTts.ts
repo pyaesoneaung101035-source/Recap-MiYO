@@ -16,6 +16,7 @@ interface FormantPreset {
 
 const VOICE_FORMANTS: Record<string, FormantPreset> = {
   // MALE VOICES
+  RecapPro: { f0: 135, f1: 490, f2: 1480, f3: 2550, gain: 1.1 }, // Warm Chest-Baritone Recap
   Thiha: { f0: 125, f1: 500, f2: 1500, f3: 2500, gain: 1.0 },
   KyawKyaw: { f0: 95, f1: 420, f2: 1300, f3: 2200, gain: 1.2 }, // Deep Bass
   AungAung: { f0: 145, f1: 550, f2: 1650, f3: 2700, gain: 1.0 }, // Energetic Youth

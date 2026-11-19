@@ -289,9 +289,10 @@ export async function transcribeVideoWithAssemblyAi(
         ? `STORYTELLING MODE ("2. STORY"):
 - Retell the sequence of events as an engaging oral storyteller ("လူတစ်ယောက် Story ပြောပြနေသလို ဇာတ်လမ်းဆန်ဆန်").
 - Build suspense, hooks, and dramatic narrative flow between scenes.`
-        : `SPOKEN NARRATOR MODE ("1. NARRATOR"):
-- Write lively, natural spoken Burmese meant to be spoken aloud by a real voice actor ("အပြင်မှာ စကားပြောနေတဲ့အတိုင်း").
-- BAN repetitive "...ပါတယ်။ / ...နေပါတယ်။" textbook suffixes. Use everyday colloquial endings, reactions, and conversational punctuation.`;
+        : `REFERENCE SHORT-DRAMA NARRATOR MODE ("1. NARRATOR — BLENDED RECAP & INLINE DIALOGUE"):
+- Jump straight into the visual/action hook with ZERO greeting filler ("မင်္ဂလာပါ/ဒီဇာတ်လမ်းမှာ" မထည့်ရ).
+- Blend 3rd-person recap ("...ဆိုတာ သူ နားလည်သွားတယ်", "သူ အလွတ်မပေးဘူး") seamlessly with crisp inline character quotes/thoughts ("၁ ကီလို ရွှေတုံး ရှိလား?", "ရှိပါတယ်။ ခဏစောင့်ပါ။") voiced by ONE single narrator in short 1.8s–4.5s micro-clauses (~3.6 syllables/sec).
+- BAN repetitive "...ပါတယ်။ / ...နေပါတယ်။ / ...ဖြစ်ပါတယ်။" textbook suffixes (except inside polite character replies). Use varied endings ("...သွားတယ်", "...နိုင်ပြီ", "...မယ်", "...ဘူး", "...ပဲ", "...လား?", "...နော်!").`;
 
   onProgress(`🇲🇲 [Gemini Timeline Engine] - မူရင်း video timeline အတိုင်း ${scriptStyle.toUpperCase()} စာသားများကို Gemini ဖြင့် ပြင်ဆင်နေပါသည်...`);
 

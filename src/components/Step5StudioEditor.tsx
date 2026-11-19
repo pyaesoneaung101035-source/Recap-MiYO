@@ -130,6 +130,44 @@ const formatRulerTick = (sec: number): string => {
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 };
 
+const VideoFilmstripTrack = React.memo(({ thumbnails }: { thumbnails: string[] }) => (
+  <div className="w-full h-full rounded overflow-hidden border border-[#2F2D46] grid grid-cols-12 bg-black">
+    {Array.from({ length: 12 }).map((_, i) => (
+      <img
+        key={i}
+        src={thumbnails[i] || DEMO_SCENE_SRC}
+        alt=""
+        referrerPolicy="no-referrer"
+        className="w-full h-full object-cover border-r border-black/40 last:border-r-0 pointer-events-none"
+      />
+    ))}
+  </div>
+));
+
+const BgmWaveformTrack = React.memo(({ bars }: { bars: number[] }) => (
+  <div className="w-full h-full rounded bg-emerald-950/35 border border-emerald-500/25 px-1 flex items-center justify-between gap-[1px] pointer-events-none">
+    {bars.map((h, i) => (
+      <span
+        key={i}
+        style={{ height: `${h}%` }}
+        className="flex-1 bg-gradient-to-b from-emerald-300 via-emerald-500 to-teal-500 rounded-full opacity-90"
+      />
+    ))}
+  </div>
+));
+
+const VoiceCloneClipBars = React.memo(({ bars, clipIndex }: { bars: number[]; clipIndex: number }) => (
+  <div className="flex-1 h-full flex items-center justify-between gap-[1px] pointer-events-none opacity-85">
+    {bars.slice(0, 28).map((h, bIdx) => (
+      <span
+        key={bIdx}
+        style={{ height: `${Math.max(20, ((h + clipIndex * 17) % 85) + 12)}%` }}
+        className="flex-1 bg-gradient-to-b from-cyan-300 via-indigo-400 to-violet-500 rounded-full"
+      />
+    ))}
+  </div>
+));
+
 export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
   project,
   setProject,
@@ -143,6 +181,7 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
   const previewContainerRef = useRef<HTMLDivElement>(null);
   const audioMixerRef = useRef<UnifiedAudioMixer | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const lastTimeUpdateMsRef = useRef<number>(0);
 
   const getMixer = () => {
     if (!audioMixerRef.current) {
@@ -265,12 +304,7 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
     project.useExtractedBgm !== false
   );
   const hasClonedAudio = project.segments.some((s) => Boolean(s.audioUrl));
-  const shouldMuteOrig = Boolean(
-    project.isMuted ||
-      !trackVisible.video ||
-      isBgmActive ||
-      (hasClonedAudio && !project.isVoiceMuted && trackVisible.narrator)
-  );
+  const shouldMuteOrig = true;
 
   // Auto-activate extracted BGM once when entering Step 5 if an extracted BGM MP3 is available
   useEffect(() => {
@@ -355,26 +389,34 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
     }
   }, [project.extractedBgmUrl, project.segments]);
 
+  const syncMixerAtTime = (timeSec: number, forceReseek = false, overrideIsPlaying?: boolean) => {
+    const rate = Math.max(0.25, Math.min(2.5, project.playbackRate || 1.0));
+    getMixer().sync(
+      {
+        isPlaying: overrideIsPlaying !== undefined ? overrideIsPlaying : project.isPlaying,
+        currentTime: timeSec,
+        playbackRate: videoRef.current?.playbackRate || rate,
+        isMuted: Boolean(project.isMuted),
+        bgmUrl: project.extractedBgmUrl,
+        isBgmEnabled: isBgmActive,
+        bgmVolume: project.bgmVolume ?? 0.65,
+        segments: project.segments,
+        voiceSpeed,
+        isVoiceEnabled: !project.isVoiceMuted && trackVisible.narrator,
+        voiceVolume: project.voiceVolume ?? 1.0,
+      },
+      forceReseek
+    );
+  };
+
   // Unified Web Audio Mixer: combines BGM MP3 + Voice Clone into ONE glitch-free hardware audio bus
   useEffect(() => {
     if (videoRef.current) {
-      videoRef.current.muted = shouldMuteOrig;
-      videoRef.current.volume = shouldMuteOrig ? 0 : (project.volume ?? 0.8);
+      videoRef.current.defaultMuted = true;
+      videoRef.current.muted = true;
+      videoRef.current.volume = 0;
     }
-    const mixer = getMixer();
-    mixer.sync({
-      isPlaying: project.isPlaying,
-      currentTime: project.currentTime,
-      playbackRate: videoRef.current?.playbackRate || project.playbackRate || 1.0,
-      isMuted: Boolean(project.isMuted),
-      bgmUrl: project.extractedBgmUrl,
-      isBgmEnabled: isBgmActive,
-      bgmVolume: project.bgmVolume ?? 0.65,
-      segments: project.segments,
-      voiceSpeed,
-      isVoiceEnabled: !project.isVoiceMuted && trackVisible.narrator,
-      voiceVolume: project.voiceVolume ?? 1.0,
-    });
+    syncMixerAtTime(project.currentTime, false);
   }, [
     isBgmActive,
     shouldMuteOrig,
@@ -395,7 +437,7 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
     trackVisible.video,
   ]);
 
-  // Extract filmstrip thumbnails when a video is uploaded
+  // Extract filmstrip thumbnails when a video is uploaded, then immediately release the hardware decoder
   useEffect(() => {
     if (!project.videoUrl) {
       setVideoThumbnails([]);
@@ -403,44 +445,67 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
     }
     let cancelled = false;
     const tempVid = document.createElement('video');
+    tempVid.preload = 'auto';
     tempVid.src = project.videoUrl;
     tempVid.muted = true;
     tempVid.playsInline = true;
     tempVid.crossOrigin = 'anonymous';
 
-    tempVid.onloadedmetadata = async () => {
-      const dur = tempVid.duration || 30;
-      const count = 12;
-      const frames: string[] = [];
-      const canvas = document.createElement('canvas');
-      canvas.width = 160;
-      canvas.height = 90;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
+    const releaseTempVid = () => {
+      try {
+        tempVid.onloadedmetadata = null;
+        tempVid.pause();
+        tempVid.removeAttribute('src');
+        tempVid.load();
+      } catch (_) {}
+    };
 
-      for (let i = 0; i < count; i++) {
-        if (cancelled) return;
-        const targetTime = Math.min(dur - 0.1, (dur / count) * (i + 0.5));
-        await new Promise<void>((resolve) => {
-          const onSeeked = () => {
-            tempVid.removeEventListener('seeked', onSeeked);
-            try {
-              ctx.drawImage(tempVid, 0, 0, canvas.width, canvas.height);
-              frames.push(canvas.toDataURL('image/jpeg', 0.6));
-            } catch {}
-            resolve();
-          };
-          tempVid.addEventListener('seeked', onSeeked);
-          tempVid.currentTime = Math.max(0, targetTime);
-        });
-      }
-      if (!cancelled && frames.length > 0) {
-        setVideoThumbnails(frames);
+    tempVid.onloadedmetadata = async () => {
+      try {
+        const dur = tempVid.duration || 30;
+        const count = 12;
+        const frames: string[] = [];
+        const canvas = document.createElement('canvas');
+        canvas.width = 160;
+        canvas.height = 90;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        for (let i = 0; i < count; i++) {
+          if (cancelled) return;
+          const targetTime = Math.min(dur - 0.1, (dur / count) * (i + 0.5));
+          await new Promise<void>((resolve) => {
+            let done = false;
+            const finish = () => {
+              if (done) return;
+              done = true;
+              clearTimeout(timer);
+              tempVid.removeEventListener('seeked', onSeeked);
+              resolve();
+            };
+            const onSeeked = () => {
+              try {
+                ctx.drawImage(tempVid, 0, 0, canvas.width, canvas.height);
+                frames.push(canvas.toDataURL('image/jpeg', 0.6));
+              } catch {}
+              finish();
+            };
+            const timer = setTimeout(finish, 1500);
+            tempVid.addEventListener('seeked', onSeeked);
+            tempVid.currentTime = Math.max(0, targetTime);
+          });
+        }
+        if (!cancelled && frames.length > 0) {
+          setVideoThumbnails(frames);
+        }
+      } finally {
+        releaseTempVid();
       }
     };
 
     return () => {
       cancelled = true;
+      releaseTempVid();
     };
   }, [project.videoUrl]);
 
@@ -448,16 +513,49 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
     if (!file || !file.type.startsWith('video/')) return;
     const url = URL.createObjectURL(file);
     audioMixerRef.current?.stopAll();
+    try {
+      sessionStorage.removeItem('motion_recap_session_bgm_url');
+    } catch (_) {}
     setProject((prev) => ({
       ...prev,
       videoFile: file,
       videoUrl: url,
       videoName: file.name,
+      videoDuration: 0,
       currentTime: 0,
       isPlaying: false,
+      playbackRate: 1.0,
+      voicePlaybackRate: 1.0,
+      volume: 0.8,
+      isMuted: false,
+      voiceVolume: 1.0,
+      isVoiceMuted: false,
+      segments: [],
       extractedBgmUrl: null,
+      useExtractedBgm: false,
       bgmEngineUsed: null,
       videoInspection: null,
+      frameCrop: {
+        fitMode: 'cover',
+        scale: 1.0,
+        posX: 0,
+        posY: 0,
+        backgroundStyle: 'blur',
+      },
+      keyframes: [
+        {
+          id: 'kf_0',
+          time: 0,
+          scale: 1.0,
+          posX: 0,
+          posY: 0,
+          rotation: 0,
+          opacity: 1,
+          blur: 0,
+          shakeIntensity: 0,
+          filter: 'none',
+        },
+      ],
     }));
     setStatusMessage(`Loaded video: ${file.name}`);
     inspectVideoFile(file, file.name)
@@ -490,60 +588,39 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
 
   const handleSeek = (newTime: number) => {
     const clamped = Math.max(0, Math.min(totalDuration, newTime));
+    lastTimeUpdateMsRef.current = 0;
     if (videoRef.current && project.videoUrl) {
       videoRef.current.currentTime = clamped;
     }
     const mixer = getMixer();
     mixer.unlock();
-    mixer.sync(
-      {
-        isPlaying: project.isPlaying,
-        currentTime: clamped,
-        playbackRate: videoRef.current?.playbackRate || project.playbackRate || 1.0,
-        isMuted: Boolean(project.isMuted),
-        bgmUrl: project.extractedBgmUrl,
-        isBgmEnabled: isBgmActive,
-        bgmVolume: project.bgmVolume ?? 0.65,
-        segments: project.segments,
-        voiceSpeed,
-        isVoiceEnabled: !project.isVoiceMuted && trackVisible.narrator,
-        voiceVolume: project.voiceVolume ?? 1.0,
-      },
-      true
-    );
+    syncMixerAtTime(clamped, true);
     onSeekTo(clamped);
   };
 
   const handleTogglePlay = () => {
     const willPlay = !project.isPlaying;
     const mixer = getMixer();
+    lastTimeUpdateMsRef.current = 0;
     setProject((prev) => ({ ...prev, isPlaying: willPlay }));
 
     if (willPlay) {
       stopAllPreviewAudio();
       mixer.unlock();
+      const rate = Math.max(0.25, Math.min(2.5, project.playbackRate || 1.0));
       if (videoRef.current && videoRef.current.paused) {
+        videoRef.current.defaultMuted = true;
+        videoRef.current.muted = true;
+        videoRef.current.volume = 0;
+        if (Math.abs(videoRef.current.playbackRate - rate) > 0.02) {
+          videoRef.current.playbackRate = rate;
+        }
         if (videoRef.current.readyState >= 1 && Math.abs(videoRef.current.currentTime - project.currentTime) > 0.25) {
           videoRef.current.currentTime = Math.max(0, project.currentTime);
         }
         videoRef.current.play().catch(() => {});
       }
-      mixer.sync(
-        {
-          isPlaying: true,
-          currentTime: project.currentTime,
-          playbackRate: videoRef.current?.playbackRate || project.playbackRate || 1.0,
-          isMuted: Boolean(project.isMuted),
-          bgmUrl: project.extractedBgmUrl,
-          isBgmEnabled: isBgmActive,
-          bgmVolume: project.bgmVolume ?? 0.65,
-          segments: project.segments,
-          voiceSpeed,
-          isVoiceEnabled: !project.isVoiceMuted && trackVisible.narrator,
-          voiceVolume: project.voiceVolume ?? 1.0,
-        },
-        true
-      );
+      syncMixerAtTime(videoRef.current ? videoRef.current.currentTime : project.currentTime, true, true);
     } else {
       if (videoRef.current && !videoRef.current.paused) {
         videoRef.current.pause();
@@ -764,8 +841,8 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
 
   const bgmVolVal = project.isMuted || !isBgmActive ? 0 : project.bgmVolume ?? 0.65;
   const bgmVolPct = bgmVolVal * 100;
-  const voiceVolVal = project.isMuted || project.isVoiceMuted || !trackVisible.narrator ? 0 : Math.min(1, project.voiceVolume ?? 1.0);
-  const voiceVolPct = voiceVolVal * 100;
+  const voiceVolVal = project.isMuted || project.isVoiceMuted || !trackVisible.narrator ? 0 : Math.min(1.5, project.voiceVolume ?? 1.0);
+  const voiceVolPct = Math.min(100, (voiceVolVal / 1.5) * 100);
 
   const rulerStepSec = totalDuration <= 90 ? 15 : 30;
   const rulerTicks = useMemo(() => {
@@ -873,9 +950,6 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
             <div className="text-sm font-extrabold text-white font-display tracking-tight">
               Recap-MiYO
             </div>
-            <div className="text-[10px] text-zinc-400">
-              AI Video Dubbing &amp; Editing Studio
-            </div>
           </div>
         </div>
 
@@ -943,13 +1017,25 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
                   type="button"
                   onClick={() => {
                     pushHistory();
+                    audioMixerRef.current?.stopAll();
+                    try {
+                      sessionStorage.removeItem('motion_recap_session_bgm_url');
+                    } catch (_) {}
                     setProject((prev) => ({
                       ...prev,
                       videoFile: null,
                       videoUrl: null,
                       videoName: 'Recap-MiYO_Project.mp4',
+                      videoDuration: 0,
                       currentTime: 0,
                       isPlaying: false,
+                      playbackRate: 1.0,
+                      voicePlaybackRate: 1.0,
+                      isMuted: false,
+                      isVoiceMuted: false,
+                      extractedBgmUrl: null,
+                      useExtractedBgm: false,
+                      bgmEngineUsed: null,
                       segments: STEP5_DEMO_SUBTITLES,
                     }));
                     setStatusMessage('Created new project');
@@ -1024,34 +1110,81 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
                       {crop.fitMode === 'contain' && crop.backgroundStyle === 'blur' && (
                         <video
                           src={project.videoUrl}
+                          preload="metadata"
                           className="absolute inset-0 w-full h-full object-cover filter blur-xl opacity-40 scale-110 pointer-events-none"
                           muted
                         />
                       )}
-                      <div
-                        className="w-full h-full flex items-center justify-center transition-transform duration-75 overflow-hidden"
-                        style={{
-                          transform: `scale(${kf.scale * (crop.scale || 1.0)}) translate(${kf.posX + (crop.posX || 0)}px, ${kf.posY + (crop.posY || 0)}px) rotate(${kf.rotation}deg)`,
-                          opacity: Math.max(0, Math.min(1, kf.opacity)),
-                        }}
-                      >
+                      {(() => {
+                        const s = kf.scale * (crop.scale || 1.0);
+                        const px = kf.posX + (crop.posX || 0);
+                        const py = kf.posY + (crop.posY || 0);
+                        const hasT =
+                          Math.abs(s - 1) > 0.001 ||
+                          Math.abs(px) > 0.01 ||
+                          Math.abs(py) > 0.01 ||
+                          Math.abs(kf.rotation) > 0.01;
+                        return (
+                          <div
+                            className="w-full h-full flex items-center justify-center overflow-hidden"
+                            style={{
+                              ...(hasT
+                                ? { transform: `scale(${s}) translate(${px}px, ${py}px) rotate(${kf.rotation}deg)` }
+                                : {}),
+                              opacity: Math.max(0, Math.min(1, kf.opacity)),
+                            }}
+                          >
                         <video
                           ref={videoRef}
                           src={project.videoUrl}
-                          muted={shouldMuteOrig}
+                          preload="auto"
+                          muted
                           playsInline
                           onClick={handleTogglePlay}
+                          onPlay={() => {
+                            if (videoRef.current) {
+                              const rate = Math.max(0.25, Math.min(2.5, project.playbackRate || 1.0));
+                              videoRef.current.defaultMuted = true;
+                              videoRef.current.muted = true;
+                              videoRef.current.volume = 0;
+                              if (Math.abs(videoRef.current.playbackRate - rate) > 0.02) {
+                                videoRef.current.playbackRate = rate;
+                              }
+                            }
+                          }}
+                          onVolumeChange={() => {
+                            if (videoRef.current && (!videoRef.current.muted || videoRef.current.volume > 0)) {
+                              videoRef.current.defaultMuted = true;
+                              videoRef.current.muted = true;
+                              videoRef.current.volume = 0;
+                            }
+                          }}
                           onTimeUpdate={() => {
-                            if (!videoRef.current) return;
+                            const v = videoRef.current;
+                            if (!v) return;
+                            const t = v.currentTime || 0;
+                            syncMixerAtTime(t, false, !v.paused && !v.ended && project.isPlaying);
+                            const now = performance.now();
+                            if (!v.paused && !v.ended && now - lastTimeUpdateMsRef.current < 90) {
+                              return;
+                            }
+                            lastTimeUpdateMsRef.current = now;
                             setProject((prev) => ({
                               ...prev,
-                              currentTime: videoRef.current?.currentTime || 0,
-                              videoDuration: videoRef.current?.duration || prev.videoDuration,
+                              currentTime: t,
+                              videoDuration: v.duration || prev.videoDuration,
                             }));
                           }}
                           onLoadedMetadata={() => {
                             if (!videoRef.current) return;
                             const v = videoRef.current;
+                            const rate = Math.max(0.25, Math.min(2.5, project.playbackRate || 1.0));
+                            v.defaultMuted = true;
+                            v.muted = true;
+                            v.volume = 0;
+                            if (Math.abs(v.playbackRate - rate) > 0.02) {
+                              v.playbackRate = rate;
+                            }
                             if (project.currentTime > 0.1 && Math.abs(v.currentTime - project.currentTime) > 0.25) {
                               try {
                                 v.currentTime = Math.min(project.currentTime, v.duration || project.currentTime);
@@ -1106,7 +1239,9 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
                                 .join(' ') || 'none',
                           }}
                         />
-                      </div>
+                          </div>
+                        );
+                      })()}
                     </div>
                   ) : (
                     <div onClick={handleTogglePlay} className="relative w-full h-full cursor-pointer">
@@ -1236,6 +1371,21 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
+                  {/* Video Speed indicator / 1.00x Quick Reset */}
+                  {Math.abs((project.playbackRate || 1.0) - 1.0) > 0.02 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setProject((prev) => ({ ...prev, playbackRate: 1.0 }));
+                        setStatusMessage('✓ Video Speed ကို 1.00x ပုံမှန်နှုန်းသို့ ပြန်ညှိပြီးပါပြီ');
+                      }}
+                      className="px-2 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/50 text-amber-200 text-[11px] font-bold font-mono-num flex items-center gap-1 cursor-pointer"
+                      title="Video Speed နှေး/မြန်နေသဖြင့် 1.00x ပုံမှန်သို့ ပြန်ထားရန် နှိပ်ပါ"
+                    >
+                      <span>{(project.playbackRate || 1.0).toFixed(2)}x → 1.0x</span>
+                    </button>
+                  )}
+
                   {/* BGM MP3 Volume & Mute Control */}
                   <div
                     className={`flex items-center gap-1.5 px-2 py-1 rounded-lg border text-[11px] ${
@@ -1285,6 +1435,7 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
                         }));
                       }}
                       style={{
+                        touchAction: 'pan-y',
                         background: `linear-gradient(to right, #10B981 0%, #34D399 ${bgmVolPct}%, #2B2842 ${bgmVolPct}%, #2B2842 100%)`,
                       }}
                       className="studio-slider w-14 sm:w-16"
@@ -1321,7 +1472,7 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
                     <input
                       type="range"
                       min={0}
-                      max={1}
+                      max={1.5}
                       step={0.05}
                       value={voiceVolVal}
                       onChange={(e) => {
@@ -1335,10 +1486,27 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
                         }));
                       }}
                       style={{
+                        touchAction: 'pan-y',
                         background: `linear-gradient(to right, #7C3AED 0%, #A855F7 ${voiceVolPct}%, #2B2842 ${voiceVolPct}%, #2B2842 100%)`,
                       }}
                       className="studio-slider w-14 sm:w-16"
                     />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTrackVisible((prev) => ({ ...prev, narrator: true }));
+                        setProject((prev) => ({
+                          ...prev,
+                          voiceVolume: 1.0,
+                          isVoiceMuted: false,
+                          isMuted: false,
+                        }));
+                      }}
+                      className="text-[10px] font-mono-num text-violet-200 hover:text-white cursor-pointer"
+                      title="Voice 100% သို့ ပြန်ထားရန် နှိပ်ပါ"
+                    >
+                      {Math.round(voiceVolVal * 100)}%
+                    </button>
                   </div>
 
                   {/* Master Mute & Fullscreen */}
@@ -1506,10 +1674,10 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
                     </button>
                   </div>
                 ) : (
-                  <span className="text-[10px] text-zinc-400 font-myanmar">
+                  <span className="text-[10px] text-zinc-400 font-mono">
                     {selectedTargetDetails
                       ? `Selected: ${selectedTargetDetails.track === 'voice' ? 'Voice Clone' : 'Subtitle'} #${selectedTargetDetails.index}`
-                      : `Voice Clone သို့မဟုတ် Subtitle ကို ထိ၍ Select လုပ်ပါ · ${timelineZoom.toFixed(1)}x`}
+                      : `${timelineZoom.toFixed(1)}x`}
                   </span>
                 )}
               </div>
@@ -1721,17 +1889,7 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
                       }}
                       className={`h-10 p-1 border-b border-[#1E1C2E]/80 cursor-pointer ${trackVisible.video ? 'opacity-100' : 'opacity-30'}`}
                     >
-                      <div className="w-full h-full rounded overflow-hidden border border-[#2F2D46] grid grid-cols-12 bg-black">
-                        {Array.from({ length: 12 }).map((_, i) => (
-                          <img
-                            key={i}
-                            src={videoThumbnails[i] || DEMO_SCENE_SRC}
-                            alt=""
-                            referrerPolicy="no-referrer"
-                            className="w-full h-full object-cover border-r border-black/40 last:border-r-0 pointer-events-none"
-                          />
-                        ))}
-                      </div>
+                      <VideoFilmstripTrack thumbnails={videoThumbnails} />
                     </div>
 
                     {/* BGM Waveform */}
@@ -1742,15 +1900,7 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
                       }}
                       className={`h-10 p-1 border-b border-[#1E1C2E]/80 cursor-pointer ${trackVisible.bgm ? 'opacity-100' : 'opacity-30'}`}
                     >
-                      <div className="w-full h-full rounded bg-emerald-950/35 border border-emerald-500/25 px-1 flex items-center justify-between gap-[1px] pointer-events-none">
-                        {bgmWaveformBars.map((h, i) => (
-                          <span
-                            key={i}
-                            style={{ height: `${h}%` }}
-                            className="flex-1 bg-gradient-to-b from-emerald-300 via-emerald-500 to-teal-500 rounded-full opacity-90"
-                          />
-                        ))}
-                      </div>
+                      <BgmWaveformTrack bars={bgmWaveformBars} />
                     </div>
 
                     {/* Tap-to-Select Voice Clone Clips Track */}
@@ -1787,16 +1937,7 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
                                   : 'bg-[#201A48] border border-[#4D3FA8]/80 hover:border-cyan-400/70'
                             }`}
                           >
-                            {/* Clip Waveform Bars */}
-                            <div className="flex-1 h-full flex items-center justify-between gap-[1px] pointer-events-none opacity-85">
-                              {narratorWaveformBars.slice(0, 28).map((h, bIdx) => (
-                                <span
-                                  key={bIdx}
-                                  style={{ height: `${Math.max(20, ((h + idx * 17) % 85) + 12)}%` }}
-                                  className="flex-1 bg-gradient-to-b from-cyan-300 via-indigo-400 to-violet-500 rounded-full"
-                                />
-                              ))}
-                            </div>
+                            <VoiceCloneClipBars bars={narratorWaveformBars} clipIndex={idx} />
 
                             <span className="absolute left-2 top-0.5 text-[9px] font-mono-num font-bold text-cyan-200 pointer-events-none drop-shadow">
                               🎙️ {formatRulerTick(seg.startTime)}
@@ -1903,12 +2044,9 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
               </div>
 
               <div className="p-3 bg-[#110F1B] max-h-[360px] overflow-y-auto space-y-3">
-                <div className="px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200 font-myanmar">
-                  💡 Video မျက်နှာပြင်ပေါ်ရှိ Blur အကွက်ကို Subtitle ကဲ့သို့ လက်ဖြင့် ဖိဆွဲပြီး ကြိုက်တဲ့နေရာ ရွှေ့နိုင်သလို ထောင့်စွန်း (↘) မှ ဆွဲ၍ အရွယ်အစား ချိန်နိုင်ပါသည်။
-                </div>
                 {(!project.blurBoxes || project.blurBoxes.length === 0) ? (
                   <div className="text-center py-6 text-zinc-400 text-xs font-myanmar">
-                    Blur box မရှိသေးပါ။ အထက်ပါ &quot;Add Blur Box&quot; ကိုနှိပ်၍ Privacy Blur ထည့်ပါ။
+                    Blur box မရှိသေးပါ
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -2032,16 +2170,6 @@ export const Step5StudioEditor: React.FC<Step5StudioEditorProps> = ({
         <div className="flex items-center gap-2 truncate">
           <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
           <span className="text-zinc-200 truncate">{statusMessage}</span>
-        </div>
-
-        <div className="hidden sm:flex items-center gap-1.5 text-zinc-300 shrink-0">
-          <Zap className="w-3.5 h-3.5 text-violet-400" />
-          <span>Video Editor · Timeline Sync &amp; Subtitle Alignment</span>
-        </div>
-
-        <div className="hidden md:flex items-center gap-1.5 text-zinc-300 italic shrink-0">
-          <span>Create · Edit · Sync · Polish</span>
-          <Heart className="w-3 h-3 text-rose-500 fill-rose-500" />
         </div>
       </div>
     </div>

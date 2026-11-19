@@ -48,7 +48,15 @@ export interface CharacterVoiceProfile {
 }
 
 export const REALITY_VOICE_CONFIGS: Record<string, CharacterVoiceProfile> = {
-  // 4 Male Voices
+  // Reference Video Chest-Baritone + 4 Male Voices
+  RecapPro: {
+    name: 'Min Khant (Recap Pro)',
+    myanmarName: 'မင်းခန့် · Recap Pro',
+    azureVoice: 'my-MM-ThihaNeural',
+    basePitchPct: -5,
+    baseRatePct: 5,
+    description: 'နမူနာ Video စတိုင် 135Hz Warm Chest-Baritone Short-Drama Recap Narrator',
+  },
   Thiha: {
     name: 'Thiha',
     myanmarName: 'သီဟ',
@@ -170,6 +178,8 @@ function parsePitchOffsetPct(pitchOffset?: number | string): number {
 
 function getToneAdjustments(tone?: string): { pitchPct: number; ratePct: number; volPct: number } {
   switch ((tone || 'natural').toLowerCase()) {
+    case 'recap_pro':
+      return { pitchPct: -5, ratePct: 4, volPct: 5 };
     case 'warm':
       return { pitchPct: -2, ratePct: -2, volPct: 2 };
     case 'deep':
@@ -320,12 +330,16 @@ function computeNaturalSingleVoiceProsody(
 /**
  * Light single-pass studio mic EQ & clean silence trim (ZERO pitch-splitting or crossfaded sub-clips).
  */
-async function polishSingleVoiceStream(rawMp3: Buffer): Promise<Buffer> {
+async function polishSingleVoiceStream(rawMp3: Buffer, isRecapPro = false): Promise<Buffer> {
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tts-clean-'));
   try {
     const inPath = path.join(workDir, 'in.mp3');
     const outPath = path.join(workDir, 'out.mp3');
     fs.writeFileSync(inPath, rawMp3);
+
+    const filterChain = isRecapPro
+      ? 'silenceremove=start_periods=1:start_duration=0:start_threshold=-46dB:stop_periods=-1:stop_duration=0.14:stop_threshold=-46dB,highpass=f=80,equalizer=f=155:t=q:w=1.1:g=2.8,equalizer=f=3100:t=q:w=1.0:g=2.2,acompressor=threshold=-16dB:ratio=2.4:attack=8:release=85,alimiter=limit=0.95'
+      : 'silenceremove=start_periods=1:start_duration=0:start_threshold=-46dB:stop_periods=-1:stop_duration=0.16:stop_threshold=-46dB,highpass=f=80,equalizer=f=185:t=q:w=1.2:g=2.0,equalizer=f=3100:t=q:w=1.1:g=1.5,acompressor=threshold=-18dB:ratio=2.0:attack=10:release=90,alimiter=limit=0.95';
 
     await execFileAsync(
       'ffmpeg',
@@ -334,7 +348,7 @@ async function polishSingleVoiceStream(rawMp3: Buffer): Promise<Buffer> {
         '-i',
         inPath,
         '-af',
-        'silenceremove=start_periods=1:start_duration=0:start_threshold=-46dB:stop_periods=-1:stop_duration=0.16:stop_threshold=-46dB,highpass=f=80,equalizer=f=185:t=q:w=1.2:g=2.0,equalizer=f=3100:t=q:w=1.1:g=1.5,acompressor=threshold=-18dB:ratio=2.0:attack=10:release=90,alimiter=limit=0.95',
+        filterChain,
         '-ar',
         '24000',
         '-ac',
@@ -554,13 +568,15 @@ export async function synthesizeNeuralRealityMyanmar(
     });
   };
 
+  const useRecapProMastering = voiceKey === 'RecapPro' || (options.tone || '').toLowerCase() === 'recap_pro';
+
   try {
     const raw = await runOnce(false);
-    return await polishSingleVoiceStream(raw);
+    return await polishSingleVoiceStream(raw, useRecapProMastering);
   } catch (firstErr: any) {
     console.warn('Neural Reality TTS retry #1 notice:', firstErr?.message);
     await new Promise((r) => setTimeout(r, 250));
     const raw = await runOnce(true);
-    return await polishSingleVoiceStream(raw);
+    return await polishSingleVoiceStream(raw, useRecapProMastering);
   }
 }

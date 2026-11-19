@@ -62,7 +62,7 @@ export const NARA_VOICES: VoiceOption[] = [
 ];
 
 export const MALE_VOICES: VoiceOption[] = [
-  'Thiha', 'KyawKyaw', 'AungAung', 'MinThway',
+  'RecapPro', 'Thiha', 'KyawKyaw', 'AungAung', 'MinThway',
   'NaraKoBanyar', 'NaraHtetMyat',
   'Titus', 'Perseus', 'Oberon', 'Atlas',
   'Schedar', 'Gacrux', 'Achird', 'Zubenelgenubi', 'Sadaltager'
@@ -87,14 +87,14 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
 
   // Strict Single-Voice Lock State (guarantees zero double-voice output)
   const [singleVoice, setSingleVoice] = useState<VoiceOption>(
-    project.lockedVoice || project.segments[0]?.voice || 'Thiha'
+    project.lockedVoice || project.segments[0]?.voice || 'RecapPro'
   );
   const [ttsEngine, setTtsEngine] = useState<TtsEngineMode>(
-    project.ttsEngine || (VOICE_PROFILES[project.lockedVoice || project.segments[0]?.voice || 'Thiha']?.naraVoiceId ? 'nara' : 'auto')
+    project.ttsEngine || (VOICE_PROFILES[project.lockedVoice || project.segments[0]?.voice || 'RecapPro']?.naraVoiceId ? 'nara' : 'auto')
   );
   const [voiceStyle, setVoiceStyle] = useState<VoiceStyle>(project.voiceStyle || 'recap');
-  const [voiceTone, setVoiceTone] = useState<VoiceToneOption>(project.voiceTone || 'natural');
-  const [voicePitch, setVoicePitch] = useState<number>(project.voicePitch ?? 0);
+  const [voiceTone, setVoiceTone] = useState<VoiceToneOption>(project.voiceTone || 'recap_pro');
+  const [voicePitch, setVoicePitch] = useState<number>(project.voicePitch ?? -5);
 
   // Flow Panels State
   const [isGeminiFlowOpen, setIsGeminiFlowOpen] = useState(false);
@@ -256,7 +256,7 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
     if (nextEngine === 'nara' && !VOICE_PROFILES[singleVoice]?.naraVoiceId) {
       resolvedVoice = VOICE_PROFILES[singleVoice]?.gender === 'female' ? 'NaraShoon' : 'NaraKoBanyar';
     } else if (nextEngine !== 'nara' && VOICE_PROFILES[singleVoice]?.naraVoiceId) {
-      resolvedVoice = VOICE_PROFILES[singleVoice]?.gender === 'female' ? 'Nilar' : 'Thiha';
+      resolvedVoice = VOICE_PROFILES[singleVoice]?.gender === 'female' ? 'Nilar' : 'RecapPro';
     }
     setSingleVoice(resolvedVoice);
     setProject((prev) => ({
@@ -341,6 +341,33 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
       segments: prev.segments.map((s) => ({ ...s, style: newStyle })),
     }));
     setStatusText(`✓ Voice style updated to "${newStyle}".`);
+  };
+
+  const handleApplyReferenceTonePreset = () => {
+    setSingleVoice('RecapPro');
+    setTtsEngine('auto');
+    setVoiceStyle('recap');
+    setVoiceTone('recap_pro');
+    setVoicePitch(-5);
+    setProject((prev) => ({
+      ...prev,
+      ttsEngine: 'auto',
+      lockedVoice: 'RecapPro',
+      voiceStyle: 'recap',
+      voiceTone: 'recap_pro',
+      voicePitch: -5,
+      segments: prev.segments.map((s) => ({
+        ...s,
+        voice: 'RecapPro',
+        style: 'recap',
+        tone: 'recap_pro',
+        pitch: -5,
+        speaker: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
+      })),
+    }));
+    setStatusText(
+      '🎬 နမူနာ Video အသံ Tone (Min Khant · Recap Pro 135Hz Chest-Baritone, -5%) ကို Lock ချပြီးပါပြီ! "Test Tone" သို့မဟုတ် "Generate All Voices" နှိပ်၍ နားဆင်နိုင်ပါသည်။'
+    );
   };
 
   const handleSegmentEmotionChange = (segId: string, newEmotion: string) => {
@@ -1011,19 +1038,14 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
     <div className="space-y-6">
       {/* Step Header */}
       <div className="ios-card p-5 sm:p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2.5">
-            <span className="w-8 h-8 rounded-full bg-gradient-to-tr from-emerald-400 to-teal-400 text-zinc-950 font-black flex items-center justify-center text-xs shadow-lg">
-              4
-            </span>
-            <h2 className="text-base font-bold text-white font-display tracking-tight flex items-center gap-2">
-              <Mic className="w-4 h-4 text-emerald-400" />
-              <span>အဆင့် ၄ — Voice Clone Studio (Step 3 TTX စာသားများအား အသံသွင်းခြင်း)</span>
-            </h2>
-          </div>
-          <p className="text-xs text-zinc-400 font-myanmar mt-1">
-            အဆင့် ၃ မှ Video Analyzing ဖြင့် ထွက်ရှိလာသော Narrator TTX စာသား ({project.segments.length} Segments) များအား သဘာဝကျသော မြန်မာ Narrator အသံဖြင့် Voice Clone ပြုလုပ်ပါမည်။
-          </p>
+        <div className="flex items-center gap-2.5">
+          <span className="w-8 h-8 rounded-full bg-gradient-to-tr from-emerald-400 to-teal-400 text-zinc-950 font-black flex items-center justify-center text-xs shadow-lg">
+            4
+          </span>
+          <h2 className="text-base font-bold text-white font-display tracking-tight flex items-center gap-2">
+            <Mic className="w-4 h-4 text-emerald-400" />
+            <span>အဆင့် ၄ — Voice Clone Studio</span>
+          </h2>
         </div>
 
         <div className="flex items-center gap-2.5 shrink-0">
@@ -1081,9 +1103,6 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
           </button>
         </div>
 
-        <div className="text-[11px] text-zinc-400 font-myanmar pr-2 hidden sm:block">
-          ✨ Single Adult Male Voice (သီဟ / Adult Male) + atempo Retiming
-        </div>
       </div>
 
       {studioTab === 'review' ? (
@@ -1096,14 +1115,12 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                   <span className="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse" />
                   <span>Video & Voiceover Lip-Sync Sync Preview</span>
                 </span>
-                <span className="text-[10px] text-zinc-400 font-myanmar">
-                  မူရင်းအသံ 100% Mute ဖြင့် စစ်ဆေးခြင်း
-                </span>
               </div>
               <VideoPlayerView
                 project={project}
                 setProject={setProject}
                 activeSegment={activeSegment}
+                forceMuteOriginalAudio={true}
               />
             </div>
             <div className="lg:col-span-6">
@@ -1125,15 +1142,13 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                 <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
                 <span>Custom Video & Live Subtitle Preview</span>
               </span>
-              <span className="text-[10px] text-zinc-400 font-myanmar">
-                Voice Clone အသံနှင့် Subtitle အချိန်ကိုက် ကြည့်ရှုနိုင်ပါသည်
-              </span>
             </div>
 
           <VideoPlayerView
             project={project}
             setProject={setProject}
             activeSegment={activeSegment}
+            forceMuteOriginalAudio={true}
           />
         </div>
 
@@ -1159,14 +1174,9 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <div className="flex items-center gap-2">
                 <span className="text-base">🤗</span>
-                <div>
-                  <h3 className="text-xs font-black text-amber-300 font-display">
-                    Voice Clone Engine & Nara Mini v1 (Kokoro Burmese 24kHz)
-                  </h3>
-                  <p className="text-[10px] text-zinc-400 font-myanmar">
-                    100% Free Native Burmese TTS • YeeNyunn/nara-mini-v1 (HF Space)
-                  </p>
-                </div>
+                <h3 className="text-xs font-black text-amber-300 font-display">
+                  Voice Clone Engine & Nara Mini v1
+                </h3>
               </div>
               <span className="px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-[10px] font-mono text-amber-300">
                 nara-mini-v1-tts
@@ -1187,9 +1197,6 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                   <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
                   <span>Gemini + Neural 24kHz</span>
                 </div>
-                <span className="text-[10px] text-zinc-400 block mt-0.5 font-myanmar">
-                  အသံ ၂၅ မျိုး + Tone / Pitch
-                </span>
               </button>
 
               <button
@@ -1205,9 +1212,6 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                   <span>🤗</span>
                   <span>Nara Mini v1 (HF Free)</span>
                 </div>
-                <span className="text-[10px] text-amber-200/80 block mt-0.5 font-myanmar">
-                  YeeNyunn/nara-mini-v1 Kokoro
-                </span>
               </button>
             </div>
 
@@ -1277,14 +1281,9 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                 <span className="p-1.5 rounded-xl bg-emerald-400/20 text-emerald-300 border border-emerald-400/30 shrink-0">
                   <Lock className="w-3.5 h-3.5" />
                 </span>
-                <div>
-                  <span className="text-xs font-black text-emerald-300 block font-display">
-                    Single Voice Lock Active (တစ်သံတည်း သီးသန့်စနစ်)
-                  </span>
-                  <span className="text-[11px] text-zinc-400 font-myanmar block">
-                    အသံနှစ်သံ မရောစေရန် Narrator တစ်ဦးတည်းအသံဖြင့်သာ ဗီဒီယိုတစ်ခုလုံးကို ထုတ်ပေးပါမည်
-                  </span>
-                </div>
+                <span className="text-xs font-black text-emerald-300 block font-display">
+                  Single Voice Lock Active
+                </span>
               </div>
               <button
                 type="button"
@@ -1322,24 +1321,39 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
 
           {/* VOICE TONE & FINE VOCAL PITCH CONTROLS */}
           <div className="p-4 rounded-2xl bg-black/50 border border-cyan-500/30 space-y-3.5 backdrop-blur-xl shadow-lg">
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
               <span className="text-xs font-black text-cyan-300 flex items-center gap-2 font-display">
                 <AudioLines className="w-4 h-4 text-cyan-400" />
                 <span>Voice Tone & Vocal Pitch ချိန်ညှိခန်း</span>
               </span>
-              <button
-                type="button"
-                onClick={() => handleTestVoice(singleVoice)}
-                disabled={testingVoice !== null}
-                className="px-3 py-1 rounded-xl bg-cyan-400 hover:bg-cyan-300 text-zinc-950 text-[11px] font-black flex items-center gap-1.5 shadow cursor-pointer disabled:opacity-50"
-              >
-                {testingVoice ? (
-                  <RotateCw className="w-3 h-3 animate-spin" />
-                ) : (
-                  <Play className="w-3 h-3 fill-zinc-950" />
-                )}
-                <span>Test Tone</span>
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={handleApplyReferenceTonePreset}
+                  className={`px-2.5 py-1 rounded-xl text-[10px] font-black flex items-center gap-1 shadow cursor-pointer border transition-all ${
+                    singleVoice === 'RecapPro' && voiceTone === 'recap_pro' && voicePitch === -5
+                      ? 'bg-gradient-to-r from-amber-400 to-orange-400 text-zinc-950 border-amber-300'
+                      : 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border-amber-400/40'
+                  }`}
+                  title="နမူနာ Video ထဲက Narrator 135Hz Warm Chest-Baritone အသံ Tone ကို တစ်ချက်တည်း ချိန်ညှိမည်"
+                >
+                  <Sparkles className="w-3 h-3" />
+                  <span>🎬 နမူနာ Video Tone (135Hz)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleTestVoice(singleVoice)}
+                  disabled={testingVoice !== null}
+                  className="px-3 py-1 rounded-xl bg-cyan-400 hover:bg-cyan-300 text-zinc-950 text-[11px] font-black flex items-center gap-1.5 shadow cursor-pointer disabled:opacity-50"
+                >
+                  {testingVoice ? (
+                    <RotateCw className="w-3 h-3 animate-spin" />
+                  ) : (
+                    <Play className="w-3 h-3 fill-zinc-950" />
+                  )}
+                  <span>Test Tone</span>
+                </button>
+              </div>
             </div>
 
             {/* Tone Presets Grid */}
@@ -1969,9 +1983,7 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
           <div />
         )}
 
-        <span className="text-xs text-zinc-400 font-myanmar hidden sm:inline">
-          TTS အသံထုတ်ယူပြီးပါက အဆင့် ၅ (Human Review & Retiming) သို့ သွားပါ
-        </span>
+        <div />
 
         {onNextStep && (
           <button
@@ -1999,14 +2011,9 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
                 <div className="p-2.5 rounded-2xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
                   <AudioLines className="w-5 h-5" />
                 </div>
-                <div>
-                  <h3 className="text-base font-black text-white font-display">
-                    Gemini 24kHz Reality Voices — Single Narrator Flow Panel
-                  </h3>
-                  <p className="text-xs text-zinc-400 font-myanmar">
-                    Tone: <span className="font-bold text-cyan-300 uppercase">{voiceTone}</span> ({voicePitch >= 0 ? `+${voicePitch}` : voicePitch}%) — တစ်သံတည်း သုံးစွဲရန် Voice Character ရွေးချယ်ပါ
-                  </p>
-                </div>
+                <h3 className="text-base font-black text-white font-display">
+                  Gemini 24kHz Reality Voices — Single Narrator
+                </h3>
               </div>
 
               <button

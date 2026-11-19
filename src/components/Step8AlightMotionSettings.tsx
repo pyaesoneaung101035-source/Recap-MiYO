@@ -336,20 +336,13 @@ export const Step8AlightMotionSettings: React.FC<Step8AlightMotionSettingsProps>
           {/* Quick 1-Click Presets */}
           <div className="space-y-1.5">
             <span className="text-zinc-400 font-medium text-[11px]">Quick Motion Presets:</span>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 gap-2">
               <button
                 onClick={() => handleApplyPreset('smoothZoom')}
                 className="py-1.5 px-2 bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 rounded-lg text-[11px] text-cyan-300 transition-colors flex items-center justify-center gap-1"
               >
                 <ZoomIn className="w-3 h-3" />
                 <span>Zoom</span>
-              </button>
-              <button
-                onClick={() => handleApplyPreset('impactShake')}
-                className="py-1.5 px-2 bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 rounded-lg text-[11px] text-rose-300 transition-colors flex items-center justify-center gap-1"
-              >
-                <Activity className="w-3 h-3" />
-                <span>Shake</span>
               </button>
               <button
                 onClick={() => handleApplyPreset('dhammaAura')}
@@ -541,8 +534,8 @@ export const Step8AlightMotionSettings: React.FC<Step8AlightMotionSettingsProps>
                 </div>
                 <input
                   type="range"
-                  min={-150}
-                  max={150}
+                  min={-250}
+                  max={250}
                   step={2}
                   value={project.subtitleSettings.offsetY || 0}
                   onChange={(e) => {
@@ -592,10 +585,6 @@ export const Step8AlightMotionSettings: React.FC<Step8AlightMotionSettingsProps>
                 Fixed Watermark
               </span>
             </div>
-
-            <p className="text-[11px] text-zinc-400 font-myanmar leading-relaxed">
-              ဗီဒီယိုပေါ်တွင် တင်မည့် Logo ပုံကို ရွေးချယ်ပါ။ အဝိုင်း (Circle) သို့မဟုတ် လေးထောင့်စတုရန်း (Square) ပုံစံ ညှပ်၍ အရွယ်အစားနှင့် နေရာကို စိတ်ကြိုက် ချိန်ညှိနိုင်ပါသည်။ "OK / Fix" နှိပ်လိုက်ပါက နောက်အဆင့်များနှင့် Export အထိ အမြဲတမ်း တပ်ဆင်ပြီးသား Fixed ဖြစ်သွားပါမည်။
-            </p>
 
             {/* Upload Logo Button */}
             <div>
@@ -817,7 +806,7 @@ export const Step8AlightMotionSettings: React.FC<Step8AlightMotionSettingsProps>
             </div>
           ) : (
             <div className="p-6 text-center border border-dashed border-zinc-800 rounded-xl text-zinc-500 font-myanmar">
-              Logo ပုံ တင်ထားခြင်း မရှိသေးပါ။ အထပါ "Custom Logo Image Upload" တွင် ပုံ အရင် ရွေးချယ်ပါ။
+              Logo ပုံ မရှိသေးပါ
             </div>
           )}
         </div>
@@ -832,14 +821,9 @@ export const Step8AlightMotionSettings: React.FC<Step8AlightMotionSettingsProps>
               <div className="w-8 h-8 rounded-lg bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400">
                 <Sliders className="w-4 h-4" />
               </div>
-              <div>
-                <span className="font-bold text-amber-300 text-xs block font-display tracking-wide">
-                  Fine-Tune Nudge & Edit Studio
-                </span>
-                <span className="text-[11px] text-zinc-400 font-myanmar">
-                  အသံ & TTX စာတန်းထိုး Timing အတိအကျ ရှေ့တိုး/နောက်ဆုတ် ချိန်ညှိရန်
-                </span>
-              </div>
+              <span className="font-bold text-amber-300 text-xs block font-display tracking-wide">
+                Fine-Tune Nudge & Edit Studio
+              </span>
             </div>
 
             {/* Undo & Redo Controls */}
@@ -990,13 +974,11 @@ export const Step8AlightMotionSettings: React.FC<Step8AlightMotionSettingsProps>
                   {currentSeg.isTimingFixed || fixFeedback ? (
                     <span className="flex items-center gap-1 text-emerald-400 font-medium">
                       <Pin className="w-3.5 h-3.5 fill-current shrink-0" />
-                      <span>✓ နေရာကွက်တိ Fix အတည်ပြုထားပါသည် ({currentSeg.startTime.toFixed(2)}s - {currentSeg.endTime.toFixed(2)}s)</span>
+                      <span>✓ Fixed ({currentSeg.startTime.toFixed(2)}s - {currentSeg.endTime.toFixed(2)}s)</span>
                     </span>
                   ) : (
-                    <span className="text-zinc-400 font-myanmar truncate">
-                      {currentSeg.originalStartTime !== undefined && currentSeg.startTime !== currentSeg.originalStartTime
-                        ? `နေရာရွှေ့ထားသည် (မူရင်း: ${currentSeg.originalStartTime.toFixed(2)}s) — Fix နှိပ်၍ အတည်ပြုပါ`
-                        : 'စာသားနှင့်အသံကို ရွှေ့ပြီးပါက Fix နှိပ်၍ သတ်မှတ်ပါ'}
+                    <span className="text-zinc-400 font-mono truncate">
+                      {currentSeg.startTime.toFixed(2)}s - {currentSeg.endTime.toFixed(2)}s
                     </span>
                   )}
                 </div>
@@ -1038,7 +1020,7 @@ export const Step8AlightMotionSettings: React.FC<Step8AlightMotionSettingsProps>
             </div>
           ) : (
             <div className="p-6 text-center border border-dashed border-zinc-800 rounded-xl text-zinc-500 font-myanmar">
-              ချိန်ညှိရန် စာသား သို့မဟုတ် အသံအပိုင်းကို အထက်တွင် အရင် ရွေးချယ်ပါ။
+              Segment မရှိသေးပါ
             </div>
           )}
         </div>

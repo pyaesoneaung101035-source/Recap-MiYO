@@ -45,9 +45,6 @@ export const Header: React.FC<HeaderProps> = ({
                 Pro v3.0
               </span>
             </div>
-            <span className="text-[10px] text-zinc-400 block font-medium">
-              Myanmar AI Video & Audio Production
-            </span>
           </div>
         </div>
 

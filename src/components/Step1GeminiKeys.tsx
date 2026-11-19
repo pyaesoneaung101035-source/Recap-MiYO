@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { KeyRound, Check, RefreshCw, Smartphone, ShieldCheck, Sparkles, AlertCircle, ArrowRight, Zap, Radio, Loader2, ExternalLink } from 'lucide-react';
+import { KeyRound, Check, RefreshCw, ShieldCheck, Sparkles, AlertCircle, ArrowRight, Zap, Radio, Loader2, ExternalLink } from 'lucide-react';
 import { GeminiKeyInfo, AiMode } from '../types';
 import { parseKeysFromInput, resetKeyStatuses, saveGeminiKeys, fetchDirectGoogleGeminiApi, testGeminiKeyDirect } from '../utils/geminiPool';
 import { loadApiKeys, saveApiKeys, verifyAssemblyAiKey, isAsciiOnly, sanitizeApiKey } from '../utils/apiKeys';
@@ -144,18 +144,13 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
     <div className="ios-card p-6 sm:p-8 space-y-6">
       {/* Step Banner */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-white/10">
-        <div>
-          <div className="flex items-center gap-2.5">
-            <span className="w-7 h-7 rounded-full bg-cyan-400/20 text-cyan-300 border border-cyan-400/40 flex items-center justify-center text-xs font-bold font-mono shadow-sm">
-              1
-            </span>
-            <h2 className="text-lg font-bold text-white font-display tracking-tight">
-              Gemini API Keys & Auto-Rotation Pool
-            </h2>
-          </div>
-          <p className="text-xs text-white/60 font-myanmar mt-1">
-            Google Gemini Keys အများအပြား ထည့်သွင်းထားပါက Quota ပြည့်ပါက အလိုအလျောက် Next Key သို့ ပြောင်းပါမည်။
-          </p>
+        <div className="flex items-center gap-2.5">
+          <span className="w-7 h-7 rounded-full bg-cyan-400/20 text-cyan-300 border border-cyan-400/40 flex items-center justify-center text-xs font-bold font-mono shadow-sm">
+            1
+          </span>
+          <h2 className="text-lg font-bold text-white font-display tracking-tight">
+            Gemini API Keys & Auto-Rotation Pool
+          </h2>
         </div>
 
         <button
@@ -165,19 +160,6 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
           <span>အဆင့် 2 သို့</span>
           <ArrowRight className="w-4 h-4 stroke-[2.5]" />
         </button>
-      </div>
-
-      {/* Direct Phone Calling Note */}
-      <div className="p-3.5 rounded-lg bg-cyan-950/40 border border-cyan-800/50 text-xs text-cyan-200 flex items-start gap-3">
-        <Smartphone className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
-        <div className="space-y-1">
-          <p className="font-semibold text-cyan-300">
-            Server-Side Gemini AI Engine (အသုံးပြုသူအားလုံးအတွက် အလိုအလျောက် အဆင်သင့်ဖြစ်ပါသည်)
-          </p>
-          <p className="text-cyan-200/80 font-myanmar leading-relaxed">
-            ဤအက်ပ်အား ဖွင့်သူတိုင်း အသုံးပြုနိုင်ရန် Server-Side Gemini API Engine ကို အလိုအလျောက် တပ်ဆင်ထားပါသည်။ မိမိကိုယ်ပိုင် API Key များကိုလည်း Quota Rotation အတွက် ထည့်သွင်းအသုံးပြုနိုင်ပါသည်။
-          </p>
-        </div>
       </div>
 
       {/* Input Box for Multi Keys */}
@@ -210,17 +192,6 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
           className="w-full px-3.5 py-2.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-mono text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-cyan-500/60"
         />
 
-        {(keysInput.includes('AQ.') || keysInput.startsWith('AQ') || keysInput.startsWith('aq') || keysInput.includes('aq.')) && (
-          <div className="p-3 rounded-xl bg-cyan-950/60 border border-cyan-500/50 text-cyan-200 text-xs font-myanmar flex items-center justify-between gap-3 shadow-md">
-            <div>
-              <p className="font-bold text-cyan-300">✓ Google AI Studio API Key (AQ... / AIzaSy...) ကို တိုက်ရိုက် ထောက်ပံ့ထားပါသည်</p>
-              <p className="text-[11px] text-cyan-200/80 mt-0.5">
-                ဤ Key များကို Google Generative Language API သို့ တိုက်ရိုက် ချိတ်ဆက်အသုံးပြုပါမည်။ Netlify Function သို့မဟုတ် Serverless မလိုအပ်ဘဲ တိုက်ရိုက် အလုပ်လုပ်ပါသည်။
-              </p>
-            </div>
-          </div>
-        )}
-
         {/* AssemblyAI Whisper Connect Box */}
         <div className="mt-5 pt-4 border-t border-zinc-800/80">
           <div className="p-4 rounded-xl bg-zinc-950/70 border border-zinc-800 space-y-3">
@@ -229,10 +200,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
                 <div className="w-7 h-7 rounded-lg bg-blue-950/60 border border-blue-500/40 text-blue-400 flex items-center justify-center">
                   <Radio className="w-4 h-4" />
                 </div>
-                <div>
-                  <h4 className="text-xs font-bold text-zinc-200">AssemblyAI API Key (Optional Whisper STT)</h4>
-                  <p className="text-[10px] text-zinc-400 font-myanmar">ဗီဒီယိုအသံလှိုင်းမှ စကားပြောများကို Whisper ဖြင့် တိကျစွာ Timestamp ထုတ်ယူရန်</p>
-                </div>
+                <h4 className="text-xs font-bold text-zinc-200">AssemblyAI API Key</h4>
               </div>
 
               {assemblyAiStatus === 'connected' && (
@@ -244,8 +212,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
             </div>
 
             <div className="space-y-2">
-              <div className="flex items-center justify-between text-[11px]">
-                <span className="text-[10px] text-zinc-400">32-digit Token (ဥပမာ- a1b2c3d4e5f6...)</span>
+              <div className="flex items-center justify-end text-[11px]">
                 <a
                   href="https://www.assemblyai.com/app/account"
                   target="_blank"
@@ -307,7 +274,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
                 </button>
 
                 <span className="text-[10px] text-zinc-500 font-mono">
-                  {assemblyAiKey ? (isAsciiOnly(assemblyAiKey) ? 'Key ထည့်ထားပြီး' : 'Key မမှန်ကန်ပါ') : 'Key မရှိသေးပါ (Gemini STT သုံးနိုင်ပါသည်)'}
+                  {assemblyAiKey ? (isAsciiOnly(assemblyAiKey) ? 'Key ထည့်ထားပြီး' : 'Key မမှန်ကန်ပါ') : 'Key မရှိသေးပါ'}
                 </span>
               </div>
 
@@ -415,10 +382,7 @@ export const Step1GeminiKeys: React.FC<Step1GeminiKeysProps> = ({
       </div>
 
       {/* Bottom Navigation Card */}
-      <div className="pt-6 border-t border-white/10 flex items-center justify-between gap-4">
-        <span className="text-xs text-zinc-400 font-myanmar">
-          Key များ ထည့်သွင်းပြီးပါက အဆင့် 2 (Video Upload) သို့ သွားပါ
-        </span>
+      <div className="pt-6 border-t border-white/10 flex items-center justify-end gap-4">
         <button
           onClick={onNextStep}
           className="px-6 py-3 bg-gradient-to-r from-sky-400 to-teal-400 hover:opacity-90 text-zinc-950 font-black text-xs rounded-xl transition-all flex items-center gap-2.5 shadow-xl shadow-sky-500/25 cursor-pointer active:scale-95 shrink-0"

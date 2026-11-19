@@ -440,7 +440,7 @@ export async function callGeminiWithRotation(
 }
 
 export function buildSystemPromptForMode(mode: AiMode): string {
-  const directInstruction = 'ဗီဒီယို အသံနှင့် မြင်ကွင်းကို အခြေခံပြီး Timestamp Segment တစ်ခုချင်းစီအလိုက် သဘာဝကျသော မြန်မာ ဇာတ်ကြောင်းပြောစကား (Recap Style) အဖြစ် တိကျစွာ ထုတ်ပေးပါ။ စာကြောင်းတိုင်းကို "ပါတယ်/နေပါတယ်/ဖြစ်ပါတယ်" ဟု ထပ်ခါတလဲလဲ အဆုံးမသတ်ရ! နမူနာပုံစံအတိုင်း "...ပြီ", "...မယ်", "...ဘူး", "...ပဲ", "...လား", "...နော်", "...သွားတယ်" စသဖြင့် အဆုံးသတ်မျိုးစုံ သဘာဝကျကျ သုံးပါ။ KEEP BURMESE CONCISE (<12-18 syllables per 4-5s segment).';
+  const directInstruction = 'ဗီဒီယို အသံနှင့် မြင်ကွင်းကို အခြေခံပြီး Timestamp Segment တစ်ခုချင်းစီအလိုက် Instant Hook ဖြင့် တိုက်ရိုက်စကာ 3rd-Person ဇာတ်ကြောင်းပြော + ဇာတ်ကောင်စကားတို ပေါင်းစပ်ထားသည့် မြန်မာ Short-Drama Recap Narrator စတိုင် (1.8s–4.5s micro-clauses) အဖြစ် ထုတ်ပေးပါ။ စာကြောင်းတိုင်းကို "ပါတယ်/နေပါတယ်/ဖြစ်ပါတယ်" ဟု ထပ်ခါတလဲလဲ အဆုံးမသတ်ရ! နမူနာပုံစံအတိုင်း "...သွားတယ်", "...နိုင်ပြီ", "...မယ်", "...ဘူး", "...ပဲ", "...လား?", "...နော်!" စသဖြင့် အဆုံးသတ်မျိုးစုံ သဘာဝကျကျ သုံးပါ။ KEEP BURMESE CONCISE (8-16 syllables per 2-4.5s beat).';
   switch (mode) {
     case 'Dubbing':
       return `You are a master Chinese-to-Burmese film dubbing director and audio sync engineer.
@@ -561,36 +561,25 @@ function parseChunkJsonArray(rawText: string): any[] {
   return [];
 }
 
-export const GEMINI_ENGINE_FIXED_PROMPT = `မြန်မာဘာသာ narrator script ရေးပေးပါ။
+export const GEMINI_ENGINE_FIXED_PROMPT = `မြန်မာဘာသာ short-drama recap narrator script ရေးပေးပါ။
 
-ရည်ရွယ်ချက်က video ထဲက တကယ်မြင်ရတဲ့ action နဲ့ narrator စာသား
-ကွက်တိကိုက်ရမယ်။ Video ထဲမှာ မမြင်ရသေးတဲ့အရာကို အကြိုပြောခြင်း၊
-မူရင်းဇာတ်လမ်းထဲ မပါသော အချက်အလက်ထည့်ခြင်း မလုပ်ပါနှင့်။
+ရည်ရွယ်ချက်က video ထဲက တကယ်မြင်ရတဲ့ visual action + dialogue နဲ့ narrator စာသား ကွက်တိကိုက်ပြီး နမူနာ viral recap narrator ပုံစံအတိုင်း ဖြစ်စေရန် ဖြစ်သည်။ Video ထဲမှာ မမြင်ရသေးတဲ့အရာကို အကြိုပြောခြင်း၊ မူရင်းဇာတ်လမ်းထဲ မပါသော အချက်အလက်ထည့်ခြင်း မလုပ်ပါနှင့်။
 
 စည်းမျဉ်းများ -
 
-1. Scene တစ်ခုချင်းစီကို ခွဲပါ။
-2. Scene တစ်ခုမှာ မြင်ရတဲ့ action တစ်ခု သို့မဟုတ် ဆက်စပ် action နှစ်ခုထက်
-   မပိုပါစေနှင့်။
-3. Narrator စာသားကို မြန်မာလို သဘာဝကျတဲ့ storytelling ပုံစံရေးပါ။
-4. စာကြောင်းတိုတို၊ ပြောစကားပုံစံ၊ သဘာဝ pause ပါအောင်ရေးပါ။
-5. ဇာတ်ကောင်ရဲ့ စိတ်ခံစားချက်ကို မြင်ရတဲ့ facial expression/action
-   နဲ့ကိုက်မှသာ ထည့်ပါ။
-6. မမြင်ရသေးတဲ့အရာကို ကြိုမပြောပါနှင့်။
-7. Scene တစ်ခုချင်းအတွက် narration duration သည် scene duration
-   ထက် မရှည်ရပါ။
-8. Scene အစနဲ့ အဆုံး timestamp ကို video ထဲက action ပြောင်းတဲ့နေရာကို
-   အခြေခံပြီး သတ်မှတ်ပါ။
-9. မသေချာတဲ့ နာမည်၊ နေရာ၊ ငွေပမာဏကို မခန့်မှန်းပါနှင့်။
-   မသေချာလျှင် unclear အဖြစ် သတ်မှတ်ပါ။
-10. Output ကို JSON တစ်ခုတည်းအဖြစ် ထုတ်ပါ။ Markdown မသုံးပါနှင့်။
+1. Instant Visual Hook: အဖွင့်စာကြောင်းမှာ "မင်္ဂလာပါ/ဒီဇာတ်လမ်းမှာ" လုံးဝမထည့်ဘဲ Scene 1 မြင်ကွင်း action ထဲကို တန်းဝင်ပြောပါ (ဥပမာ- "ရေဘူး တစ်ဘူးပဲ ရှိတဲ့ ရွှေခွက်ထဲမှာ ရေဘူးတွေ အများကြီး ပေါ်လာတော့ သူ အံ့ဩသွားတယ်!")။
+2. Blended Narrator + Inline Dialogue Formula: 3rd-person recap စကား ("...ဆိုတာ သူ နားလည်သွားတယ်", "သူ အလွတ်မပေးဘူး", "...ပြောင်းဖို့ စဉ်းစားနေတယ်") နဲ့ ဇာတ်ကောင်စကား/စိတ်တွင်းစကားတို ("၁ ကီလို ရွှေတုံး ရှိလား?", "ရှိပါတယ်။ ခဏစောင့်ပါ။", "အရင်ဆုံး အတိုးယူရမယ်!") ကို Single Narrator တစ်ယောက်တည်းပြောသလို ချောမွေ့စွာ ပေါင်းစပ်ပါ။
+3. Scene တစ်ခုချင်းစီကို 1.8s–4.5s micro-clauses (စာတို ၈–၁၆ လုံးခန့်) ဖြင့် visual cut အလိုက် ခွဲပါ။ Narration duration သည် scene duration ထက် မရှည်ရပါ။
+4. ဇာတ်ကောင်ရဲ့ စိတ်ခံစားချက်ကို မြင်ရတဲ့ facial expression/action နဲ့ကိုက်မှသာ ထည့်ပါ ("!" အံ့ဩ/မာန်ပါ, "?" မေးခွန်း)။
+5. Repetitive "ပါတယ်/ဖြစ်ပါတယ်/နေပါတယ်" အဆုံးသတ်များ ရှောင်ပြီး "...သွားတယ်", "...နိုင်ပြီ", "...မယ်", "...ဘူး", "...ပဲ", "...နော်", "...လား?" စသဖြင့် အဆုံးသတ်မျိုးစုံ သုံးပါ (ယဉ်ကျေးသော ဇာတ်ကောင်စကားပြန်ဖြေချက် ဥပမာ "ရှိပါတယ်။ ခဏစောင့်ပါ။" မှလွဲ၍)။
+6. မသေချာတဲ့ နာမည်၊ နေရာကို မခန့်မှန်းပါနှင့်။ သို့သော် မြင်ရ/ကြားရသော ငွေပမာဏ၊ အလေးချိန် ကိန်းဂဏန်းများ (ဥပမာ- ယွမ် ၅ သိန်းကျော်, ၁ ကီလို ရွှေတုံး) ကို တိကျစွာ ထိန်းသိမ်းပါ။
+7. Output ကို JSON တစ်ခုတည်းအဖြစ် ထုတ်ပါ။ Markdown မသုံးပါနှင့်။
 
 Narrator style:
-- Natural Burmese storytelling
-- Clear and conversational
-- Slightly dramatic
-- Not overacted
-- Suitable for short drama recap video
+- Instant visual hook + blended 3rd-person recap & inline dialogue quotes
+- Brisk crisp micro-clauses (~3.5–3.8 Burmese syllables/sec)
+- Expressive vocal delivery tags matching chest-baritone + lively inflections
+- Suitable for viral short-drama Burmese recap video
 
 JSON format:
 {
@@ -652,16 +641,18 @@ function getStep3ScriptStyleConfig(style: Step3ScriptStyle): {
     };
   }
 
-  // Default: 'narrator'
+  // Default: 'narrator' — Reference Short-Drama Blended Recap + Dialogue Style
   return {
-    roleTitle: 'You are a Real-Life Spoken Burmese Voiceover Actor ("အပြင်မှာ စကားပြောနေတဲ့အတိုင်း တကယ့် Narrator အသံထွက်စေမယ့် Voiceover Director").',
+    roleTitle: 'You are an Elite Burmese Short-Drama Video Recap Narrator & Voice Director ("နမူနာ Short-Drama Recap Video စတိုင် တစ်သံတည်း Blended Narrator").',
     speakerLabel: 'Narrator (ဇာတ်ကြောင်းပြောသူ)',
-    modeDirective: `SPOKEN NARRATOR MODE ("1. NARRATOR — REAL SPOKEN VOICEOVER"):
-- Write PURE REAL-LIFE SPOKEN BURMESE meant to be SPOKEN ALOUD by a real voice actor—NEVER stiff written/bookish prose ("စာသားဆန်ဆန် / စာတန်းဆန်ဆန် လုံးဝမရေးရ").
-- Format every line for natural spoken TTS breath & intonation: use lively everyday spoken expressions ("ဟာ ကြည့်စမ်း!", "တကယ်ကြီးလား?", "အဲ့ဒီတော့ သူ ဘာလုပ်လိုက်လဲဆိုတော့...", "ပြောရရင်တော့...", "ဟုတ်ပါ့မလား!"), varied colloquial endings ("...သွားပြီ", "...လိုက်မယ်", "...မဟုတ်ဘူး", "...ပဲနော်", "...လား?"), and natural punctuation ("!", "?", "—", "၊").
-- Strictly avoid flat repetitive "...နေပါသည် / ...ဖြစ်ပါသည် / ...ပါတယ်" textbook endings.`,
-    slotDirective: `SPOKEN NARRATOR MODE FOR THIS SLOT:
-- Write so it sounds 100% like a real person talking out loud naturally ("အပြင်မှာ တကယ်စကားပြောနေတဲ့အတိုင်း")—zero stiff bookish wording.`,
+    modeDirective: `REFERENCE SHORT-DRAMA NARRATOR MODE ("1. NARRATOR — BLENDED RECAP & INLINE DIALOGUE"):
+- Replicate this exact viral Burmese short-drama narrator formula:
+  1) INSTANT VISUAL HOOK (0 filler greeting): Jump immediately into what is visibly happening on Screen 1 without saying "မင်္ဂလာပါ / ဒီဇာတ်လမ်းမှာ" (e.g., "ရေဘူး တစ်ဘူးပဲ ရှိတဲ့ ရွှေခွက်ထဲမှာ ရေဘူးတွေ အများကြီး ပေါ်လာတော့ သူ အံ့ဩသွားတယ်!").
+  2) BLENDED 3RD-PERSON RECAP + CRISP CHARACTER BEATS: Blend smooth 3rd-person recap ("...ဆိုတာ သူ နားလည်သွားတယ်", "သူ အလွတ်မပေးဘူး", "...ပြောင်းဖို့ စဉ်းစားနေတယ်") seamlessly with short inline character quotes/thoughts ("၁ ကီလို ရွှေတုံး ရှိလား?", "ရှိပါတယ်။ ခဏစောင့်ပါ။", "သူတို့ကိုယ်တိုင် လာအပ်တာပဲ! အရင်ဆုံး အတိုးယူရမယ်!") so ONE single narrator voices the whole clip vividly.
+  3) CRISP 1.8s–4.5s MICRO-CLAUSES (~8–16 syllables per beat): Lock tightly to visual scene cuts (~3.6 syl/sec). Mix varied natural endings ("...သွားတယ်", "...နိုင်ပြီ", "...မယ်", "...ဘူး", "...ပဲ", "...နော်!", "...လား?", "...နေတယ်").
+  4) STRICTLY BAN repetitive "...နေပါသည် / ...ဖြစ်ပါသည် / ...ပါတယ်" padding (allow "ပါတယ်" ONLY inside genuine polite dialogue replies like "ရှိပါတယ်။ ခဏစောင့်ပါ။"). Preserve exact numbers, currency, and weights faithfully.`,
+    slotDirective: `REFERENCE NARRATOR MODE FOR THIS SLOT:
+- Start directly with the visual action hook, mix 3rd-person recap narration with crisp inline character/thought lines voiced by ONE single chest-baritone narrator in short 1.8s–4.5s beats.`,
   };
 }
 
@@ -1323,21 +1314,22 @@ export async function polishBurmeseNarrationStyle(
       currentEmotion: s.emotion || '',
     }));
 
-    const polishPrompt = `You are polishing an existing Burmese Movie-Recap script to sound EXACTLY like a top human Burmese TikTok/YouTube recap narrator.
+    const polishPrompt = `You are polishing an existing Burmese Movie-Recap script to sound EXACTLY like the analyzed reference Burmese short-drama recap narrator.
 
 PROBLEMS TO FIX:
-- Currently there are TOO MANY repetitive textbook endings ("...ပါတယ်", "...နေပါတယ်", "...ဖြစ်ပါတယ်", "...သွားပါတယ်", "...လိုက်ပါတယ်").
-- Lines sound flat when read aloud.
+- Repetitive textbook endings ("...ပါတယ်", "...နေပါတယ်", "...ဖြစ်ပါတယ်", "...သွားပါတယ်", "...လိုက်ပါတယ်").
+- Stiff or overly wordy sentences that exceed the 1.8s–4.5s micro-clause rhythm.
 
-TARGET STYLE (FOLLOW STRICTLY):
-1. Strip unnecessary "ပါတယ် / ဖြစ်ပါတယ် / နေပါတယ်" padding (keep "ပါတယ်" ONLY inside polite quoted replies like "ရှိပါတယ်။ ခဏစောင့်ပါ။").
-2. Vary sentence endings naturally across cues just like this authentic reference:
+REFERENCE STYLE TO MATCH STRICTLY:
+1. Strip unnecessary "ပါတယ် / ဖြစ်ပါတယ် / နေပါတယ်" padding (keep "ပါတယ်" ONLY inside polite quoted character replies like "ရှိပါတယ်။ ခဏစောင့်ပါ။").
+2. Keep the opening line as an instant visual hook (remove "မင်္ဂလာပါ/ဒီဇာတ်လမ်းမှာ" fluff if present).
+3. Blend 3rd-person recap ("...ဆိုတာ သူ နားလည်သွားတယ်", "သူ အလွတ်မပေးဘူး") smoothly with short crisp inline character speech/thoughts, varying endings naturally:
    - Surprise / reveal: "ရေဘူးတွေ အများကြီး ပေါ်လာတော့ သူ အံ့ဩသွားတယ်!"
-   - Understanding / turning point: "ရတနာပွားခွက်ပဲ ဆိုတာ သူ နားလည်သွားတယ်။ ဒီခွက်နဲ့ ဝင်ပြိုင်နိုင်ပြီ။"
-   - Intent / resolve: "သေချာပေါက် ဝင်ပြိုင်မယ်။", "သူ အလွတ်မပေးဘူး။", "အရင်ဆုံး အတိုးယူရမယ်။"
-   - Playful / mocking / dialogue: "ငါ့နောက်လိုက်နေတဲ့သူပဲ။", "သန်းနဲ့ချီ တန်မယ်နော်!", "အောင်မြင်နေပြီပဲ။", "တစ်ကီလို ရွှေတုံး ရှိလား?"
-3. Keep ALL facts, numbers, money amounts, weights, and character names 100% unchanged! Keep each line concise for its "durationSec" (~3.4 syllables/sec).
-4. Add "!" for surprise/amazement/warnings and "?" for questions, AND output an accurate vocal "emotion" tag per item from:
+   - Realization / turning point: "ရတနာပွားခွက်ပဲ ဆိုတာ သူ နားလည်သွားတယ်။ ဒီခွက်နဲ့ ဝင်ပြိုင်နိုင်ပြီ။"
+   - Intent / resolve: "သေချာပေါက် ဝင်ပြိုင်မယ်။", "သူ အလွတ်မပေးဘူး။", "အရင်ဆုံး အတိုးယူရမယ်!"
+   - Playful / mocking / dialogue: "ငါ့နောက်လိုက်နေတဲ့သူပဲ။", "သန်းနဲ့ချီ တန်မယ်နော်!", "၁ ကီလို ရွှေတုံး ရှိလား?", "ရှိပါတယ်။ ခဏစောင့်ပါ။"
+4. Keep ALL facts, numbers, money amounts, weights, and character names 100% unchanged! Keep each beat concise for its "durationSec" (~3.5 syllables/sec, 8–16 syllables per beat).
+5. Add "!" for surprise/amazement/warnings and "?" for questions, AND output an accurate vocal "emotion" tag per item from:
    "surprised, amazed" | "curious, questioning" | "mocking, smug" | "determined, fierce" | "urgent, tense" | "sad, heartfelt" | "calm storytelling".
 
 Return ONLY a valid JSON array matching:

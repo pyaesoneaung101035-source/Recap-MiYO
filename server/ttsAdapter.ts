@@ -34,6 +34,16 @@ export const VERIFIED_BURMESE_PROVIDERS: TTSProvider[] = [
     description: 'Microsoft Azure 24kHz Studio Neural Model for Myanmar Burmese (my-MM-ThihaNeural & my-MM-NilarNeural). Native Burmese pronunciation with natural human cadence.',
     maleNarratorVoices: [
       {
+        id: 'RecapPro',
+        name: 'Min Khant · Recap Pro (မင်းခန့်)',
+        myanmarName: 'မင်းခန့် · Recap Pro',
+        gender: 'male',
+        ageGroup: 'adult',
+        tone: 'Warm 135Hz chest-baritone short-drama Burmese recap narrator with crisp vocal lift',
+        description: 'နမူနာ Video စတိုင် 135Hz Warm Chest-Baritone Short-Drama Recap Narrator',
+        isMaleNarratorRecommended: true,
+      },
+      {
         id: 'Thiha',
         name: 'Thiha (သီဟ)',
         myanmarName: 'သီဟ',
@@ -83,6 +93,16 @@ export const VERIFIED_BURMESE_PROVIDERS: TTSProvider[] = [
     pricingInfo: 'Free tier available via Google AI Studio API key (Pay-as-you-go for higher quotas)',
     description: 'Google Gemini Flash Audio TTS with prebuilt voices (Charon, Puck, Fenrir, Orpheus) prompted with natural Burmese native speaker persona instructions.',
     maleNarratorVoices: [
+      {
+        id: 'RecapPro',
+        name: 'Min Khant · Recap Pro (Charon 135Hz Persona)',
+        myanmarName: 'မင်းခန့် · Recap Pro',
+        gender: 'male',
+        ageGroup: 'adult',
+        tone: 'Warm 135Hz chest-baritone Burmese short-drama recap narrator with expressive lifts',
+        description: 'Gemini Charon warm chest-baritone mapped to short-drama Burmese recap narrator',
+        isMaleNarratorRecommended: true,
+      },
       {
         id: 'Thiha',
         name: 'Thiha (Puck Persona)',

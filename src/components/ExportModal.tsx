@@ -1,9 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { X, Download, FileText, Video, CheckCircle2, RotateCw, Play } from 'lucide-react';
 import { ProjectState } from '../types';
-import { generateSrtContent, downloadFile, getInterpolatedKeyframe, getFilterCss } from '../utils/alightMotionRenderer';
-import { drawCanvasSubtitle } from '../utils/canvasSubtitleRenderer';
+import { downloadFile } from '../utils/alightMotionRenderer';
 import { exportToDubbingPlanJSON, generateBurmeseDubbingSRT } from '../utils/geminiPool';
+import { exportCompositeVideo } from '../utils/canvasVideoExporter';
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -27,6 +27,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     return 'tiktok';
   };
   const [frameSize, setFrameSize] = useState<'tiktok' | 'youtube' | 'square' | 'portrait' | 'landscape'>(getInitialFrameSize);
+  const exportAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      exportAbortRef.current?.abort();
+    };
+  }, []);
 
   if (!isOpen) return null;
 
@@ -48,374 +55,66 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     downloadFile(json, `${project.videoName || 'project'}_motionrecap.json`, 'application/json');
   };
 
-  // Composite Video Export via Canvas & MediaRecorder (Outputs standard .mp4 video)
+  // Composite Video Export via shared freeze-free exporter
   const handleExportCompositeVideo = async () => {
     if (!project.videoUrl) {
-      alert('ဗီဒီယို မရှိသေးပါ။ အဆင့် 2 တွင် ဗီဒီယို ဖိုင် အရင် တင်ပေးပါ။');
       return;
     }
+
+    exportAbortRef.current?.abort();
+    const controller = new AbortController();
+    exportAbortRef.current = controller;
 
     setIsExportingVideo(true);
     setExportProgress(2);
     setDownloadedUrl(null);
 
+    let width = 1080;
+    let height = 1920;
+    if (frameSize === 'youtube') {
+      width = 1920;
+      height = 1080;
+    } else if (frameSize === 'square') {
+      width = 1080;
+      height = 1080;
+    } else if (frameSize === 'portrait') {
+      width = 1080;
+      height = 1350;
+    } else if (frameSize === 'landscape') {
+      width = 1280;
+      height = 720;
+    }
+
     try {
-      const video = document.createElement('video');
-      video.src = project.videoUrl;
-      video.crossOrigin = 'anonymous';
-      video.muted = true;
-      video.playsInline = true;
-
-      await new Promise<void>((resolve, reject) => {
-        video.onloadedmetadata = () => resolve();
-        video.onerror = () => reject(new Error('Failed to load video for export'));
+      const result = await exportCompositeVideo({
+        project,
+        width,
+        height,
+        videoBitsPerSecond: 8000000,
+        forceMuteOriginalAudio: true,
+        signal: controller.signal,
+        onProgress: (pct) => setExportProgress(pct),
       });
 
-      const canvas = document.createElement('canvas');
-      if (frameSize === 'tiktok') {
-        canvas.width = 1080;
-        canvas.height = 1920; // 9:16 Vertical TikTok / Reels / Shorts
-      } else if (frameSize === 'youtube') {
-        canvas.width = 1920;
-        canvas.height = 1080; // 16:9 Standard YouTube
-      } else if (frameSize === 'square') {
-        canvas.width = 1080;
-        canvas.height = 1080; // 1:1 Square
-      } else if (frameSize === 'portrait') {
-        canvas.width = 1080;
-        canvas.height = 1350; // 4:5 Portrait
-      } else {
-        canvas.width = 1280;
-        canvas.height = 720; // Standard Landscape HD
-      }
-
-      const ctx = canvas.getContext('2d');
-      if (!ctx) throw new Error('Could not get canvas context');
-
-      // Web Audio API destination for mixing Cloned Voices + Background Video audio
-      const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
-      const audioCtx = new AudioCtxClass();
-      const dest = audioCtx.createMediaStreamDestination();
-
-      if (audioCtx.state === 'suspended') {
-        await audioCtx.resume();
-      }
-
-      // Schedule all generated voice clone audio clips strictly sequentially (zero overlapping voices)
-      const sortedSegs = [...project.segments].sort((a, b) => a.startTime - b.startTime);
-      let exportCursor = 0;
-      for (const seg of sortedSegs) {
-        if (seg.audioUrl && !project.isVoiceMuted) {
-          try {
-            const audioRes = await fetch(seg.audioUrl);
-            const arrayBuf = await audioRes.arrayBuffer();
-            const decodedBuf = await audioCtx.decodeAudioData(arrayBuf);
-
-            const source = audioCtx.createBufferSource();
-            source.buffer = decodedBuf;
-
-            // Apply segment voice speed
-            const speed = seg.playbackRate || project.voicePlaybackRate || 1.0;
-            source.playbackRate.value = speed;
-
-            source.connect(dest);
-
-            const scheduledStart = Math.max(exportCursor, Math.max(0, seg.startTime));
-            const fullDur = decodedBuf.duration / speed;
-            exportCursor = scheduledStart + fullDur + 0.04;
-            source.start(audioCtx.currentTime + scheduledStart);
-          } catch (audioErr) {
-            console.warn('Audio segment load notice:', audioErr);
-          }
-        }
-      }
-
-      // Combine video canvas stream + audio destination stream
-      const canvasStream = canvas.captureStream(30); // 30 FPS
-      const combinedStream = new MediaStream([
-        ...canvasStream.getVideoTracks(),
-        ...dest.stream.getAudioTracks(),
-      ]);
-
-      // Determine best MP4 / WebM MediaRecorder MimeType
-      const preferredMimeTypes = [
-        'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
-        'video/mp4;codecs=avc1,mp4a.40.2',
-        'video/mp4;codecs=h264,aac',
-        'video/mp4',
-        'video/webm;codecs=vp9,opus',
-        'video/webm',
-      ];
-
-      let chosenMimeType = 'video/mp4';
-      for (const t of preferredMimeTypes) {
-        if (MediaRecorder.isTypeSupported(t)) {
-          chosenMimeType = t;
-          break;
-        }
-      }
-
-      const recorder = new MediaRecorder(combinedStream, {
-        mimeType: chosenMimeType,
-        videoBitsPerSecond: 8000000, // 8 Mbps High Quality MP4
-      });
-
-      const chunks: Blob[] = [];
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunks.push(e.data);
-      };
-
-      const maxAudioEnd = project.segments.reduce(
-        (max, s) => Math.max(max, s.startTime + (s.audioDuration || s.endTime - s.startTime)),
-        0
-      );
-      const videoSpeedMultiplier = project.playbackRate || 1.0;
-      const duration = Math.max(
-        (project.videoDuration || 10) / videoSpeedMultiplier,
-        maxAudioEnd
-      );
-
-      recorder.start();
-
-      // Precise Async Frame-by-Frame Seek Render Loop
-      const fps = 30;
-      const totalFrames = Math.floor(duration * fps);
-
-      for (let currentFrame = 0; currentFrame < totalFrames; currentFrame++) {
-        const currentTime = currentFrame / fps;
-        const videoTime = currentTime * videoSpeedMultiplier;
-
-        // Async seek video element to exact frame timestamp
-        video.currentTime = Math.min(video.duration || 10, videoTime);
-        await new Promise<void>((resolve) => {
-          const onSeeked = () => {
-            video.removeEventListener('seeked', onSeeked);
-            resolve();
-          };
-          if (Math.abs(video.currentTime - videoTime) < 0.03 && !video.seeking) {
-            resolve();
-          } else {
-            video.addEventListener('seeked', onSeeked);
-            setTimeout(resolve, 60); // Safety timeout
-          }
-        });
-
-        // Create temporary offscreen canvas for rendering transformed video frame
-        const offCanvas = document.createElement('canvas');
-        offCanvas.width = canvas.width;
-        offCanvas.height = canvas.height;
-        const offCtx = offCanvas.getContext('2d');
-
-        if (offCtx) {
-          const vw = (video.videoWidth && video.videoWidth > 0) ? video.videoWidth : canvas.width;
-          const vh = (video.videoHeight && video.videoHeight > 0) ? video.videoHeight : canvas.height;
-          const videoAspect = vw / vh;
-          const canvasAspect = canvas.width / canvas.height;
-
-          const kf = getInterpolatedKeyframe(project.keyframes, currentTime);
-          const crop = project.frameCrop || { scale: 1.0, posX: 0, posY: 0, fitMode: 'contain', backgroundStyle: 'blur' };
-
-          offCtx.clearRect(0, 0, canvas.width, canvas.height);
-
-          if (crop.backgroundStyle === 'blur') {
-            offCtx.save();
-            offCtx.filter = 'blur(28px) brightness(0.55)';
-            try {
-              let bgW = canvas.width;
-              let bgH = canvas.height;
-              if (videoAspect > canvasAspect) {
-                bgH = canvas.height;
-                bgW = canvas.height * videoAspect;
-              } else {
-                bgW = canvas.width;
-                bgH = canvas.width / videoAspect;
-              }
-              offCtx.drawImage(video, (canvas.width - bgW) / 2, (canvas.height - bgH) / 2, bgW, bgH);
-            } catch {}
-            offCtx.restore();
-          } else {
-            offCtx.fillStyle = '#050505';
-            offCtx.fillRect(0, 0, canvas.width, canvas.height);
-          }
-
-          offCtx.save();
-          let shakeOffsetX = 0;
-          let shakeOffsetY = 0;
-          if (kf.shakeIntensity > 0) {
-            shakeOffsetX = (Math.random() - 0.5) * kf.shakeIntensity * 4;
-            shakeOffsetY = (Math.random() - 0.5) * kf.shakeIntensity * 4;
-          }
-
-          offCtx.translate(canvas.width / 2 + kf.posX + shakeOffsetX + (crop.posX || 0), canvas.height / 2 + kf.posY + shakeOffsetY + (crop.posY || 0));
-          offCtx.rotate((kf.rotation * Math.PI) / 180);
-          offCtx.scale(kf.scale * (crop.scale || 1.0), kf.scale * (crop.scale || 1.0));
-          offCtx.globalAlpha = Math.max(0, Math.min(1, kf.opacity));
-
-          const filterStr = getFilterCss(kf.filter);
-          if (filterStr !== 'none' || kf.blur > 0) {
-            offCtx.filter = `${filterStr} ${kf.blur > 0 ? `blur(${kf.blur}px)` : ''}`.trim();
-          }
-
-          // Calculate draw dimensions based on fitMode to avoid stretching/squashing
-          let drawW = canvas.width;
-          let drawH = canvas.height;
-          if (crop.fitMode === 'cover') {
-            if (videoAspect > canvasAspect) {
-              drawH = canvas.height;
-              drawW = canvas.height * videoAspect;
-            } else {
-              drawW = canvas.width;
-              drawH = canvas.width / videoAspect;
-            }
-          } else {
-            // 'contain' (default)
-            if (videoAspect > canvasAspect) {
-              drawW = canvas.width;
-              drawH = canvas.width / videoAspect;
-            } else {
-              drawH = canvas.height;
-              drawW = canvas.height * videoAspect;
-            }
-          }
-
-          try {
-            offCtx.drawImage(video, -drawW / 2, -drawH / 2, drawW, drawH);
-          } catch {}
-
-          offCtx.restore();
-
-          // Draw offscreen frame onto main canvas
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-          ctx.drawImage(offCanvas, 0, 0);
-
-          const videoLeft = (canvas.width - drawW) / 2;
-          const videoTop = (canvas.height - drawH) / 2;
-
-          const isLandscape = canvas.width > canvas.height;
-          const scaleFactor = Math.max(1.0, canvas.height / (isLandscape ? 540 : 960));
-
-          // Draw Blur Boxes with exact 1:1 coordinates matching preview
-          if (project.blurBoxes && project.blurBoxes.length > 0) {
-            for (const box of project.blurBoxes) {
-              const bx = (box.x / 100) * canvas.width;
-              const by = (box.y / 100) * canvas.height;
-              const bw = (box.width / 100) * canvas.width;
-              const bh = (box.height / 100) * canvas.height;
-
-              if (bw > 0 && bh > 0) {
-                ctx.save();
-                ctx.beginPath();
-                if (ctx.roundRect) {
-                  ctx.roundRect(bx, by, bw, bh, 6 * scaleFactor);
-                } else {
-                  ctx.rect(bx, by, bw, bh);
-                }
-                ctx.clip();
-
-                const blurPx = Math.max(16, (box.blurAmount || 20) * scaleFactor * 1.25);
-                ctx.filter = `blur(${blurPx}px) brightness(0.8)`;
-
-                ctx.drawImage(offCanvas, 0, 0);
-
-                ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
-                ctx.fillRect(bx, by, bw, bh);
-
-                ctx.restore();
-              }
-            }
-          }
-
-          // Draw Live Myanmar Subtitles Overlay with wrapped multi-line rendering
-          const activeSeg = project.segments.find(
-            (s) => currentTime >= s.startTime && currentTime <= s.endTime
-          );
-
-          if (activeSeg) {
-            const text = activeSeg.myanmarTranslation || activeSeg.originalText;
-            if (text) {
-              drawCanvasSubtitle({
-                ctx,
-                text,
-                settings: project.subtitleSettings,
-                canvasWidth: canvas.width,
-                canvasHeight: canvas.height,
-                scaleFactor,
-              });
-            }
-          }
-        }
-
-        // Draw Fixed Logo Watermark on Export Canvas if configured
-        if (project.logoConfig && project.logoConfig.imageUrl) {
-          try {
-            const logoImg = new Image();
-            logoImg.crossOrigin = 'anonymous';
-            logoImg.src = project.logoConfig.imageUrl;
-            if (logoImg.complete) {
-              ctx.save();
-              const logoSize = (project.logoConfig.size || 80) * (canvas.width / 1280);
-              const logoX = (project.logoConfig.x / 100) * canvas.width;
-              const logoY = (project.logoConfig.y / 100) * canvas.height;
-              ctx.globalAlpha = project.logoConfig.opacity ?? 1;
-
-              if (project.logoConfig.shape === 'circle') {
-                ctx.beginPath();
-                ctx.arc(logoX + logoSize / 2, logoY + logoSize / 2, logoSize / 2, 0, Math.PI * 2);
-                ctx.clip();
-              }
-
-              ctx.drawImage(logoImg, logoX, logoY, logoSize, logoSize);
-              ctx.restore();
-            }
-          } catch {}
-        }
-
-        // Draw Animated Text Watermark on Export Canvas if configured
-        if (project.logoConfig && project.logoConfig.textWatermark) {
-          ctx.save();
-          const txt = project.logoConfig.textWatermark;
-          const txtSize = (project.logoConfig.textWatermarkSize || 24) * (canvas.width / 1280);
-          ctx.font = `bold ${txtSize}px 'Pyidaungsu', 'Noto Sans Myanmar', sans-serif`;
-          ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
-          ctx.textAlign = 'left';
-          ctx.textBaseline = 'middle';
-
-          const speed = project.logoConfig.textWatermarkSpeed || 30;
-          const yPos = ((currentTime * speed) % 100 / 100) * canvas.height;
-          ctx.fillText(txt, canvas.width * 0.1, yPos);
-          ctx.restore();
-        }
-
-        const pct = Math.min(99, Math.round(((currentFrame + 1) / totalFrames) * 100));
-        setExportProgress(pct);
-
-        // Yield execution to prevent UI freeze
-        await new Promise((r) => setTimeout(r, 8));
-      }
-
-      recorder.stop();
-
-      recorder.onstop = () => {
-        setExportProgress(100);
-        setIsExportingVideo(false);
-
-        const isMp4 = chosenMimeType.includes('mp4');
-        const outputMime = isMp4 ? 'video/mp4' : 'video/mp4';
-        const cleanBaseName = (project.videoName || 'recap').replace(/\.[^/.]+$/, '');
-        const filename = `${cleanBaseName}_perfect.mp4`;
-
-        const videoBlob = new Blob(chunks, { type: outputMime });
-        const url = URL.createObjectURL(videoBlob);
-        setDownloadedUrl(url);
-        setDownloadFilename(filename);
-
-        // Trigger direct MP4 download
-        downloadFile(videoBlob, filename, 'video/mp4');
-      };
-    } catch (err: any) {
-      console.error('Export video error:', err);
+      setExportProgress(100);
       setIsExportingVideo(false);
-      alert(`ဗီဒီယို ထုတ်လုပ်မှု ချို့ယွင်းချက် ဖြစ်ပေါ်ခဲ့ပါသည်: ${err.message || 'Error rendering MP4 video'}`);
+
+      const cleanBaseName = (project.videoName || 'recap').replace(/\.[^/.]+$/, '');
+      const filename = `${cleanBaseName}_perfect.${result.extension}`;
+
+      const url = URL.createObjectURL(result.blob);
+      setDownloadedUrl(url);
+      setDownloadFilename(filename);
+
+      downloadFile(result.blob, filename, result.mimeType);
+    } catch (err: any) {
+      setIsExportingVideo(false);
+      if (err?.message === 'Export cancelled') return;
+      console.error('Export video error:', err);
+    } finally {
+      if (exportAbortRef.current === controller) {
+        exportAbortRef.current = null;
+      }
     }
   };
 

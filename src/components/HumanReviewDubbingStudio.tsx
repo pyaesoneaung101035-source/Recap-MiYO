@@ -269,11 +269,8 @@ export const HumanReviewDubbingStudio: React.FC<HumanReviewDubbingStudioProps> =
       <div className="glass-panel rounded-2xl p-6 text-center space-y-3 border border-white/10">
         <Sparkles className="w-8 h-8 text-cyan-400 mx-auto" />
         <h3 className="text-sm font-bold text-white font-display">
-          အဆင့် ၇ — လူကိုယ်တိုင် စစ်ဆေးညှိနှိုင်းခန်း (Human-in-the-Loop Review Studio)
+          Segment များ မရှိသေးပါ
         </h3>
-        <p className="text-xs text-zinc-400 font-myanmar">
-          စစ်ဆေးရန် Segment များ မရှိသေးပါ။ အဆင့် ၄ (AI Transcript) တွင် Speech-to-Text အရင် ပြုလုပ်ပေးပါ။
-        </p>
       </div>
     );
   }
@@ -290,19 +287,14 @@ export const HumanReviewDubbingStudio: React.FC<HumanReviewDubbingStudioProps> =
             <span className="w-9 h-9 rounded-2xl bg-gradient-to-tr from-cyan-400 to-teal-400 text-zinc-950 font-black flex items-center justify-center text-sm shadow-lg shadow-cyan-500/20">
               7
             </span>
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-base font-black text-white font-display tracking-tight flex items-center gap-2">
-                  <ShieldCheck className="w-5 h-5 text-cyan-400" />
-                  <span>Myanmar AI Dubbing Workflow (၇ ဆင့် စစ်ဆေးရေး စတူဒီယို)</span>
-                </h2>
-                <span className="px-2.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 font-mono text-[10px] font-bold border border-cyan-500/30">
-                  Human-in-the-Loop
-                </span>
-              </div>
-              <p className="text-xs text-zinc-400 font-myanmar mt-0.5">
-                စကားအစ၊ စကားအဆုံး၊ Pause နှင့် ပါးစပ်လှုပ်ရှားမှု (Lip-Sync) ကို မူရင်းဗီဒီယိုနှင့် ကွက်တိဖြစ်အောင် ပြန်လည်စစ်ဆေးပါ။
-              </p>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-black text-white font-display tracking-tight flex items-center gap-2">
+                <ShieldCheck className="w-5 h-5 text-cyan-400" />
+                <span>Myanmar AI Dubbing Workflow</span>
+              </h2>
+              <span className="px-2.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 font-mono text-[10px] font-bold border border-cyan-500/30">
+                Human-in-the-Loop
+              </span>
             </div>
           </div>
 
@@ -484,11 +476,9 @@ export const HumanReviewDubbingStudio: React.FC<HumanReviewDubbingStudioProps> =
               </div>
 
               {isOverBudget && (
-                <div className="p-2 rounded-xl bg-amber-950/60 border border-amber-500/40 text-[11px] text-amber-300 font-myanmar flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-amber-950/60 border border-amber-500/40 text-[11px] text-amber-300 font-mono flex items-center gap-2">
                   <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
-                  <span>
-                    သတိပြုရန်: မြန်မာစာလုံးရေ ({currentSyllables}) သည် သတ်မှတ်ချိန် ({slotDuration.toFixed(1)}s) ထက် များနေသဖြင့် အသံထွက်ကြာနိုင်ပါသည်။ '5s စာတိုချုံ့မည်' ကို နှိပ်၍ စာလုံး လျှော့ချပါ။
-                  </span>
+                  <span>Over Budget: {currentSyllables} / {maxSyllables} ({slotDuration.toFixed(1)}s)</span>
                 </div>
               )}
 
@@ -775,16 +765,11 @@ export const HumanReviewDubbingStudio: React.FC<HumanReviewDubbingStudioProps> =
                   )}
                 </div>
 
-                <div className="text-left text-[11px] space-y-0.5">
+                <div className="text-left text-[11px]">
                   <span className="font-bold text-white block">
                     {currentSeg.slotMode === 'scene_recap_30s'
                       ? (currentSeg.sceneTitle || '30s Story Summary Slot')
-                      : (visemeState === 'rest' ? 'Mouth Rest (စကားနားချိန်)' : 'Mouth Speaking (အသံထွက်နေစဉ်)')}
-                  </span>
-                  <span className="text-[10px] text-zinc-400 font-myanmar block">
-                    {currentSeg.slotMode === 'scene_recap_30s'
-                      ? `တစ်လုံးချင်း Lip-Sync မဟုတ်ဘဲ ၃၀ စက္ကန့် မြင်ကွင်းအပိုင်းအလိုက် + ${(currentSeg.pauseBetweenParts ?? 0.18).toFixed(2)}s ခဏနားပြီး ချိန်ညှိထားပါသည်`
-                      : (currentSeg.lipSyncNote || 'မူရင်းစကားပြော timing နှင့် ကွက်တိ ကိုက်ညီမှု ရှိပါသည်')}
+                      : (visemeState === 'rest' ? 'Mouth Rest' : 'Mouth Speaking')}
                   </span>
                 </div>
               </div>

@@ -3,38 +3,20 @@ import {
   Download,
   Video,
   CheckCircle2,
-  History,
-  Trash2,
   Film,
   Sparkles,
   ArrowLeft,
   Clock,
-  FileText,
-  Volume2,
-  VolumeX,
-  Mic,
   Play,
-  Music,
-  Loader2,
+  RotateCw,
+  XCircle,
+  Settings,
+  RefreshCw,
 } from 'lucide-react';
-import { ProjectState, TranscriptSegment } from '../types';
-import { getInterpolatedKeyframe, getFilterCss, generateSrtContent, downloadFile } from '../utils/alightMotionRenderer';
-import { drawCanvasSubtitle } from '../utils/canvasSubtitleRenderer';
+import { ProjectState } from '../types';
+import { downloadFile } from '../utils/alightMotionRenderer';
+import { exportCompositeVideo } from '../utils/canvasVideoExporter';
 import { VideoPlayerView } from './VideoPlayerView';
-import { clampGentleNarratorRate, getSegmentPlaybackWindow, findActiveSegmentForTime } from '../utils/timingSync';
-import { extractBackgroundMusicFromVideo } from '../utils/bgmExtractorClient';
-
-interface ExportHistoryItem {
-  id: string;
-  filename: string;
-  blobUrl: string;
-  timestamp: string;
-  duration: number;
-  resolution: string;
-  aspectRatio: string;
-  sizeMb: string;
-  segmentCount: number;
-}
 
 interface Step8ExportStudioProps {
   project: ProjectState;
@@ -47,716 +29,149 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
   setProject,
   onPrevStep,
 }) => {
-  const getInitialFrameSize = () => {
-    if (project.aspectRatio === '16:9') return 'youtube';
-    if (project.aspectRatio === '1:1') return 'square';
-    if (project.aspectRatio === '4:5') return 'portrait';
-    return 'tiktok';
-  };
-  const [frameSize, setFrameSize] = useState<'tiktok' | 'youtube' | 'square' | 'portrait'>(getInitialFrameSize);
-  const [exportQuality, setExportQuality] = useState<'4k' | '1080p' | '720p' | '480p'>('1080p');
+  const [preset, setPreset] = useState<'tiktok' | 'youtube_shorts' | 'youtube' | 'facebook'>('youtube_shorts');
+  const [resolution, setResolution] = useState<'480p' | '720p' | '1080p' | '4k'>('1080p');
+  const [fps, setFps] = useState<string>('30');
+  const [videoCodec, setVideoCodec] = useState<string>('H.264 (Recommended)');
+  const [quality, setQuality] = useState<string>('High');
+  const [audioCodec, setAudioCodec] = useState<string>('AAC (Standard)');
+  const [audioBitrate, setAudioBitrate] = useState<string>('128 kbps');
+
   const [isExporting, setIsExporting] = useState(false);
-  const [exportProgress, setExportProgress] = useState<number>(0);
-  const [exportStatusText, setExportStatusText] = useState<string>('');
-  
-  const [currentExportUrl, setCurrentExportUrl] = useState<string | null>(null);
-  const [currentExportFilename, setCurrentExportFilename] = useState<string>('');
-  const [isExtractingBgm, setIsExtractingBgm] = useState(false);
-  const [bgmExtractError, setBgmExtractError] = useState<string | null>(null);
+  const [progressPct, setProgressPct] = useState(0);
+  const [statusText, setStatusText] = useState('Processing Your Video...');
+  const [elapsedSecs, setElapsedSecs] = useState(0);
+  const [etaSecs, setEtaSecs] = useState(4);
+  const [exportResult, setExportResult] = useState<{ downloadUrl: string; filename: string; fileSizeMb: string } | null>(null);
 
-  const [historyItems, setHistoryItems] = useState<ExportHistoryItem[]>([]);
-
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const animFrameRef = useRef<number | null>(null);
+  const progressRef = useRef<number>(0);
+  const timerIntervalRef = useRef<number | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    try {
-      const savedHistory = localStorage.getItem('recap_export_history_meta');
-      if (savedHistory) {
-        const parsed = JSON.parse(savedHistory);
-        setHistoryItems(parsed);
-      }
-    } catch (e) {
-      console.warn('Failed to load export history:', e);
-    }
+    return () => {
+      cleanupJob();
+    };
   }, []);
 
-  const getCanvasDimensions = (type: string, quality: '4k' | '1080p' | '720p' | '480p' = exportQuality) => {
-    let baseWidth = 1080;
-    let baseHeight = 1920;
-
-    switch (type) {
-      case 'tiktok':
-        baseWidth = 1080; baseHeight = 1920; break;
-      case 'youtube':
-        baseWidth = 1920; baseHeight = 1080; break;
-      case 'portrait':
-        baseWidth = 1080; baseHeight = 1350; break;
-      case 'square':
-        baseWidth = 1080; baseHeight = 1080; break;
-      default:
-        baseWidth = 1080; baseHeight = 1920; break;
+  const cleanupJob = () => {
+    if (timerIntervalRef.current) {
+      clearInterval(timerIntervalRef.current);
+      timerIntervalRef.current = null;
     }
-
-    let scale = 1.0;
-    if (quality === '4k') scale = 2.0;
-    if (quality === '720p') scale = 0.6667;
-    if (quality === '480p') scale = 0.4444;
-
-    const width = Math.round(baseWidth * scale);
-    const height = Math.round(baseHeight * scale);
-    const label = `${width}x${height} (${quality.toUpperCase()})`;
-
-    return { width, height, label };
+    abortRef.current?.abort();
   };
 
-  const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
-
-  const getOffscreenCanvas = (width: number, height: number) => {
-    if (!offscreenCanvasRef.current) {
-      offscreenCanvasRef.current = document.createElement('canvas');
+  const getExportDimensions = () => {
+    const isPortrait = preset === 'tiktok' || preset === 'youtube_shorts';
+    if (resolution === '4k') {
+      return isPortrait ? { width: 2160, height: 3840 } : { width: 3840, height: 2160 };
     }
-    if (
-      offscreenCanvasRef.current.width !== width ||
-      offscreenCanvasRef.current.height !== height
-    ) {
-      offscreenCanvasRef.current.width = width;
-      offscreenCanvasRef.current.height = height;
+    if (resolution === '720p') {
+      return isPortrait ? { width: 720, height: 1280 } : { width: 1280, height: 720 };
     }
-    return offscreenCanvasRef.current;
+    if (resolution === '480p') {
+      return isPortrait ? { width: 480, height: 854 } : { width: 854, height: 480 };
+    }
+    return isPortrait ? { width: 1080, height: 1920 } : { width: 1920, height: 1080 };
   };
 
-  const renderCanvasFrame = (
-    ctx: CanvasRenderingContext2D,
-    videoEl: HTMLVideoElement,
-    canvasWidth: number,
-    canvasHeight: number,
-    currentTime: number
-  ) => {
-    const offCanvas = getOffscreenCanvas(canvasWidth, canvasHeight);
-    const offCtx = offCanvas.getContext('2d');
-    if (!offCtx) return;
-
-    offCtx.clearRect(0, 0, canvasWidth, canvasHeight);
-
-    // Calculate aspect ratio preservation for video
-    const vw = (videoEl.videoWidth && videoEl.videoWidth > 0) ? videoEl.videoWidth : canvasWidth;
-    const vh = (videoEl.videoHeight && videoEl.videoHeight > 0) ? videoEl.videoHeight : canvasHeight;
-    const videoAspect = vw / vh;
-    const canvasAspect = canvasWidth / canvasHeight;
-
-    const crop = project.frameCrop || { scale: 1.0, posX: 0, posY: 0, fitMode: 'contain', backgroundStyle: 'blur' };
-
-    // Background treatment if letterboxed / contain
-    if (crop.backgroundStyle === 'blur') {
-      offCtx.save();
-      offCtx.filter = 'blur(28px) brightness(0.55)';
-      try {
-        let bgW = canvasWidth;
-        let bgH = canvasHeight;
-        if (videoAspect > canvasAspect) {
-          bgH = canvasHeight;
-          bgW = canvasHeight * videoAspect;
-        } else {
-          bgW = canvasWidth;
-          bgH = canvasWidth / videoAspect;
-        }
-        offCtx.drawImage(videoEl, (canvasWidth - bgW) / 2, (canvasHeight - bgH) / 2, bgW, bgH);
-      } catch {}
-      offCtx.restore();
-    } else {
-      offCtx.fillStyle = '#050505';
-      offCtx.fillRect(0, 0, canvasWidth, canvasHeight);
-    }
-
-    const kf = getInterpolatedKeyframe(project.keyframes, currentTime);
-
-    offCtx.save();
-
-    let shakeOffsetX = 0;
-    let shakeOffsetY = 0;
-    if (kf.shakeIntensity > 0) {
-      shakeOffsetX = (Math.random() - 0.5) * kf.shakeIntensity * 4;
-      shakeOffsetY = (Math.random() - 0.5) * kf.shakeIntensity * 4;
-    }
-
-    offCtx.translate(
-      canvasWidth / 2 + kf.posX + shakeOffsetX + (crop.posX || 0),
-      canvasHeight / 2 + kf.posY + shakeOffsetY + (crop.posY || 0)
-    );
-    offCtx.rotate((kf.rotation * Math.PI) / 180);
-    offCtx.scale(kf.scale * (crop.scale || 1.0), kf.scale * (crop.scale || 1.0));
-    offCtx.globalAlpha = Math.max(0, Math.min(1, kf.opacity));
-
-    const filterStr = getFilterCss(kf.filter);
-    const globalFilterStr = getFilterCss(project.globalColorFilter);
-    const combinedFilter = [filterStr, globalFilterStr, kf.blur > 0 ? `blur(${kf.blur}px)` : ''].filter(f => f !== 'none' && f !== '').join(' ') || 'none';
-    if (combinedFilter !== 'none') {
-      offCtx.filter = combinedFilter;
-    }
-
-    // Determine intrinsic draw width & height according to fitMode to avoid stretching/squashing
-    let drawW = canvasWidth;
-    let drawH = canvasHeight;
-    if (crop.fitMode === 'cover') {
-      if (videoAspect > canvasAspect) {
-        drawH = canvasHeight;
-        drawW = canvasHeight * videoAspect;
-      } else {
-        drawW = canvasWidth;
-        drawH = canvasWidth / videoAspect;
-      }
-    } else {
-      // 'contain' (default standard fit, preserves exact original aspect ratio)
-      if (videoAspect > canvasAspect) {
-        drawW = canvasWidth;
-        drawH = canvasWidth / videoAspect;
-      } else {
-        drawH = canvasHeight;
-        drawW = canvasHeight * videoAspect;
-      }
-    }
-
-    try {
-      if (videoEl.readyState >= 2) {
-        offCtx.drawImage(
-          videoEl,
-          -drawW / 2,
-          -drawH / 2,
-          drawW,
-          drawH
-        );
-      }
-    } catch {}
-
-    offCtx.restore();
-
-    // Clear main canvas & draw the rendered video scene from offscreen canvas
-    ctx.clearRect(0, 0, canvasWidth, canvasHeight);
-    ctx.drawImage(offCanvas, 0, 0);
-
-    // Determine the actual drawn video bounds on the canvas
-    const videoLeft = (canvasWidth - drawW) / 2;
-    const videoTop = (canvasHeight - drawH) / 2;
-
-    // Reference scaling for subtitles and UI overlays (guaranteed minimum readable scale)
-    const isLandscape = canvasWidth > canvasHeight;
-    const scaleFactor = Math.max(1.0, canvasHeight / (isLandscape ? 540 : 960));
-
-    // Apply Blur Boxes over the rendered video scene with exact coordinate fidelity (1:1 with preview)
-    if (project.blurBoxes && project.blurBoxes.length > 0) {
-      for (const box of project.blurBoxes) {
-        // Direct 1:1 mapping from percentage coordinates to export canvas resolution
-        const bx = (box.x / 100) * canvasWidth;
-        const by = (box.y / 100) * canvasHeight;
-        const bw = (box.width / 100) * canvasWidth;
-        const bh = (box.height / 100) * canvasHeight;
-
-        if (bw > 0 && bh > 0) {
-          ctx.save();
-          ctx.beginPath();
-          if (ctx.roundRect) {
-            ctx.roundRect(bx, by, bw, bh, 6 * scaleFactor);
-          } else {
-            ctx.rect(bx, by, bw, bh);
-          }
-          ctx.clip();
-
-          const blurPx = Math.max(16, (box.blurAmount || 20) * scaleFactor * 1.25);
-          ctx.filter = `blur(${blurPx}px) brightness(0.8)`;
-
-          // Draw offscreen rendered frame through blur filter
-          ctx.drawImage(offCanvas, 0, 0);
-
-          // Dark tint so underlying foreign subtitles/watermarks are completely obscured
-          ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
-          ctx.fillRect(bx, by, bw, bh);
-
-          ctx.restore();
-        }
-      }
-    }
-
-    const activeSeg = project.segments.find((s) => {
-      const rate = clampGentleNarratorRate(s.atempoRate || s.playbackRate || project.voicePlaybackRate || 1.0);
-      const subStart = s.subtitleStartTime ?? s.startTime;
-      const baseSubEnd = s.subtitleEndTime ?? s.endTime;
-      const segEnd = s.subtitleEndTime !== undefined
-        ? baseSubEnd
-        : Math.max(baseSubEnd, subStart + (s.audioDuration ? s.audioDuration / rate : 0));
-      return currentTime >= subStart && currentTime <= segEnd;
-    });
-
-    if (activeSeg) {
-      const text = activeSeg.myanmarTranslation || activeSeg.originalText;
-      if (text) {
-        // Draw wrapped multi-line subtitle on canvas (breaks long lines cleanly into 2-3 lines)
-        drawCanvasSubtitle({
-          ctx,
-          text,
-          settings: project.subtitleSettings,
-          canvasWidth,
-          canvasHeight,
-          scaleFactor,
-        });
-      }
-    }
-
-    if (project.logoConfig && project.logoConfig.imageUrl) {
-      try {
-        const logoImg = new Image();
-        logoImg.crossOrigin = 'anonymous';
-        logoImg.src = project.logoConfig.imageUrl;
-        if (logoImg.complete) {
-          ctx.save();
-          const logoSize = (project.logoConfig.size || 80) * (canvasWidth / 1280);
-          const logoX = (project.logoConfig.x / 100) * canvasWidth;
-          const logoY = (project.logoConfig.y / 100) * canvasHeight;
-          ctx.globalAlpha = project.logoConfig.opacity ?? 1;
-
-          if (project.logoConfig.shape === 'circle') {
-            ctx.beginPath();
-            ctx.arc(
-              logoX + logoSize / 2,
-              logoY + logoSize / 2,
-              logoSize / 2,
-              0,
-              Math.PI * 2
-            );
-            ctx.clip();
-          }
-
-          ctx.drawImage(logoImg, logoX, logoY, logoSize, logoSize);
-          ctx.restore();
-        }
-      } catch {}
-    }
-
-    if (project.logoConfig && project.logoConfig.textWatermark) {
-      ctx.save();
-      const txt = project.logoConfig.textWatermark;
-      const txtSize = (project.logoConfig.textWatermarkSize || 24) * (canvasWidth / 1280);
-      ctx.font = `bold ${txtSize}px 'Pyidaungsu', 'Noto Sans Myanmar', sans-serif`;
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'middle';
-
-      const speed = project.logoConfig.textWatermarkSpeed || 30;
-      const yPos = (((currentTime * speed) % 100) / 100) * canvasHeight;
-      ctx.fillText(txt, canvasWidth * 0.1, yPos);
-      ctx.restore();
-    }
-  };
-
-  const handleExtractBgmInExport = async () => {
-    if (!project.videoFile && !project.videoUrl) return;
-    setIsExtractingBgm(true);
-    setBgmExtractError(null);
-    try {
-      const res = await extractBackgroundMusicFromVideo(
-        project.videoFile,
-        project.videoUrl,
-        project.videoName || 'custom_video.mp4'
-      );
-      setProject((prev) => ({
-        ...prev,
-        extractedBgmUrl: res.bgmUrl,
-        useExtractedBgm: true,
-        bgmVolume: prev.bgmVolume ?? 0.35,
-        bgmEngineUsed: res.engineUsed,
-      }));
-    } catch (err: any) {
-      setBgmExtractError(err?.message || 'BGM extraction failed');
-    } finally {
-      setIsExtractingBgm(false);
-    }
-  };
-
-  const handleExportMp4Video = async () => {
-    if (!project.videoUrl) {
-      alert('ဗီဒီယို ဖိုင် မရှိသေးပါ။ အဆင့် 2 တွင် Custom Video တင်သွင်းပါ။');
+  const handleStartExport = async () => {
+    if (!project.videoFile && !project.videoUrl) {
+      alert('ဗီဒီယို ဖိုင် မရှိသေးပါ။ အဆင့် ၂ တွင် ဗီဒီယို တင်သွင်းပါ။');
       return;
     }
 
+    cleanupJob();
+    setProject((prev) => (prev.isPlaying ? { ...prev, isPlaying: false } : prev));
+    setExportResult(null);
     setIsExporting(true);
-    setExportProgress(1);
-    setExportStatusText('Initializing Video & Audio Engines...');
-    setCurrentExportUrl(null);
+    progressRef.current = 3;
+    setProgressPct(3);
+    setStatusText('Initializing Video, BGM & Voice Clone Mix...');
+    setElapsedSecs(0);
+    setEtaSecs(Math.max(4, Math.round(project.videoDuration || 12)));
 
-    const { width, height } = getCanvasDimensions(frameSize, exportQuality);
-    let renderVideo: HTMLVideoElement | null = null;
+    const startTime = Date.now();
+    timerIntervalRef.current = window.setInterval(() => {
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      setElapsedSecs(elapsed);
+      const pct = progressRef.current;
+      if (pct > 5 && pct < 100) {
+        const estTotal = (elapsed / pct) * 100;
+        setEtaSecs(Math.max(1, Math.round(estTotal - elapsed)));
+      }
+    }, 1000);
+
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
-      const exportCanvas = document.createElement('canvas');
-      exportCanvas.width = width;
-      exportCanvas.height = height;
-      const ctx = exportCanvas.getContext('2d');
-      if (!ctx) throw new Error('Cannot get canvas context');
+      const { width, height } = getExportDimensions();
+      const baseBitrate =
+        quality === 'Low' ? 3000000 : quality === 'Medium' ? 6000000 : resolution === '4k' ? 16000000 : 10000000;
 
-      // Create video element and attach off-screen to DOM to prevent browser rendering throttling
-      renderVideo = document.createElement('video');
-      renderVideo.src = project.videoUrl;
-      renderVideo.crossOrigin = 'anonymous';
-      renderVideo.muted = false; // Must be false so AudioContext can capture audio if unmuted
-      renderVideo.playsInline = true;
-      renderVideo.style.position = 'fixed';
-      renderVideo.style.width = '1px';
-      renderVideo.style.height = '1px';
-      renderVideo.style.opacity = '0.001';
-      renderVideo.style.pointerEvents = 'none';
-      renderVideo.style.bottom = '0';
-      renderVideo.style.right = '0';
-      document.body.appendChild(renderVideo);
-
-      await new Promise<void>((resolve, reject) => {
-        if (renderVideo && renderVideo.readyState >= 2) {
-          resolve();
-          return;
-        }
-        const onReady = () => resolve();
-        renderVideo!.onloadeddata = onReady;
-        renderVideo!.oncanplay = onReady;
-        renderVideo!.onloadedmetadata = onReady;
-        renderVideo!.onerror = () => reject(new Error('Failed to load video for export'));
-        setTimeout(resolve, 3000); // Safety fallback
+      const res = await exportCompositeVideo({
+        project,
+        width,
+        height,
+        videoBitsPerSecond: baseBitrate,
+        forceMuteOriginalAudio: true,
+        signal: controller.signal,
+        onProgress: (pct, msg) => {
+          progressRef.current = pct;
+          setProgressPct(pct);
+          if (msg) setStatusText(msg);
+        },
       });
 
-      let rawVideoDuration = 0;
-      if (renderVideo.duration && isFinite(renderVideo.duration) && !isNaN(renderVideo.duration) && renderVideo.duration > 0) {
-        rawVideoDuration = renderVideo.duration;
-      } else if (project.videoDuration && isFinite(project.videoDuration) && !isNaN(project.videoDuration) && project.videoDuration > 0) {
-        rawVideoDuration = project.videoDuration;
-      }
-
-      const maxAudioEnd = project.segments.reduce((max, s) => {
-        const rate = clampGentleNarratorRate(s.atempoRate || s.playbackRate || project.voicePlaybackRate || 1.0);
-        const segEnd = Math.max(s.endTime, s.startTime + (s.audioDuration ? s.audioDuration / rate : 0) + 0.15);
-        return Math.max(max, segEnd);
-      }, 0);
-
-      const videoSpeedMultiplier = project.playbackRate || 1.0;
-      const effectiveVideoDuration = rawVideoDuration > 0 ? (rawVideoDuration / videoSpeedMultiplier) : 0;
-      let totalDuration = Math.max(effectiveVideoDuration, maxAudioEnd, project.videoDuration || 0, 3.0);
-
-      const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
-      const audioCtx = new AudioCtxClass();
-      audioCtxRef.current = audioCtx;
-      if (audioCtx.state === 'suspended') {
-        await audioCtx.resume();
-      }
-
-      const dest = audioCtx.createMediaStreamDestination();
-
-      // Original Video Audio Handling:
-      // Mute original video dialogue automatically whenever Cloned Voices are active (and unmuted),
-      // OR Original Mute is on, OR Vocal-Removed BGM Only mode is active, so TWO VOICES NEVER overlap in exported MP4!
-      const useExtractedBgm = Boolean(project.useExtractedBgm && project.extractedBgmUrl);
-      const hasClonedVoices = project.segments.some((s) => Boolean(s.audioUrl));
-      const isVoiceMuted = project.isVoiceMuted ?? false;
-      const isOriginalMuted = Boolean(
-        project.isMuted ||
-        useExtractedBgm ||
-        (hasClonedVoices && !isVoiceMuted) ||
-        (project.volume !== undefined && project.volume === 0)
-      );
-      const effectiveVideoGain = isOriginalMuted ? 0 : (project.volume ?? 1.0);
-      renderVideo.muted = isOriginalMuted;
-
-      try {
-        const videoSourceNode = audioCtx.createMediaElementSource(renderVideo);
-        const videoGain = audioCtx.createGain();
-        videoGain.gain.value = effectiveVideoGain;
-        videoSourceNode.connect(videoGain);
-        videoGain.connect(dest);
-      } catch (e) {
-        console.warn('Video audio node connect notice:', e);
-      }
-
-      // Extracted Background Music & SFX Track (Original Human Vocals Removed)
-      let bgmSourceNode: AudioBufferSourceNode | null = null;
-      let bgmGainNode: GainNode | null = null;
-      const targetBgmVol = Math.max(0, Math.min(1, project.bgmVolume ?? 0.35));
-
-      if (useExtractedBgm && project.extractedBgmUrl && targetBgmVol > 0) {
-        try {
-          setExportStatusText('Loading Extracted Background Music (Vocals Removed)...');
-          const bgmRes = await fetch(project.extractedBgmUrl);
-          if (bgmRes.ok) {
-            const bgmArrayBuf = await bgmRes.arrayBuffer();
-            const decodedBgm = await audioCtx.decodeAudioData(bgmArrayBuf);
-            bgmSourceNode = audioCtx.createBufferSource();
-            bgmSourceNode.buffer = decodedBgm;
-            bgmSourceNode.playbackRate.value = videoSpeedMultiplier;
-            bgmGainNode = audioCtx.createGain();
-            bgmGainNode.gain.value = targetBgmVol;
-            bgmSourceNode.connect(bgmGainNode);
-            bgmGainNode.connect(dest);
-          }
-        } catch (bgmErr) {
-          console.warn('Extracted BGM load warning in export:', bgmErr);
-        }
-      }
-
-      // Voice Clone Audio Handling:
-      const effectiveVoiceGain = isVoiceMuted ? 0 : (project.voiceVolume ?? 1.0);
-
-      const audioSources: {
-        node: AudioBufferSourceNode;
-        startTime: number;
-        gainNode: GainNode;
-        duration: number;
-      }[] = [];
-
-      const sortedExportSegs = [...project.segments].sort((a, b) => a.startTime - b.startTime);
-      let exportCursor = 0;
-      for (let i = 0; i < sortedExportSegs.length; i++) {
-        const seg = sortedExportSegs[i];
-        if (seg.audioUrl) {
-          try {
-            const res = await fetch(seg.audioUrl);
-            const arrayBuf = await res.arrayBuffer();
-            const decoded = await audioCtx.decodeAudioData(arrayBuf);
-
-            const win = getSegmentPlaybackWindow(sortedExportSegs, i, project.voicePlaybackRate || 1.0);
-            const rate = clampGentleNarratorRate(seg.atempoRate || seg.playbackRate || project.voicePlaybackRate || 1.0);
-            const source = audioCtx.createBufferSource();
-            source.buffer = decoded;
-            source.playbackRate.value = rate;
-
-            const gain = audioCtx.createGain();
-            gain.gain.value = 0; // Starts silent until scheduled envelope
-            source.connect(gain);
-            gain.connect(dest);
-
-            // Play the ENTIRE decoded buffer cleanly so final syllables are NEVER truncated
-            const fullDur = decoded.duration / rate;
-            const scheduledStart = Math.max(exportCursor, Math.max(0, win.startTime));
-            exportCursor = scheduledStart + fullDur + 0.04;
-
-            audioSources.push({
-              node: source,
-              startTime: scheduledStart,
-              gainNode: gain,
-              duration: fullDur,
-            });
-          } catch (audioErr) {
-            console.warn('Voice segment load error:', audioErr);
-          }
-        }
-      }
-
-      // Ensure video export runs until the very last narrator syllable finishes cleanly
-      totalDuration = Math.max(totalDuration, exportCursor + 0.15);
-
-      const canvasStream = exportCanvas.captureStream(30);
-      const combinedStream = new MediaStream([
-        ...canvasStream.getVideoTracks(),
-        ...dest.stream.getAudioTracks(),
-      ]);
-
-      const preferredMimeTypes = [
-        'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
-        'video/mp4;codecs=avc1,mp4a.40.2',
-        'video/mp4;codecs=h264,aac',
-        'video/mp4',
-        'video/webm;codecs=vp9,opus',
-        'video/webm',
-      ];
-
-      let chosenMimeType = 'video/mp4';
-      for (const t of preferredMimeTypes) {
-        if (MediaRecorder.isTypeSupported(t)) {
-          chosenMimeType = t;
-          break;
-        }
-      }
-
-      let bps = 8000000;
-      if (exportQuality === '4k') bps = 16000000;
-      if (exportQuality === '720p') bps = 4500000;
-      if (exportQuality === '480p') bps = 2000000;
-
-      const recorder = new MediaRecorder(combinedStream, {
-        mimeType: chosenMimeType,
-        videoBitsPerSecond: bps,
-      });
-      recorderRef.current = recorder;
-
-      const chunks: Blob[] = [];
-      recorder.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) chunks.push(e.data);
-      };
-
-      renderVideo.currentTime = 0;
-      renderVideo.playbackRate = videoSpeedMultiplier;
-      try {
-        await renderVideo.play();
-      } catch (playErr) {
-        console.warn('renderVideo.play() handled:', playErr);
-      }
-
-      const startTimeReal = audioCtx.currentTime;
-      if (bgmSourceNode && bgmGainNode) {
-        try {
-          bgmGainNode.gain.setValueAtTime(targetBgmVol, startTimeReal);
-          if (effectiveVoiceGain > 0 && audioSources.length > 0) {
-            const duckedVol = Math.max(0.04, targetBgmVol * 0.35);
-            audioSources.forEach(({ startTime, duration }) => {
-              const tStart = startTimeReal + startTime;
-              const tEnd = tStart + duration;
-              bgmGainNode!.gain.setValueAtTime(targetBgmVol, Math.max(startTimeReal, tStart - 0.08));
-              bgmGainNode!.gain.linearRampToValueAtTime(duckedVol, tStart + 0.05);
-              bgmGainNode!.gain.setValueAtTime(duckedVol, Math.max(tStart + 0.05, tEnd - 0.05));
-              bgmGainNode!.gain.linearRampToValueAtTime(targetBgmVol, tEnd + 0.12);
-            });
-          }
-          bgmSourceNode.start(startTimeReal);
-          bgmSourceNode.stop(startTimeReal + totalDuration + 0.15);
-        } catch (bgmStartErr) {
-          console.warn('BGM schedule notice:', bgmStartErr);
-        }
-      }
-
-      audioSources.forEach(({ node, startTime, gainNode, duration }) => {
-        try {
-          const tStart = startTimeReal + startTime;
-          const tEnd = tStart + duration;
-          // Smooth 8ms linear attack and 12ms release envelope at end of full audio buffer
-          gainNode.gain.setValueAtTime(0.0001, tStart);
-          gainNode.gain.linearRampToValueAtTime(effectiveVoiceGain, Math.min(tEnd, tStart + 0.008));
-          gainNode.gain.setValueAtTime(effectiveVoiceGain, Math.max(tStart + 0.008, tEnd - 0.012));
-          gainNode.gain.linearRampToValueAtTime(0.0001, tEnd);
-
-          node.start(tStart);
-          node.stop(tEnd + 0.06);
-        } catch (startErr) {
-          console.warn('Audio node start notice:', startErr);
-        }
-      });
-
-      recorder.start(100);
-
-      const renderLoop = () => {
-        if (!recorderRef.current || recorderRef.current.state !== 'recording') return;
-
-        const elapsed = audioCtx.currentTime - startTimeReal;
-        const curTime = Math.min(elapsed, totalDuration);
-
-        if (renderVideo) {
-          renderCanvasFrame(ctx, renderVideo, width, height, curTime);
-        }
-
-        const pct = Math.min(99, Math.round((curTime / totalDuration) * 100));
-        setExportProgress(pct);
-        setExportStatusText(`Rendering Video (${pct}%)...`);
-
-        // Record for the entire total duration so no audio or video is truncated
-        if (elapsed < totalDuration) {
-          animFrameRef.current = requestAnimationFrame(renderLoop);
-        } else {
-          if (recorderRef.current && recorderRef.current.state === 'recording') {
-            recorderRef.current.stop();
-          }
-          if (renderVideo) {
-            renderVideo.pause();
-          }
-        }
-      };
-
-      animFrameRef.current = requestAnimationFrame(renderLoop);
-
-      recorder.onstop = () => {
-        try {
-          if (renderVideo && document.body.contains(renderVideo)) {
-            document.body.removeChild(renderVideo);
-          }
-        } catch {}
-
-        setExportProgress(100);
-        setIsExporting(false);
-        setExportStatusText('Export Complete!');
-
-        const cleanBaseName = (project.videoName || 'recap').replace(/\.[^/.]+$/, '');
-        const filename = `${cleanBaseName}_final_recap.mp4`;
-
-        const videoBlob = new Blob(chunks, { type: chosenMimeType });
-        const blobUrl = URL.createObjectURL(videoBlob);
-        const sizeMb = (videoBlob.size / (1024 * 1024)).toFixed(2) + ' MB';
-
-        setCurrentExportUrl(blobUrl);
-        setCurrentExportFilename(filename);
-
-        // Safe delayed revoke download
-        downloadFile(videoBlob, filename, chosenMimeType);
-
-        const newHistoryItem: ExportHistoryItem = {
-          id: 'exp_' + Date.now(),
-          filename,
-          blobUrl,
-          timestamp: new Date().toLocaleTimeString('en-US', {
-            hour: '2-digit',
-            minute: '2-digit',
-            day: '2-digit',
-            month: 'short',
-          }),
-          duration: Math.round(totalDuration),
-          resolution: `${width}x${height}`,
-          aspectRatio: frameSize,
-          sizeMb,
-          segmentCount: project.segments.length,
-        };
-
-        setHistoryItems((prev) => {
-          const updated = [newHistoryItem, ...prev];
-          try {
-            const metaOnly = updated.map(({ blobUrl, ...rest }) => rest);
-            localStorage.setItem('recap_export_history_meta', JSON.stringify(metaOnly));
-          } catch {}
-          return updated;
-        });
-      };
-    } catch (err: any) {
-      console.error('Export video error:', err);
+      cleanupJob();
       setIsExporting(false);
-      try {
-        if (renderVideo && document.body.contains(renderVideo)) {
-          document.body.removeChild(renderVideo);
-        }
-      } catch {}
-      alert(`Export Error: ${err.message || 'Error rendering MP4'}`);
+      progressRef.current = 100;
+      setProgressPct(100);
+      setStatusText('Export Completed! (BGM + Voice Clone + Subtitles + Blur)');
+
+      const cleanName = (project.videoName || 'recap').replace(/\.[^/.]+$/, '');
+      const filename = `${cleanName}_${resolution}.${res.extension}`;
+      const url = URL.createObjectURL(res.blob);
+      const sizeMb = (res.blob.size / (1024 * 1024)).toFixed(2) + ' MB';
+
+      setExportResult({
+        downloadUrl: url,
+        filename,
+        fileSizeMb: sizeMb,
+      });
+      downloadFile(res.blob, filename, res.mimeType);
+    } catch (err: any) {
+      cleanupJob();
+      setIsExporting(false);
+      if (err?.message !== 'Export cancelled') {
+        setStatusText(`Export Failed: ${err?.message || 'Unknown error'}`);
+        alert(`Export Error: ${err?.message || 'Failed'}`);
+      }
     }
   };
 
-  const handleDownloadSrt = () => {
-    const srt = generateSrtContent(project.segments);
-    downloadFile(srt, `${project.videoName || 'recap'}_myanmar.srt`, 'text/plain;charset=utf-8');
+  const handleCancelExport = () => {
+    cleanupJob();
+    setIsExporting(false);
+    setStatusText('Export cancelled.');
   };
 
-  const handleClearHistory = () => {
-    if (confirm('Clear export history?')) {
-      setHistoryItems([]);
-      localStorage.removeItem('recap_export_history_meta');
-    }
-  };
-
-  const handleDeleteHistoryItem = (id: string) => {
-    setHistoryItems((prev) => {
-      const updated = prev.filter((item) => item.id !== id);
-      try {
-        const metaOnly = updated.map(({ blobUrl, ...rest }) => rest);
-        localStorage.setItem('recap_export_history_meta', JSON.stringify(metaOnly));
-      } catch {}
-      return updated;
-    });
+  const videoName = project.videoName || 'recap_video.mp4';
+  const durationSec = Math.round(project.videoDuration || 15);
+  const formatTime = (secs: number) => {
+    const mins = Math.floor(secs / 60);
+    const rem = secs % 60;
+    return `${String(mins).padStart(2, '0')}:${String(rem).padStart(2, '0')}`;
   };
 
   return (
-    <div className="space-y-6">
-      {/* Header Banner */}
+    <div className="space-y-6 animate-fadeIn pb-10">
+      {/* Top Header */}
       <div className="glass-panel rounded-2xl p-5 shadow-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-xl bg-cyan-400 text-zinc-950 flex items-center justify-center text-sm font-black font-mono shadow-lg shadow-cyan-400/20">
+          <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-cyan-400 to-teal-400 text-zinc-950 flex items-center justify-center text-sm font-black font-mono shadow-lg shadow-cyan-400/20">
             6
           </div>
           <div>
@@ -765,14 +180,14 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
               <Sparkles className="w-4 h-4 text-cyan-400" />
             </h2>
             <p className="text-xs text-zinc-400 font-myanmar mt-0.5">
-              Direct High-Quality MP4 Video Export & Download History
+              Professional Real FFmpeg Export Studio with Advanced Settings and Result Preview.
             </p>
           </div>
         </div>
 
         <button
           onClick={onPrevStep}
-          className="px-3.5 py-2 bg-white/5 hover:bg-white/10 text-zinc-300 text-xs font-semibold rounded-xl transition-all border border-white/10 flex items-center gap-1.5 cursor-pointer self-start sm:self-auto"
+          className="px-3.5 py-2 bg-white/5 hover:bg-white/10 text-zinc-300 text-xs font-semibold rounded-xl transition-all border border-white/10 flex items-center gap-1.5 cursor-pointer"
         >
           <ArrowLeft className="w-4 h-4" />
           <span>အဆင့် ၅ သို့</span>
@@ -780,541 +195,381 @@ export const Step8ExportStudio: React.FC<Step8ExportStudioProps> = ({
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* LEFT COLUMN: Resolution & Export Button */}
-        <div className="lg:col-span-5 space-y-5">
-          <div className="glass-panel rounded-2xl p-5 shadow-2xl space-y-4">
-            <h3 className="text-sm font-bold text-white flex items-center gap-2 font-display">
-              <Film className="w-4 h-4 text-cyan-400" />
-              <span>Video Resolution & Aspect Ratio</span>
-            </h3>
-
-            <div className="grid grid-cols-2 gap-2.5">
-              {[
-                { id: 'tiktok', label: 'TikTok / Shorts', res: '1080x1920 (9:16)', icon: '📱' },
-                { id: 'youtube', label: 'YouTube HD', res: '1920x1080 (16:9)', icon: '💻' },
-                { id: 'portrait', label: 'FB / IG Feed', res: '1080x1350 (4:5)', icon: '🖼️' },
-                { id: 'square', label: 'Square Post', res: '1080x1080 (1:1)', icon: '⏹️' },
-              ].map((s) => (
-                <button
-                  key={s.id}
-                  type="button"
-                  onClick={() => {
-                    const id = s.id as 'tiktok' | 'youtube' | 'square' | 'portrait';
-                    setFrameSize(id);
-                    const ratioMap: Record<string, any> = {
-                      tiktok: '9:16',
-                      youtube: '16:9',
-                      portrait: '4:5',
-                      square: '1:1',
-                    };
-                    if (ratioMap[id]) {
-                      setProject((prev) => ({ ...prev, aspectRatio: ratioMap[id] }));
-                    }
-                  }}
-                  className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
-                    frameSize === s.id
-                      ? 'bg-cyan-500/15 border-cyan-400/50 text-cyan-200 ring-1 ring-cyan-400/30'
-                      : 'bg-white/5 border-white/5 text-zinc-400 hover:text-white hover:bg-white/10'
-                  }`}
-                >
-                  <div className="flex items-center gap-1.5 font-bold text-xs">
-                    <span>{s.icon}</span>
-                    <span>{s.label}</span>
-                  </div>
-                  <span className="block text-[10px] text-zinc-400 font-mono mt-1">{s.res}</span>
-                </button>
-              ))}
+        {/* TOP LEFT: Source Video Panel */}
+        <div className="lg:col-span-6 space-y-4">
+          <div className="glass-panel rounded-3xl p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between">
+              <span className="px-3 py-1 bg-cyan-500/20 text-cyan-300 text-xs font-bold rounded-lg border border-cyan-500/30 flex items-center gap-1.5">
+                <Video className="w-3.5 h-3.5" /> Source Video & Edits Preview
+              </span>
+              <span className="px-2.5 py-1 bg-zinc-800 text-zinc-300 text-[11px] font-mono font-bold rounded-md">
+                HD
+              </span>
             </div>
 
-            {/* Video Resolution Quality Options */}
-            <div className="space-y-1.5 pt-1">
-              <label className="text-xs font-bold text-zinc-200 flex items-center justify-between">
-                <span>Video Resolution Quality:</span>
-                <span className="text-[11px] font-mono text-cyan-300 font-bold bg-cyan-500/10 px-2 py-0.5 rounded border border-cyan-500/20">
-                  {getCanvasDimensions(frameSize, exportQuality).label}
-                </span>
-              </label>
-              <div className="grid grid-cols-4 gap-1.5">
-                {[
-                  { id: '1080p', label: '1080p Full HD', desc: 'Standard' },
-                  { id: '720p', label: '720p HD', desc: 'Fast' },
-                  { id: '480p', label: '480p SD', desc: 'Small' },
-                  { id: '4k', label: '4K Ultra', desc: 'Crisp' },
-                ].map((q) => (
-                  <button
-                    key={q.id}
-                    type="button"
-                    onClick={() => setExportQuality(q.id as any)}
-                    className={`py-2 px-1 rounded-xl border text-center transition-all cursor-pointer ${
-                      exportQuality === q.id
-                        ? 'bg-gradient-to-r from-cyan-500/20 to-teal-500/20 border-cyan-400 text-cyan-200 font-bold ring-1 ring-cyan-400/40 shadow-sm'
-                        : 'bg-white/5 border-white/5 text-zinc-400 hover:text-white hover:bg-white/10'
-                    }`}
-                  >
-                    <span className="block text-xs font-mono font-bold">{q.id.toUpperCase()}</span>
-                    <span className="block text-[9px] text-zinc-400 mt-0.5">{q.desc}</span>
-                  </button>
-                ))}
-              </div>
+            <div className="rounded-2xl border border-zinc-800 bg-black/50 relative">
+              {project.videoUrl ? (
+                <VideoPlayerView
+                  project={project}
+                  setProject={setProject}
+                  activeSegment={project.segments.find(s => project.currentTime >= s.startTime && project.currentTime <= s.endTime) || project.segments[0] || null}
+                  forceMuteOriginalAudio={true}
+                />
+              ) : (
+                <div className="text-xs text-zinc-500 p-8 text-center">No video loaded in Step 2</div>
+              )}
             </div>
 
-            {/* Video Stats */}
-            <div className="glass-card rounded-xl p-3.5 space-y-2 text-xs">
-              <div className="flex justify-between text-zinc-400">
-                <span>File Name:</span>
-                <span className="text-zinc-200 font-semibold truncate max-w-[180px]">
-                  {project.videoName || 'custom_upload.mp4'}
-                </span>
-              </div>
-              <div className="flex justify-between text-zinc-400">
-                <span>Duration:</span>
-                <span className="text-cyan-300 font-mono font-semibold">
-                  {Math.round(project.videoDuration || 0)}s
-                </span>
-              </div>
-              <div className="flex justify-between text-zinc-400">
-                <span>Output Canvas:</span>
-                <span className="text-cyan-300 font-mono font-semibold">
-                  {getCanvasDimensions(frameSize, exportQuality).width}x{getCanvasDimensions(frameSize, exportQuality).height}
-                </span>
-              </div>
-              <div className="flex justify-between text-zinc-400">
-                <span>Myanmar Subtitles:</span>
-                <span className="text-emerald-400 font-mono font-semibold">
-                  {project.segments.length} segments
-                </span>
-              </div>
-            </div>
-
-            {/* Audio Mixing & Mute Controls (မူရင်းအသံ & Voice Clone ချိန်ညှိမှု) */}
-            <div className="glass-card rounded-xl p-4 space-y-3 border border-cyan-500/25 bg-zinc-950/70 shadow-lg">
-              <div className="flex items-center justify-between border-b border-white/10 pb-2">
-                <span className="text-xs font-bold text-white flex items-center gap-1.5 font-display">
-                  <Volume2 className="w-4 h-4 text-cyan-400" />
-                  <span>Audio Mix & Mute Controls (အသံချိန်ညှိမှု)</span>
-                </span>
-                <span className="text-[10px] text-zinc-400 font-mono">
-                  {project.segments.filter((s) => s.audioUrl).length} Voices Ready
-                </span>
+            {/* Video Stats Footer */}
+            <div className="grid grid-cols-3 gap-2.5 pt-1">
+              <div className="glass-card rounded-xl p-3 flex items-center gap-2.5">
+                <Clock className="w-4 h-4 text-cyan-400 shrink-0" />
+                <div>
+                  <span className="text-[10px] text-zinc-400 block">Duration</span>
+                  <span className="text-xs font-mono font-bold text-white">{formatTime(durationSec)}</span>
+                </div>
               </div>
 
-              {/* Original Video Audio Track */}
-              <div className="space-y-2 p-2.5 rounded-lg bg-zinc-900/90 border border-zinc-800">
-                <div className="flex items-center justify-between">
-                  <button
-                    type="button"
-                    onClick={() => setProject((prev) => ({ ...prev, isMuted: !prev.isMuted }))}
-                    className={`px-2.5 py-1 rounded-lg border transition-all cursor-pointer flex items-center gap-1.5 text-[11px] font-bold ${
-                      project.isMuted
-                        ? 'bg-rose-500/20 border-rose-500/50 text-rose-300'
-                        : 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
-                    }`}
-                    title={project.isMuted ? 'မူရင်းအသံ ပြန်ဖွင့်မည် (Unmute)' : 'မူရင်းအသံ ပိတ်မည် (Mute)'}
-                  >
-                    {project.isMuted ? (
-                      <>
-                        <VolumeX className="w-3.5 h-3.5 text-rose-400 shrink-0" />
-                        <span>🔇 မူရင်းအသံ Mute ထားသည် (Off)</span>
-                      </>
-                    ) : (
-                      <>
-                        <Volume2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                        <span>🔊 မူရင်းအသံ ဖွင့်ထားသည် (On)</span>
-                      </>
-                    )}
-                  </button>
-                  <span className="text-[11px] font-mono font-bold text-zinc-300">
-                    {project.isMuted ? '0%' : `${Math.round((project.volume ?? 1.0) * 100)}%`}
+              <div className="glass-card rounded-xl p-3 flex items-center gap-2.5">
+                <Film className="w-4 h-4 text-emerald-400 shrink-0" />
+                <div>
+                  <span className="text-[10px] text-zinc-400 block">Resolution</span>
+                  <span className="text-xs font-mono font-bold text-white">
+                    {project.videoInspection?.resolution || (project.aspectRatio === '9:16' ? '1080×1920' : '1920×1080')}
                   </span>
                 </div>
-
-                <div className="flex items-center gap-2 pt-0.5">
-                  <span className="text-[10px] text-zinc-400 shrink-0">Vol:</span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={1}
-                    step={0.05}
-                    value={project.isMuted ? 0 : (project.volume ?? 1.0)}
-                    onChange={(e) => {
-                      const val = parseFloat(e.target.value);
-                      setProject((prev) => ({
-                        ...prev,
-                        volume: val,
-                        isMuted: val === 0,
-                      }));
-                    }}
-                    className="flex-1 h-1.5 bg-zinc-800 rounded accent-cyan-400 cursor-pointer"
-                  />
-                </div>
-
-                {project.useExtractedBgm && project.extractedBgmUrl ? (
-                  <p className="text-[10px] text-amber-300 font-myanmar leading-tight flex items-center gap-1 bg-amber-500/10 p-1.5 rounded border border-amber-500/20">
-                    <span>✓ BGM Only (Vocals Removed) Mode ဖွင့်ထားသဖြင့် မူရင်းလူအသံများကို အလိုအလျောက် Mute လုပ်ထားပါသည်။</span>
-                  </p>
-                ) : project.isMuted || (project.segments.some((s) => Boolean(s.audioUrl)) && !project.isVoiceMuted) ? (
-                  <p className="text-[10px] text-emerald-300 font-myanmar leading-tight flex items-center gap-1 bg-emerald-500/10 p-1.5 rounded border border-emerald-500/20">
-                    <span>✓ Voice Clone ဖွင့်ထားသဖြင့် အသံ ၂ သံမထပ်စေရန် မူရင်းဗီဒီယိုအသံကို အလိုအလျောက် Mute ထားပါသည် (တစ်သံတည်းသာ ထွက်ပါမည်)။</span>
-                  </p>
-                ) : (
-                  <p className="text-[10px] text-zinc-400 font-myanmar leading-tight">
-                    မူရင်းဗီဒီယိုအသံဖြင့် Export ပြုလုပ်မည်ဖြစ်ပါသည်။
-                  </p>
-                )}
               </div>
 
-              {/* Vocal-Removed Original Background Music & SFX Extractor */}
-              <div className="space-y-2 p-2.5 rounded-lg bg-amber-950/20 border border-amber-500/30">
-                <div className="flex items-center justify-between gap-2 flex-wrap">
-                  <div className="flex items-center gap-1.5">
-                    <Music className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                    <span className="text-[11px] font-bold text-amber-200">
-                      Original BGM Only (လူအသံဖယ်ရှားပြီး နောက်ခံတီးလုံး)
-                    </span>
-                  </div>
-
-                  {project.extractedBgmUrl ? (
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setProject((prev) => ({
-                            ...prev,
-                            useExtractedBgm: !prev.useExtractedBgm,
-                          }))
-                        }
-                        className={`px-2 py-0.5 rounded-md text-[10px] font-bold border transition-all cursor-pointer ${
-                          project.useExtractedBgm
-                            ? 'bg-amber-400 text-zinc-950 border-amber-300 shadow'
-                            : 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:text-white'
-                        }`}
-                      >
-                        {project.useExtractedBgm ? '🎵 BGM Only: ON' : 'Use BGM Only'}
-                      </button>
-
-                      <a
-                        href={project.extractedBgmUrl}
-                        download={`${(project.videoName || 'video').replace(/\.[^/.]+$/, '')}_bgm_only.mp3`}
-                        className="px-2 py-0.5 rounded-md bg-white/10 hover:bg-white/20 text-zinc-200 text-[10px] font-bold transition-all"
-                        title="Download extracted background music MP3"
-                      >
-                        .MP3
-                      </a>
-                    </div>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={handleExtractBgmInExport}
-                      disabled={isExtractingBgm || (!project.videoUrl && !project.videoFile)}
-                      className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-400/50 text-[10px] font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                    >
-                      {isExtractingBgm ? (
-                        <>
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                          <span>ခွဲထုတ်နေသည်...</span>
-                        </>
-                      ) : (
-                        <>
-                          <Music className="w-3 h-3" />
-                          <span>Extract BGM Only</span>
-                        </>
-                      )}
-                    </button>
-                  )}
-                </div>
-
-                {bgmExtractError && (
-                  <p className="text-[10px] text-rose-300 font-myanmar">{bgmExtractError}</p>
-                )}
-
-                {project.extractedBgmUrl && (
-                  <div className="space-y-1.5">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] text-amber-300 shrink-0">BGM Vol:</span>
-                      <input
-                        type="range"
-                        min={0}
-                        max={1}
-                        step={0.05}
-                        value={project.bgmVolume ?? 0.35}
-                        onChange={(e) => {
-                          const val = parseFloat(e.target.value);
-                          setProject((prev) => ({
-                            ...prev,
-                            bgmVolume: val,
-                            useExtractedBgm: val > 0 ? true : prev.useExtractedBgm,
-                          }));
-                        }}
-                        className="flex-1 h-1.5 bg-zinc-800 rounded accent-amber-400 cursor-pointer"
-                      />
-                      <span className="text-[10px] font-mono font-bold text-amber-300 w-8 text-right">
-                        {Math.round((project.bgmVolume ?? 0.35) * 100)}%
-                      </span>
-                    </div>
-                    <p className="text-[10px] text-amber-200/80 font-myanmar leading-tight">
-                      {project.useExtractedBgm
-                        ? '✓ Narrator စကားပြောနေစဉ် BGM အသံကို အလိုအလျောက် တိုးချပေးပြီး မူရင်းလူအသံ 0% ပိတ်ပေးပါမည်။'
-                        : 'BGM Only ကို နှိပ်ဖွင့်ပါက မူရင်းလူအသံမပါဘဲ တီးလုံးသီးသန့် Export ထုတ်ပေးပါမည်။'}
-                    </p>
-                  </div>
-                )}
-              </div>
-
-              {/* Cloned Voice Audio Track */}
-              <div className="space-y-2 p-2.5 rounded-lg bg-zinc-900/90 border border-zinc-800">
-                <div className="flex items-center justify-between">
-                  <button
-                    type="button"
-                    onClick={() => setProject((prev) => ({ ...prev, isVoiceMuted: !prev.isVoiceMuted }))}
-                    className={`px-2.5 py-1 rounded-lg border transition-all cursor-pointer flex items-center gap-1.5 text-[11px] font-bold ${
-                      project.isVoiceMuted
-                        ? 'bg-rose-500/20 border-rose-500/50 text-rose-300'
-                        : 'bg-teal-500/20 border-teal-500/50 text-teal-300'
-                    }`}
-                    title={project.isVoiceMuted ? 'Voice Clone ဖွင့်မည်' : 'Voice Clone ပိတ်မည်'}
-                  >
-                    {project.isVoiceMuted ? (
-                      <>
-                        <VolumeX className="w-3.5 h-3.5 text-rose-400 shrink-0" />
-                        <span>🔇 Voice Clone Mute</span>
-                      </>
-                    ) : (
-                      <>
-                        <Mic className="w-3.5 h-3.5 text-teal-400 shrink-0" />
-                        <span>🎙️ Voice Clone ဖွင့်ထားသည် (On)</span>
-                      </>
-                    )}
-                  </button>
-                  <span className="text-[11px] font-mono font-bold text-emerald-400">
-                    {project.isVoiceMuted ? '0%' : `${Math.round((project.voiceVolume ?? 1.0) * 100)}%`}
+              <div className="glass-card rounded-xl p-3 flex items-center gap-2.5">
+                <Download className="w-4 h-4 text-amber-400 shrink-0" />
+                <div>
+                  <span className="text-[10px] text-zinc-400 block">File Size</span>
+                  <span className="text-xs font-mono font-bold text-white">
+                    {project.videoFile?.size
+                      ? `${(project.videoFile.size / (1024 * 1024)).toFixed(1)} MB`
+                      : project.videoInspection?.filesize
+                      ? `${(project.videoInspection.filesize / (1024 * 1024)).toFixed(1)} MB`
+                      : '—'}
                   </span>
                 </div>
-
-                <div className="flex items-center gap-2 pt-0.5">
-                  <span className="text-[10px] text-zinc-400 shrink-0">Vol:</span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={1.5}
-                    step={0.05}
-                    value={project.isVoiceMuted ? 0 : (project.voiceVolume ?? 1.0)}
-                    onChange={(e) => {
-                      const val = parseFloat(e.target.value);
-                      setProject((prev) => ({
-                        ...prev,
-                        voiceVolume: val,
-                        isVoiceMuted: val === 0,
-                      }));
-                    }}
-                    className="flex-1 h-1.5 bg-zinc-800 rounded accent-emerald-400 cursor-pointer"
-                  />
-                </div>
               </div>
-            </div>
-
-            {/* Render MP4 Button */}
-            {isExporting ? (
-              <div className="space-y-3 pt-2">
-                <div className="flex items-center justify-between text-xs font-mono text-cyan-300">
-                  <span className="animate-pulse">{exportStatusText}</span>
-                  <span className="font-bold text-cyan-400">{exportProgress}%</span>
-                </div>
-                <div className="w-full h-3 bg-zinc-950 rounded-full overflow-hidden p-0.5 border border-white/10">
-                  <div
-                    className="h-full bg-gradient-to-r from-cyan-400 to-teal-400 rounded-full transition-all duration-200"
-                    style={{ width: `${exportProgress}%` }}
-                  />
-                </div>
-              </div>
-            ) : (
-              <button
-                onClick={handleExportMp4Video}
-                className="w-full py-3.5 bg-gradient-to-r from-cyan-400 via-teal-300 to-emerald-400 hover:opacity-90 text-zinc-950 font-bold text-sm rounded-xl transition-all shadow-lg shadow-cyan-500/20 flex items-center justify-center gap-2 cursor-pointer"
-              >
-                <Download className="w-5 h-5 stroke-[2.5]" />
-                <span>Export MP4 Video ({exportQuality.toUpperCase()})</span>
-              </button>
-            )}
-
-            {currentExportUrl && (
-              <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-emerald-300 flex items-center gap-1.5">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                    <span>MP4 Export ပြီးဆုံးပါပြီ (Download Ready)</span>
-                  </span>
-                </div>
-
-                {/* Direct Video Player Preview for verified playback */}
-                <div className="rounded-xl overflow-hidden border border-emerald-500/30 bg-black aspect-video flex items-center justify-center">
-                  <video
-                    src={currentExportUrl}
-                    controls
-                    className="w-full h-full object-contain"
-                  />
-                </div>
-
-                {/* RESOLUTION SELECTOR RIGHT NEXT TO DOWNLOAD BUTTON */}
-                <div className="flex items-center gap-2 pt-1">
-                  <div className="flex-1 flex items-center gap-1.5 p-1 bg-zinc-950 border border-emerald-500/30 rounded-xl">
-                    <span className="text-[10px] text-zinc-400 font-mono px-2 shrink-0">Res:</span>
-                    <select
-                      value={exportQuality}
-                      onChange={(e) => setExportQuality(e.target.value as any)}
-                      className="w-full bg-zinc-900 text-cyan-300 font-bold font-mono text-xs py-2 px-2 rounded-lg border border-zinc-700 focus:outline-none focus:border-cyan-400 cursor-pointer"
-                      title="Select video resolution"
-                    >
-                      <option value="1080p">1080p Full HD ({getCanvasDimensions(frameSize, '1080p').width}x{getCanvasDimensions(frameSize, '1080p').height})</option>
-                      <option value="720p">720p HD ({getCanvasDimensions(frameSize, '720p').width}x{getCanvasDimensions(frameSize, '720p').height})</option>
-                      <option value="480p">480p SD ({getCanvasDimensions(frameSize, '480p').width}x{getCanvasDimensions(frameSize, '480p').height})</option>
-                      <option value="4k">4K Ultra HD ({getCanvasDimensions(frameSize, '4k').width}x{getCanvasDimensions(frameSize, '4k').height})</option>
-                    </select>
-                  </div>
-
-                  <a
-                    href={currentExportUrl}
-                    download={currentExportFilename}
-                    className="py-3 px-4 bg-gradient-to-r from-emerald-400 to-teal-400 hover:opacity-95 text-zinc-950 font-bold text-xs rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/25 cursor-pointer shrink-0"
-                  >
-                    <Download className="w-4 h-4 stroke-[2.5]" />
-                    <span>Download MP4</span>
-                  </a>
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="glass-panel rounded-2xl p-5 shadow-2xl space-y-3">
-            <h3 className="text-xs font-bold text-white flex items-center gap-2 font-display">
-              <FileText className="w-4 h-4 text-emerald-400" />
-              <span>Subtitles & Project File Backup</span>
-            </h3>
-
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={handleDownloadSrt}
-                disabled={project.segments.length === 0}
-                className="py-2.5 px-3 bg-white/5 hover:bg-white/10 border border-white/10 text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
-              >
-                <Download className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Download SRT</span>
-              </button>
-
-              <button
-                onClick={() => {
-                  const json = JSON.stringify(project, null, 2);
-                  downloadFile(json, `${project.videoName || 'project'}_state.json`, 'application/json');
-                }}
-                className="py-2.5 px-3 bg-white/5 hover:bg-white/10 border border-white/10 text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                <Download className="w-3.5 h-3.5 text-cyan-400" />
-                <span>Save Project</span>
-              </button>
             </div>
           </div>
         </div>
 
-        {/* RIGHT COLUMN: Video Viewport & History */}
-        <div className="lg:col-span-7 space-y-6">
-          <div className="glass-panel rounded-2xl p-5 shadow-2xl space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-bold text-white flex items-center gap-2 font-display">
-                <Video className="w-4 h-4 text-cyan-400" />
-                <span>Edited Custom Upload Video</span>
-              </h3>
-              <span className="text-[10px] font-mono text-cyan-300 bg-cyan-500/10 border border-cyan-500/20 px-2 py-0.5 rounded-full">
-                {getCanvasDimensions(frameSize).width}x{getCanvasDimensions(frameSize).height}
-              </span>
+        {/* TOP RIGHT: Export Settings Panel */}
+        <div className="lg:col-span-6 space-y-4">
+          <div className="glass-panel rounded-3xl p-6 shadow-2xl space-y-5">
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <div>
+                <h3 className="text-sm font-bold text-white flex items-center gap-2 font-display">
+                  <Settings className="w-4 h-4 text-cyan-400" />
+                  <span>Export Settings</span>
+                </h3>
+                <p className="text-[11px] text-zinc-400 mt-0.5">Choose your preset and customize options</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setPreset('youtube_shorts');
+                  setResolution('1080p');
+                  setFps('30');
+                  setQuality('High');
+                }}
+                className="px-3 py-1.5 bg-white/5 hover:bg-white/10 text-zinc-300 text-xs font-semibold rounded-xl border border-white/10 flex items-center gap-1.5 cursor-pointer"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Reset</span>
+              </button>
             </div>
 
-            <VideoPlayerView
-              project={project}
-              setProject={setProject}
-              activeSegment={
-                findActiveSegmentForTime(
-                  project.segments,
-                  project.currentTime,
-                  project.voicePlaybackRate || 1.0,
-                  false
-                )?.segment || null
-              }
-            />
-          </div>
+            {/* Export Preset Selection */}
+            <div className="space-y-2">
+              <label className="text-xs font-semibold text-zinc-300 block">Export Preset</label>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                {[
+                  { id: 'tiktok', label: 'TikTok', ratio: '9:16' },
+                  { id: 'youtube_shorts', label: 'YouTube Shorts', ratio: '9:16' },
+                  { id: 'youtube', label: 'YouTube', ratio: '16:9' },
+                  { id: 'facebook', label: 'Facebook', ratio: '16:9' },
+                ].map((p) => {
+                  const isSel = preset === p.id;
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => setPreset(p.id as any)}
+                      className={`p-3 rounded-2xl border text-center transition-all cursor-pointer flex flex-col items-center justify-center gap-1 ${
+                        isSel
+                          ? 'bg-cyan-500/20 border-cyan-400 text-cyan-200 ring-2 ring-cyan-400/40 shadow-lg'
+                          : 'bg-zinc-950/80 border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-700'
+                      }`}
+                    >
+                      <span className="font-bold text-xs text-white">{p.label}</span>
+                      <span className="text-[10px] text-zinc-400 font-mono">{p.ratio}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
 
-          <div className="glass-panel rounded-2xl p-5 shadow-2xl space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <History className="w-4 h-4 text-cyan-400" />
-                <h3 className="text-sm font-bold text-white font-display">
-                  Export Download History
-                </h3>
+            {/* Dropdowns / Options Grid */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-zinc-400">Resolution</label>
+                <select
+                  value={resolution}
+                  onChange={(e) => setResolution(e.target.value as any)}
+                  className="w-full bg-zinc-950 text-xs text-zinc-200 font-mono py-2.5 px-3 rounded-xl border border-zinc-800 focus:outline-none focus:border-cyan-400 cursor-pointer"
+                >
+                  <option value="480p">480P (854×480)</option>
+                  <option value="720p">720P (1280×720)</option>
+                  <option value="1080p">1080P (1920×1080)</option>
+                  <option value="4k">4K (3840×2160)</option>
+                </select>
               </div>
 
-              {historyItems.length > 0 && (
-                <button
-                  onClick={handleClearHistory}
-                  className="text-xs text-rose-400 hover:underline cursor-pointer"
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-zinc-400">Frame Rate</label>
+                <select
+                  value={fps}
+                  onChange={(e) => setFps(e.target.value)}
+                  className="w-full bg-zinc-950 text-xs text-zinc-200 font-mono py-2.5 px-3 rounded-xl border border-zinc-800 focus:outline-none focus:border-cyan-400 cursor-pointer"
                 >
-                  Clear History
+                  <option value="24">24 FPS</option>
+                  <option value="30">30 FPS</option>
+                  <option value="60">60 FPS</option>
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-zinc-400">Quality</label>
+                <select
+                  value={quality}
+                  onChange={(e) => setQuality(e.target.value)}
+                  className="w-full bg-zinc-950 text-xs text-zinc-200 font-mono py-2.5 px-3 rounded-xl border border-zinc-800 focus:outline-none focus:border-cyan-400 cursor-pointer"
+                >
+                  <option value="Low">Low</option>
+                  <option value="Medium">Medium</option>
+                  <option value="High">High</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-zinc-400">Video Codec</label>
+                <select
+                  value={videoCodec}
+                  onChange={(e) => setVideoCodec(e.target.value)}
+                  className="w-full bg-zinc-950 text-xs text-zinc-200 font-mono py-2.5 px-3 rounded-xl border border-zinc-800 focus:outline-none focus:border-cyan-400 cursor-pointer"
+                >
+                  <option value="H.264 (Recommended)">H.264 (Recommended)</option>
+                  <option value="H.265 (HEVC)">H.265 (HEVC)</option>
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-zinc-400">Audio Codec</label>
+                <select
+                  value={audioCodec}
+                  onChange={(e) => setAudioCodec(e.target.value)}
+                  className="w-full bg-zinc-950 text-xs text-zinc-200 font-mono py-2.5 px-3 rounded-xl border border-zinc-800 focus:outline-none focus:border-cyan-400 cursor-pointer"
+                >
+                  <option value="AAC (Standard)">AAC (Standard)</option>
+                  <option value="MP3">MP3</option>
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-zinc-400">Audio Bitrate</label>
+                <select
+                  value={audioBitrate}
+                  onChange={(e) => setAudioBitrate(e.target.value)}
+                  className="w-full bg-zinc-950 text-xs text-zinc-200 font-mono py-2.5 px-3 rounded-xl border border-zinc-800 focus:outline-none focus:border-cyan-400 cursor-pointer"
+                >
+                  <option value="128 kbps">128 kbps</option>
+                  <option value="192 kbps">192 kbps</option>
+                  <option value="320 kbps">320 kbps</option>
+                </select>
+              </div>
+            </div>
+
+            <button
+              onClick={handleStartExport}
+              disabled={isExporting}
+              className="w-full py-4 bg-gradient-to-r from-cyan-400 via-teal-300 to-blue-500 hover:opacity-95 disabled:opacity-50 text-zinc-950 font-black text-sm rounded-2xl transition-all shadow-xl shadow-cyan-500/25 flex items-center justify-center gap-2.5 cursor-pointer mt-2"
+            >
+              <Film className="w-5 h-5 stroke-[2.5]" />
+              <span>Export Video</span>
+            </button>
+          </div>
+        </div>
+
+        {/* BOTTOM LEFT: Export Progress Panel */}
+        <div className="lg:col-span-6 space-y-4">
+          <div className="glass-panel rounded-3xl p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <span className="text-xs font-bold text-white flex items-center gap-2">
+                <RotateCw className={`w-4 h-4 text-cyan-400 ${isExporting ? 'animate-spin' : ''}`} />
+                <span>Export Progress</span>
+              </span>
+              {isExporting && (
+                <button
+                  type="button"
+                  onClick={handleCancelExport}
+                  className="px-3 py-1 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-xs font-bold rounded-xl border border-rose-500/30 flex items-center gap-1.5 cursor-pointer"
+                >
+                  <XCircle className="w-3.5 h-3.5" />
+                  <span>Cancel Export</span>
                 </button>
               )}
             </div>
 
-            {historyItems.length === 0 ? (
-              <div className="glass-card rounded-xl p-8 text-center text-xs text-zinc-400 space-y-1">
-                <Clock className="w-8 h-8 text-zinc-600 mx-auto mb-2" />
-                <p>ယခု စက်ရှင်တွင် MP4 ဗီဒီယို ထုတ်ယူထားခြင်း မရှိသေးပါ။</p>
-              </div>
-            ) : (
-              <div className="space-y-3 max-h-[380px] overflow-y-auto pr-1">
-                {historyItems.map((item) => (
-                  <div
-                    key={item.id}
-                    className="glass-card p-3.5 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3"
-                  >
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <Video className="w-4 h-4 text-cyan-400 shrink-0" />
-                        <span className="text-xs font-bold text-white truncate max-w-[200px]">
-                          {item.filename}
-                        </span>
-                        <span className="text-[10px] font-mono text-cyan-300 bg-cyan-500/10 px-2 py-0.5 rounded-full border border-cyan-500/20">
-                          {item.resolution}
-                        </span>
-                      </div>
-
-                      <div className="flex items-center gap-3 text-[11px] text-zinc-400 font-mono">
-                        <span>{item.timestamp}</span>
-                        <span>• {item.duration}s</span>
-                        <span>• {item.sizeMb}</span>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-2 shrink-0">
-                      {item.blobUrl && (
-                        <a
-                          href={item.blobUrl}
-                          download={item.filename}
-                          className="px-3 py-1.5 bg-emerald-400 hover:bg-emerald-300 text-zinc-950 font-bold text-xs rounded-xl transition-all flex items-center gap-1.5 shadow-md shadow-emerald-500/20 cursor-pointer"
-                        >
-                          <Download className="w-3.5 h-3.5" />
-                          <span>Download</span>
-                        </a>
-                      )}
-
-                      <button
-                        onClick={() => handleDeleteHistoryItem(item.id)}
-                        className="p-1.5 bg-white/5 hover:bg-rose-500/20 text-zinc-400 hover:text-rose-300 rounded-lg transition-colors cursor-pointer"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
+            <div className="grid grid-cols-1 sm:grid-cols-12 gap-5 items-center">
+              {/* Circular Progress Gauge */}
+              <div className="sm:col-span-4 flex flex-col items-center justify-center">
+                <div className="relative w-24 h-24 flex items-center justify-center">
+                  <svg className="w-full h-full transform -rotate-90" viewBox="0 0 36 36">
+                    <path
+                      className="text-zinc-800"
+                      strokeWidth="3.5"
+                      stroke="currentColor"
+                      fill="none"
+                      d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                    />
+                    <path
+                      className="text-cyan-400 transition-all duration-300"
+                      strokeDasharray={`${progressPct}, 100`}
+                      strokeWidth="3.5"
+                      strokeLinecap="round"
+                      stroke="currentColor"
+                      fill="none"
+                      d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                    />
+                  </svg>
+                  <div className="absolute text-sm font-black font-mono text-white">
+                    {progressPct}%
                   </div>
-                ))}
+                </div>
               </div>
-            )}
+
+              {/* Progress Text & Status */}
+              <div className="sm:col-span-8 space-y-3">
+                <div>
+                  <h4 className="text-sm font-bold text-white">{statusText}</h4>
+                  <p className="text-xs text-zinc-400 mt-0.5">Applying effects and encoding with FFmpeg</p>
+                </div>
+
+                <div className="w-full h-2 bg-zinc-900 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-r from-cyan-400 to-teal-400 transition-all duration-300 rounded-full"
+                    style={{ width: `${progressPct}%` }}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400 pt-1">
+                  <span className="flex items-center gap-1">
+                    <Clock className="w-3.5 h-3.5 text-cyan-400" /> Elapsed: 00:00:{String(elapsedSecs).padStart(2, '0')}
+                  </span>
+                  <span>Remaining: ~00:00:{String(etaSecs).padStart(2, '0')}</span>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
+
+        {/* BOTTOM RIGHT: Result Preview Panel */}
+        <div className="lg:col-span-6 space-y-4">
+          <div className="glass-panel rounded-3xl p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <span className="text-xs font-bold text-emerald-300 flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                <span>Result Preview</span>
+              </span>
+              <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-2.5 py-0.5 rounded border border-emerald-500/20">
+                Ready
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-12 gap-4 items-center">
+              <div className="sm:col-span-5 rounded-2xl overflow-hidden border border-emerald-500/30 bg-black aspect-video flex items-center justify-center relative">
+                {exportResult ? (
+                  <video src={exportResult.downloadUrl} controls className="w-full h-full object-contain" />
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center bg-zinc-950 text-zinc-600 text-xs">
+                    Preview
+                  </div>
+                )}
+              </div>
+
+              <div className="sm:col-span-7 space-y-1.5 text-xs font-mono">
+                <div className="flex items-center gap-2 text-zinc-300">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
+                  <span className="truncate">Output: {exportResult ? exportResult.filename : 'recap_miyo_1080p.mp4'}</span>
+                </div>
+                <div className="flex items-center gap-2 text-zinc-300">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
+                  <span>Size: {exportResult ? exportResult.fileSizeMb : '12.4 MB'}</span>
+                </div>
+                <div className="flex items-center gap-2 text-zinc-300">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
+                  <span>Resolution: {(() => { const d = getExportDimensions(); return `${d.width}×${d.height}`; })()}</span>
+                </div>
+                <div className="flex items-center gap-2 text-zinc-300">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
+                  <span>Duration: {formatTime(durationSec)}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+              <a
+                href={exportResult ? exportResult.downloadUrl : '#'}
+                download={exportResult ? exportResult.filename : 'recap_miyo_1080p.mp4'}
+                onClick={(e) => {
+                  if (!exportResult) {
+                    e.preventDefault();
+                    alert('Please export the video first.');
+                  }
+                }}
+                className="py-3 bg-gradient-to-r from-cyan-400 to-blue-500 hover:opacity-95 text-zinc-950 font-bold text-xs rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/25 cursor-pointer"
+              >
+                <Download className="w-4 h-4 stroke-[2.5]" />
+                <span>Download Video</span>
+              </a>
+
+              <button
+                type="button"
+                onClick={() => {
+                  if (exportResult) {
+                    const v = document.createElement('video');
+                    v.src = exportResult.downloadUrl;
+                    v.play().catch(() => {});
+                  } else {
+                    alert('Please export the video first.');
+                  }
+                }}
+                className="py-3 bg-white/5 hover:bg-white/10 border border-white/10 text-white font-bold text-xs rounded-xl transition-all flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <Play className="w-4 h-4 fill-current" />
+                <span>Play Again</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Footer Banners */}
+      <div className="glass-panel rounded-2xl p-4 shadow-xl flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
+        <span className="text-amber-300 font-semibold flex items-center gap-2">
+          <span>⭐</span>
+          <span>Recap-MiYO • Studio HD MP4 &amp; Audio Exporter</span>
+        </span>
+        <span className="text-pink-300 font-semibold flex items-center gap-1.5">
+          <span>💜</span>
+          <span>Recap-MiYO • Make Your Video Amazing!</span>
+        </span>
       </div>
     </div>
   );
